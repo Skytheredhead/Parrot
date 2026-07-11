@@ -1,0 +1,187 @@
+services:
+  spacetimedb:
+    image: ${SPACETIMEDB_IMAGE:-clockworklabs/spacetime:v2.6.1@sha256:53100591a8bfd62c6e088e801b68e96871a8fc6e68eb4fb031bc6ac76f77a72e}
+    command:
+      - --root-dir=/stdb
+      - start
+      - --listen-addr=0.0.0.0:3000
+    restart: unless-stopped
+    stop_grace_period: 2m
+    init: true
+    ports:
+      - 127.0.0.1:${SPACETIMEDB_LOOPBACK_PORT:?set SPACETIMEDB_LOOPBACK_PORT}:3000
+    volumes:
+      - type: bind
+        source: ${SPACETIMEDB_DATA_DIR:?set SPACETIMEDB_DATA_DIR}
+        target: /stdb
+        bind:
+          create_host_path: false
+    networks:
+      - backend
+    healthcheck:
+      test:
+        - CMD
+        - spacetime
+        - --root-dir=/stdb
+        - server
+        - ping
+        - http://127.0.0.1:3000
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: ${CONTAINER_LOG_MAX_SIZE:-20m}
+        max-file: ${CONTAINER_LOG_MAX_FILES:-5}
+    pids_limit: ${SPACETIMEDB_PIDS_LIMIT:-512}
+    mem_limit: ${SPACETIMEDB_MEMORY_LIMIT:-8g}
+    cpus: ${SPACETIMEDB_CPU_LIMIT:-4.0}
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+      com.project-conversation.role: spacetimedb
+
+  gateway:
+    profiles: [gateway]
+    image: ${GATEWAY_IMAGE:?set GATEWAY_IMAGE to an immutable digest or the documented placeholder}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    init: true
+    depends_on:
+      spacetimedb:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:${GATEWAY_LOOPBACK_PORT:?set GATEWAY_LOOPBACK_PORT}:8080
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "8080"
+      LOG_LEVEL: ${GATEWAY_LOG_LEVEL:-info}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?set ALLOWED_ORIGINS}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+      OIDC_ISSUER: ${OIDC_ISSUER:?set OIDC_ISSUER}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:?set OIDC_AUDIENCE}
+      OIDC_JWKS_URI: ${OIDC_JWKS_URI:?set OIDC_JWKS_URI}
+      DB_TOKEN_AUDIENCE: ${DB_TOKEN_AUDIENCE:?set DB_TOKEN_AUDIENCE}
+      AGENT_STREAM_ORIGINS: ${AGENT_STREAM_ORIGINS:?set AGENT_STREAM_ORIGINS}
+      FILE_CAPABILITY_ORIGINS: ${FILE_CAPABILITY_ORIGINS:?set FILE_CAPABILITY_ORIGINS}
+      GATEWAY_ADAPTER_MODULE: ${GATEWAY_ADAPTER_MODULE:?set GATEWAY_ADAPTER_MODULE}
+      READINESS_TOKEN_FILE: /run/secrets/gateway_readiness_token
+      OTEL_ENABLED: ${GATEWAY_OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${GATEWAY_OTEL_TRACES_ENDPOINT:-http://otel-collector:4318/v1/traces}
+      OTEL_SERVICE_NAME: project-conversation-gateway
+    secrets:
+      - gateway_readiness_token
+    networks:
+      - backend
+      - telemetry
+      - egress
+    healthcheck:
+      test: [CMD, node, /usr/local/libexec/gateway-readiness.mjs]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: ${GATEWAY_PIDS_LIMIT:-256}
+    mem_limit: ${GATEWAY_MEMORY_LIMIT:-1g}
+    cpus: ${GATEWAY_CPU_LIMIT:-2.0}
+    logging:
+      driver: json-file
+      options:
+        max-size: ${CONTAINER_LOG_MAX_SIZE:-20m}
+        max-file: ${CONTAINER_LOG_MAX_FILES:-5}
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+      com.project-conversation.role: gateway
+
+  worker-disabled:
+    profiles: [worker-disabled]
+    image: ${WORKER_IMAGE:?set WORKER_IMAGE to the documented placeholder}
+    command: [sh, -c, "echo 'worker profile is intentionally disabled'; exit 78"]
+    deploy:
+      replicas: 0
+    restart: "no"
+    networks:
+      - backend
+      - egress
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+      com.project-conversation.role: worker-disabled
+
+  otel-collector:
+    profiles: [telemetry]
+    image: ${OTEL_COLLECTOR_IMAGE:-otel/opentelemetry-collector-contrib:0.156.0@sha256:125bdbeb7590cc1952c5b3430ecf14063568980c2c93d5b38676cc0446ed8108}
+    command: [--config=/etc/otelcol-contrib/config.yaml]
+    restart: unless-stopped
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:?set OTEL_EXPORTER_OTLP_ENDPOINT}
+    volumes:
+      - type: bind
+        source: ${OTEL_CONFIG_PATH:?set OTEL_CONFIG_PATH}
+        target: /etc/otelcol-contrib/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - telemetry
+      - egress
+    healthcheck:
+      test: [CMD, /otelcol-contrib, validate, --config=/etc/otelcol-contrib/config.yaml]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: ${OTEL_PIDS_LIMIT:-128}
+    mem_limit: ${OTEL_MEMORY_LIMIT:-512m}
+    cpus: ${OTEL_CPU_LIMIT:-1.0}
+    logging:
+      driver: json-file
+      options:
+        max-size: ${CONTAINER_LOG_MAX_SIZE:-20m}
+        max-file: ${CONTAINER_LOG_MAX_FILES:-5}
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+      com.project-conversation.role: telemetry
+
+secrets:
+  gateway_readiness_token:
+    file: ${GATEWAY_READINESS_TOKEN_FILE:?set GATEWAY_READINESS_TOKEN_FILE}
+
+networks:
+  backend:
+    internal: true
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+  telemetry:
+    internal: true
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+  egress:
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}

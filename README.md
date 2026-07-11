@@ -13,7 +13,10 @@ Spaces show substantial posts rather than an endless stream of every message. A 
 
 ## Current status
 
-The repository is in active development. Source research, product options, architecture ADRs, deployment planning, and the first backend foundations are being built before the selected frontend direction is implemented.
+The repository is in active development. Source research, product options, architecture ADRs, and
+the provider-neutral database, gateway, worker, authentication-integration, and guarded operations
+foundations are implemented and tested. Durable provider adapters and the selected frontend
+direction remain before a release candidate exists.
 
 Do not use this repository as a production service yet.
 
@@ -21,29 +24,39 @@ Do not use this repository as a production service yet.
 
 - `docs/research/` — source analysis, user evidence, competitive models, naming research, and product thesis.
 - `docs/decisions/` — architecture and product decision records.
-- `docs/operations/` — server audit and production plan.
+- `docs/operations/` — server audit, deployment, backup, restore, and recovery plans.
+- `infra/` — provider-neutral, loopback-only Compose candidate with guarded operations scripts.
 - `spacetimedb/` — Rust authoritative real-time module.
 - `services/gateway/` — browser-facing security, file, search, and agent gateway.
 - `services/worker/` — outbox-driven external effect workers.
+- `packages/db-bindings/` — generated, caller-safe TypeScript bindings for the Rust module.
 - `apps/web/` — selected Next.js application direction; intentionally not scaffolded until the visual decision is made.
 
 ## Prerequisites
 
 - Node.js 24.x
 - pnpm 10.10.x
-- Rust toolchain compatible with the pinned SpacetimeDB 2.6.1 module
+- Rust 1.93.0 with `wasm32-unknown-unknown`, pinned for the SpacetimeDB 2.6.1 module
 - Docker for isolated local and deployment preflight environments
 
 ## Local checks
 
-Install JavaScript dependencies after service manifests exist:
+Install the checksum-pinned Node.js runtime and JavaScript dependencies:
 
 ```bash
+scripts/install-node.sh
+scripts/install-spacetime-cli.sh
+scripts/install-binaryen.sh
+rustup toolchain install 1.93.0 --profile minimal --component rustfmt,clippy \
+  --target wasm32-unknown-unknown
+export PATH="$PWD/.tools/node/current/bin:$PWD/.tools/binaryen/version_130/bin:$HOME/.cargo/bin:$PATH"
+export RUSTUP_TOOLCHAIN=1.93.0
 pnpm install
+pnpm verify:toolchain
 pnpm check
 ```
 
-Rust commands are documented in `spacetimedb/README.md` once the module foundation lands.
+Rust and binding-generation commands are documented in `spacetimedb/README.md`.
 
 ## Security
 

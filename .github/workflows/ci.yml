@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: Secret history scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install verified Gitleaks
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz' \
+            | sha256sum --check --strict
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks version
+
+      - name: Scan repository and history
+        run: /tmp/gitleaks git --redact --verbose .
+
+  javascript:
+    name: JavaScript and TypeScript
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24.18.0"
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify source, test, and build
+        run: pnpm check
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level high
+
+  rust:
+    name: Rust and WebAssembly
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PROJECT_CONVERSATION_BOOTSTRAP_OIDC_ISSUER: https://issuer.test
+      PROJECT_CONVERSATION_BOOTSTRAP_OIDC_AUDIENCE: project-conversation-ci
+      PROJECT_CONVERSATION_BOOTSTRAP_OWNER_SUBJECT: ci-owner
+    defaults:
+      run:
+        working-directory: spacetimedb
+    steps:
+      - name: Check out source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Audit Rust dependencies
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: spacetimedb
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.93.0"
+          components: clippy,rustfmt
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            spacetimedb/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('spacetimedb/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Check module
+        run: cargo check --locked --all-features
+
+      - name: Lint module
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run policy tests
+        run: cargo test --locked --no-default-features
+
+      - name: Build release WebAssembly module
+        run: cargo build --locked --release --target wasm32-unknown-unknown
+
+      - name: Verify generated TypeScript bindings
+        run: |
+          ../scripts/install-spacetime-cli.sh
+          ../scripts/install-binaryen.sh
+          export PATH="$PWD/../.tools/binaryen/version_130/bin:$PATH"
+          ../.tools/spacetime/spacetime generate \
+            --lang typescript \
+            --module-path . \
+            --out-dir ../packages/db-bindings/src \
+            --yes
+          git diff --exit-code -- ../packages/db-bindings
+
+      - name: Publish and test fresh-host authentication denial
+        run: ../scripts/test-spacetime-smoke.sh
+
+      - name: Test standalone custom OIDC authentication
+        run: ../scripts/test-spacetime-oidc.sh
+
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      security-events: write
+      packages: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3
+        with:
+          languages: javascript-typescript
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3
+        with:
+          category: /language:javascript-typescript

@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+source "$ROOT_DIR/infra/scripts/common.sh"
+
+tmp="$(mktemp -d)"
+tmp="$(cd -P -- "$(dirname -- "$tmp")" && pwd -P)/$(basename -- "$tmp")"
+cleanup() { rm -rf -- "$tmp"; }
+trap cleanup EXIT
+umask 077
+
+export BACKUP_EVIDENCE_SIGNING_KEY_FILE="$tmp/evidence-private.pem"
+export BACKUP_EVIDENCE_VERIFY_KEY_FILE="$tmp/evidence-public.pem"
+openssl genpkey -algorithm ED25519 -out "$BACKUP_EVIDENCE_SIGNING_KEY_FILE" >/dev/null 2>&1
+openssl pkey -in "$BACKUP_EVIDENCE_SIGNING_KEY_FILE" -pubout \
+  -out "$BACKUP_EVIDENCE_VERIFY_KEY_FILE" >/dev/null 2>&1
+chmod 600 "$BACKUP_EVIDENCE_SIGNING_KEY_FILE" "$BACKUP_EVIDENCE_VERIFY_KEY_FILE"
+
+image='clockworklabs/spacetime:v2.6.1@sha256:53100591a8bfd62c6e088e801b68e96871a8fc6e68eb4fb031bc6ac76f77a72e'
+archive="$tmp/spacetimedb-staging-fixture.tar.gz"
+printf 'fixture archive bytes\n' > "$archive"
+chmod 600 "$archive"
+write_checksum_sidecar "$archive"
+archive_checksum="$(hash_file "$archive")"
+pin_checksum='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+now_utc="$(date -u +%Y%m%dT%H%M%SZ)"
+now="$(utc_compact_to_epoch "$now_utc")"
+
+cat > "$archive.manifest" <<EOF
+format=project-conversation-spacetimedb-cold-backup-v3
+created_utc=$now_utc
+created_epoch=$now
+archive=$(basename -- "$archive")
+compose_project=project-conversation-staging
+environment=staging
+spacetimedb_image=$image
+image_pin_sha256=$pin_checksum
+evidence_verify_key_sha256=$(hash_file "$BACKUP_EVIDENCE_VERIFY_KEY_FILE")
+archive_sha256=$archive_checksum
+data_root_uid=1000
+data_root_gid=1000
+data_root_mode=700
+EOF
+chmod 600 "$archive.manifest"
+write_checksum_sidecar "$archive.manifest"
+sign_evidence_file "$archive.manifest"
+
+validate_backup_bundle "$archive" project-conversation-staging staging
+[[ "$BACKUP_BUNDLE_CHECKSUM" == "$archive_checksum" ]]
+[[ "$BACKUP_BUNDLE_IMAGE" == "$image" ]]
+
+marker="$tmp/fixture.success"
+cat > "$marker" <<EOF
+format=project-conversation-restore-drill-v3
+completed_utc=$now_utc
+completed_epoch=$now
+compose_project=project-conversation-staging
+source_environment=staging
+archive=$(basename -- "$archive")
+archive_sha256=$archive_checksum
+backup_manifest_sha256=$BACKUP_BUNDLE_MANIFEST_SHA256
+evidence_verify_key_sha256=$BACKUP_BUNDLE_VERIFY_KEY_SHA256
+source_spacetimedb_image=$image
+restore_spacetimedb_image=$image
+ownership_mode=operator-remapped-modes-preserved
+teardown=completed
+upgrade_eligible=true
+result=spacetimedb-root-health-only
+EOF
+chmod 600 "$marker"
+write_checksum_sidecar "$marker"
+sign_evidence_file "$marker"
+validate_restore_marker "$marker" "$archive" project-conversation-staging staging "$image"
+
+tampered="$tmp/tampered.success"
+cp "$marker" "$tampered"
+cp "$marker.sig" "$tampered.sig"
+printf 'result=forged\n' >> "$tampered"
+write_checksum_sidecar "$tampered"
+if (verify_evidence_signature "$tampered" >/dev/null 2>&1); then
+  die "fixture expected tampered signed evidence to be rejected"
+fi
+
+cp "$archive.manifest" "$tmp/bad.manifest"
+printf 'unexpected=value\n' >> "$tmp/bad.manifest"
+if (assert_metadata_keys "$tmp/bad.manifest" format created_utc >/dev/null 2>&1); then
+  die "fixture expected unexpected metadata to be rejected"
+fi
+
+future="$tmp/future"
+printf 'future\n' > "$future"
+touch -t 209901010000 "$future"
+if (assert_not_future_mtime "$future" fixture >/dev/null 2>&1); then
+  die "fixture expected a future mtime to be rejected"
+fi
+
+if (assert_epoch_utc_pair 999999999999 "$now_utc" overflow >/dev/null 2>&1); then
+  die "fixture expected an oversized epoch to be rejected"
+fi
+if (assert_epoch_utc_pair "$now" 19700101T000000Z mismatch >/dev/null 2>&1); then
+  die "fixture expected mismatched signed timestamps to be rejected"
+fi
+
+transactional="$tmp/transactional-state"
+printf 'old\n' > "$transactional"; chmod 600 "$transactional"; write_checksum_sidecar "$transactional"
+printf 'new\n' > "$transactional"; chmod 600 "$transactional"
+printf '%s  %s\n' "$(hash_file "$transactional")" "$(basename -- "$transactional")" > "$transactional.publish"
+chmod 600 "$transactional.publish"
+[[ "$(verify_checksum_sidecar "$transactional")" == "$(hash_file "$transactional")" ]] \
+  || die "fixture expected publication-intent checksum recovery"
+
+PUBLIC_WSS_REAL_IP_MODE=not-configured
+PUBLIC_WSS_REAL_IP_TRUSTED_CIDRS=192.0.2.1/32
+if (require_public_wss_real_ip_config >/dev/null 2>&1); then
+  die "fixture expected placeholder public WSS real-IP configuration to fail"
+fi
+PUBLIC_WSS_REAL_IP_MODE=trusted-reverse-proxy
+PUBLIC_WSS_REAL_IP_TRUSTED_CIDRS=127.0.0.1/32
+require_public_wss_real_ip_config
+PUBLIC_WSS_REAL_IP_TRUSTED_CIDRS=127.0.0.1/32,2606:4700::/32
+require_public_wss_real_ip_config
+for invalid_cidrs in '::::/' '10.0.0.999/24' '10.0.0.0/33' '1::2::3/64' \
+  '2001:db8::/32' '2606:4700::/129' '127.0.0.1/32,,2606:4700::/32'; do
+  PUBLIC_WSS_REAL_IP_TRUSTED_CIDRS="$invalid_cidrs"
+  if (require_public_wss_real_ip_config >/dev/null 2>&1); then
+    die "fixture expected malformed or placeholder public WSS CIDRs to fail: $invalid_cidrs"
+  fi
+done
+
+path_fixture="$tmp/path-chain"
+mkdir -m 755 "$path_fixture"
+mkdir -m 755 "$path_fixture/project-conversation"
+mkdir -m 700 "$path_fixture/project-conversation/staging"
+assert_environment_path_chain "$path_fixture" staging
+chmod 775 "$path_fixture/project-conversation"
+if (assert_environment_path_chain "$path_fixture" staging >/dev/null 2>&1); then
+  die "fixture expected a group-writable project path parent to fail"
+fi
+chmod 755 "$path_fixture/project-conversation"
+chmod 750 "$path_fixture/project-conversation/staging"
+if (assert_environment_path_chain "$path_fixture" staging >/dev/null 2>&1); then
+  die "fixture expected a non-private environment root to fail"
+fi
+rm -rf "$path_fixture/project-conversation/staging"
+mkdir -m 700 "$path_fixture/real-environment"
+ln -s "$path_fixture/real-environment" "$path_fixture/project-conversation/staging"
+if (assert_environment_path_chain "$path_fixture" staging >/dev/null 2>&1); then
+  die "fixture expected a symlinked environment root to fail"
+fi
+
+old_epoch=0
+require_upgrade_backup_freshness resume "$old_epoch"
+if (require_upgrade_backup_freshness missing "$old_epoch" >/dev/null 2>&1); then
+  die "fixture expected stale evidence to fail for a new upgrade transaction"
+fi
+
+rollback_prepared_line="$(grep -nF 'write_rollback_state rollback-prepared' "$ROOT_DIR/infra/scripts/rollback.sh" | cut -d: -f1)"
+rollback_pin_line="$(grep -nF 'record_reviewed_spacetimedb_image_pin "$previous_image" image-rollback' "$ROOT_DIR/infra/scripts/rollback.sh" | cut -d: -f1)"
+[[ "$rollback_prepared_line" =~ ^[0-9]+$ && "$rollback_pin_line" =~ ^[0-9]+$ \
+  && "$rollback_prepared_line" -lt "$rollback_pin_line" ]] \
+  || die "fixture expected rollback preparation to be journaled before the pin transition"
+grep -Fq '"$(metadata_value "$REVIEWED_IMAGE_PIN_FILE" transition_id)" == "rollback-$transition_id"' \
+  "$ROOT_DIR/infra/scripts/rollback.sh" \
+  || die "fixture expected rollback pin-transition recovery to bind the exact transition"
+grep -Fq '"$(metadata_value "$REVIEWED_IMAGE_PIN_FILE" transition_id)" == "$transition_id"' \
+  "$ROOT_DIR/infra/scripts/upgrade.sh" \
+  || die "fixture expected forward pin-transition recovery to bind the exact transition"
+
+chmod 640 "$marker"
+if (assert_private_regular_file "$marker" marker >/dev/null 2>&1); then
+  die "fixture expected group-readable evidence to be rejected"
+fi
+
+mkdir -m 700 "$tmp/real-parent"
+printf 'trusted\n' > "$tmp/real-parent/input"; chmod 600 "$tmp/real-parent/input"
+ln -s "$tmp/real-parent" "$tmp/symlink-parent"
+if (assert_private_regular_file "$tmp/symlink-parent/input" input >/dev/null 2>&1); then
+  die "fixture expected a symlinked parent path to be rejected"
+fi
+
+mkdir -m 700 -p "$tmp/operation-root/project-conversation/staging/spacetime" \
+  "$tmp/operation-root/project-conversation/staging/state"
+export COMPOSE_PROJECT_NAME=project-conversation-staging
+export DEPLOY_ENVIRONMENT=staging
+export SPACETIMEDB_DATA_DIR="$tmp/operation-root/project-conversation/staging/spacetime"
+chmod 770 "$tmp/operation-root/project-conversation/staging"
+if (require_state_dir >/dev/null 2>&1); then
+  die "fixture expected state access to reject an unsafe environment parent before locking"
+fi
+chmod 700 "$tmp/operation-root/project-conversation/staging"
+record_reviewed_spacetimedb_image_pin "$image" fixture fixture-transition
+load_reviewed_spacetimedb_image_pin true >/dev/null
+[[ "$SPACETIMEDB_IMAGE" == "$image" && "$REVIEWED_IMAGE_PIN_SHA256" =~ ^[a-f0-9]{64}$ ]]
+
+if command -v flock >/dev/null 2>&1; then
+  acquire_operations_lock
+  if (exec 9>&-; acquire_operations_lock >/dev/null 2>&1); then
+    die "fixture expected the shared operations lock to reject a concurrent mutator"
+  fi
+fi
+
+dry_env="$tmp/validation.env"
+cp "$ROOT_DIR/infra/env/validation.env" "$dry_env"
+chmod 600 "$dry_env"
+for command in \
+  "$ROOT_DIR/infra/scripts/deploy.sh --env-file $dry_env --with-gateway" \
+  "$ROOT_DIR/infra/scripts/backup.sh --env-file $dry_env" \
+  "$ROOT_DIR/infra/scripts/upgrade.sh --env-file $dry_env --image $image --backup /not-used --restore-marker /not-used --ack-forward-only" \
+  "$ROOT_DIR/infra/scripts/rollback.sh --env-file $dry_env --ack-schema-compatible"; do
+  output="$(bash -c "$command" 2>&1)"
+  grep -Fq 'DRY RUN: no mutation performed' <<< "$output" || die "fixture expected guarded dry-run output"
+done
+
+printf 'Static infrastructure safety fixtures passed.\n'

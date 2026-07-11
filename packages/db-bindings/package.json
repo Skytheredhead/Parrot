@@ -1,0 +1,19 @@
+{
+  "name": "@project-conversation/db-bindings",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "spacetimedb": "2.6.1"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

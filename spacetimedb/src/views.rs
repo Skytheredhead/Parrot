@@ -1,0 +1,928 @@
+use crate::authz::{
+    Action, agent_scope_key, can_read_space, can_read_workspace, find_membership, role_allows,
+};
+use crate::model::*;
+use crate::policy;
+use spacetimedb::{Identity, SpacetimeType, Timestamp, Uuid, ViewContext};
+
+#[derive(SpacetimeType)]
+pub struct VisibleUser {
+    pub identity: Identity,
+    pub display_name: String,
+}
+
+impl From<User> for VisibleUser {
+    fn from(row: User) -> Self {
+        Self {
+            identity: row.identity,
+            display_name: row.display_name,
+        }
+    }
+}
+
+#[derive(SpacetimeType)]
+pub struct VisibleWorkspaceMember {
+    pub workspace_id: Uuid,
+    pub identity: Identity,
+    pub role: WorkspaceRole,
+    pub active: bool,
+}
+
+impl From<WorkspaceMember> for VisibleWorkspaceMember {
+    fn from(row: WorkspaceMember) -> Self {
+        Self {
+            workspace_id: row.workspace_id,
+            identity: row.identity,
+            role: row.role,
+            active: row.active,
+        }
+    }
+}
+
+#[derive(SpacetimeType)]
+pub struct VisibleAgentInstallation {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub name: String,
+    pub provider: String,
+    pub model: String,
+    pub enabled: bool,
+    pub max_run_tokens: u64,
+    pub max_run_cost_micros: u64,
+    pub installed_by: Identity,
+}
+
+impl From<AgentInstallation> for VisibleAgentInstallation {
+    fn from(row: AgentInstallation) -> Self {
+        Self {
+            id: row.id,
+            workspace_id: row.workspace_id,
+            name: row.name,
+            provider: row.provider,
+            model: row.model,
+            enabled: row.enabled,
+            max_run_tokens: row.max_run_tokens,
+            max_run_cost_micros: row.max_run_cost_micros,
+            installed_by: row.installed_by,
+        }
+    }
+}
+
+#[derive(SpacetimeType)]
+pub struct VisibleAgentScope {
+    pub installation_id: Uuid,
+    pub space_id: Option<Uuid>,
+    pub capability: AgentCapability,
+    pub enabled: bool,
+}
+
+impl From<AgentScope> for VisibleAgentScope {
+    fn from(row: AgentScope) -> Self {
+        Self {
+            installation_id: row.installation_id,
+            space_id: row.space_id,
+            capability: row.capability,
+            enabled: row.enabled,
+        }
+    }
+}
+
+#[derive(SpacetimeType)]
+pub struct VisibleAgentToolPolicy {
+    pub installation_id: Uuid,
+    pub tool_name: String,
+    pub tool_version: String,
+    pub capability: AgentCapability,
+    pub effect_class: ToolEffectClass,
+    pub trusted_tool_revision: u64,
+    pub requires_approval: bool,
+    pub approval_ttl_seconds: u32,
+    pub enabled: bool,
+    pub revision: u64,
+    pub configured_by: Identity,
+    pub updated_at: Timestamp,
+}
+
+impl From<AgentToolPolicy> for VisibleAgentToolPolicy {
+    fn from(row: AgentToolPolicy) -> Self {
+        Self {
+            installation_id: row.installation_id,
+            tool_name: row.tool_name,
+            tool_version: row.tool_version,
+            capability: row.capability,
+            effect_class: row.effect_class,
+            trusted_tool_revision: row.trusted_tool_revision,
+            requires_approval: row.requires_approval,
+            approval_ttl_seconds: row.approval_ttl_seconds,
+            enabled: row.enabled,
+            revision: row.revision,
+            configured_by: row.configured_by,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+#[derive(SpacetimeType)]
+pub struct VisibleAgentRun {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub installation_id: Uuid,
+    pub space_id: Uuid,
+    pub thread_id: Option<Uuid>,
+    pub initiated_by: Identity,
+    pub state: AgentRunState,
+    pub version: u64,
+    pub cancel_requested: bool,
+    pub prompt_summary: String,
+    pub output_summary: String,
+    pub used_tokens: u64,
+    pub used_cost_micros: u64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+impl From<AgentRun> for VisibleAgentRun {
+    fn from(row: AgentRun) -> Self {
+        Self {
+            id: row.id,
+            workspace_id: row.workspace_id,
+            installation_id: row.installation_id,
+            space_id: row.space_id,
+            thread_id: row.thread_id,
+            initiated_by: row.initiated_by,
+            state: row.state,
+            version: row.version,
+            cancel_requested: row.cancel_requested,
+            prompt_summary: row.prompt_summary,
+            output_summary: row.output_summary,
+            used_tokens: row.used_tokens,
+            used_cost_micros: row.used_cost_micros,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+#[derive(SpacetimeType)]
+pub struct VisibleAgentToolCall {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub tool_name: String,
+    pub tool_version: String,
+    pub effect_class: ToolEffectClass,
+    pub requires_approval: bool,
+    pub state: ToolCallState,
+    pub result_summary: String,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+impl From<AgentToolCall> for VisibleAgentToolCall {
+    fn from(row: AgentToolCall) -> Self {
+        Self {
+            id: row.id,
+            run_id: row.run_id,
+            tool_name: row.tool_name,
+            tool_version: row.tool_version,
+            effect_class: row.effect_class,
+            requires_approval: row.requires_approval,
+            state: row.state,
+            result_summary: row.result_summary,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+#[derive(SpacetimeType)]
+pub struct VisibleCommandReceipt {
+    pub workspace_id: Option<Uuid>,
+    pub operation: String,
+    pub client_request_id: Uuid,
+    pub result_type: String,
+    pub result_id: Uuid,
+    pub committed_at: Timestamp,
+}
+
+impl From<CommandReceipt> for VisibleCommandReceipt {
+    fn from(row: CommandReceipt) -> Self {
+        Self {
+            workspace_id: row.workspace_id,
+            operation: row.operation,
+            client_request_id: row.client_request_id,
+            result_type: row.result_type,
+            result_id: row.result_id,
+            committed_at: row.committed_at,
+        }
+    }
+}
+
+#[derive(SpacetimeType)]
+pub struct VisibleApproval {
+    pub id: Uuid,
+    pub run_id: Uuid,
+    pub tool_call_id: Uuid,
+    pub effect_class: ToolEffectClass,
+    pub state: ApprovalState,
+    pub decided_by: Option<Identity>,
+    pub expires_at: Timestamp,
+}
+
+#[derive(SpacetimeType)]
+pub struct VisibleFile {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub space_id: Uuid,
+    pub owner_identity: Identity,
+    pub file_name: String,
+    pub declared_size_bytes: u64,
+    pub detected_type: String,
+    pub state: FileSecurityState,
+    pub revision: u64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+impl From<FileRecord> for VisibleFile {
+    fn from(row: FileRecord) -> Self {
+        Self {
+            id: row.id,
+            workspace_id: row.workspace_id,
+            space_id: row.space_id,
+            owner_identity: row.owner_identity,
+            file_name: row.file_name,
+            declared_size_bytes: row.declared_size_bytes,
+            detected_type: row.detected_type,
+            state: row.state,
+            revision: row.revision,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+impl From<ApprovalRequest> for VisibleApproval {
+    fn from(row: ApprovalRequest) -> Self {
+        Self {
+            id: row.id,
+            run_id: row.run_id,
+            tool_call_id: row.tool_call_id,
+            effect_class: row.effect_class,
+            state: row.state,
+            decided_by: row.decided_by,
+            expires_at: row.expires_at,
+        }
+    }
+}
+
+fn visible_space(ctx: &ViewContext, space_id: Uuid) -> Option<Space> {
+    ctx.db
+        .space()
+        .id()
+        .find(space_id)
+        .filter(|space| can_read_space(ctx, space, ctx.sender()))
+}
+
+fn accessible_spaces(ctx: &ViewContext) -> Vec<Space> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| member.active)
+        .flat_map(|member| {
+            ctx.db
+                .space()
+                .workspace_id()
+                .filter(member.workspace_id)
+                .filter(|space| can_read_space(ctx, space, ctx.sender()))
+        })
+        .collect()
+}
+
+fn accessible_threads(ctx: &ViewContext) -> Vec<NamedThread> {
+    accessible_spaces(ctx)
+        .into_iter()
+        .flat_map(|space| ctx.db.named_thread().space_id().filter(space.id))
+        .collect()
+}
+
+fn accessible_runs(ctx: &ViewContext) -> Vec<AgentRun> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| member.active)
+        .flat_map(|member| {
+            ctx.db
+                .agent_run()
+                .workspace_id()
+                .filter(member.workspace_id)
+        })
+        .filter(|run| visible_space(ctx, run.space_id).is_some())
+        .collect()
+}
+
+#[spacetimedb::view(accessor = current_user, public)]
+pub fn current_user(ctx: &ViewContext) -> Option<VisibleUser> {
+    ctx.db
+        .user()
+        .identity()
+        .find(ctx.sender())
+        .map(VisibleUser::from)
+}
+
+#[spacetimedb::view(accessor = my_workspace_memberships, public)]
+pub fn my_workspace_memberships(ctx: &ViewContext) -> Vec<VisibleWorkspaceMember> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|row| row.active)
+        .map(VisibleWorkspaceMember::from)
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_workspaces, public)]
+pub fn my_workspaces(ctx: &ViewContext) -> Vec<Workspace> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|row| row.active)
+        .filter_map(|member| ctx.db.workspace().id().find(member.workspace_id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_workspace_members, public)]
+pub fn visible_workspace_members(ctx: &ViewContext) -> Vec<VisibleWorkspaceMember> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| member.active)
+        .flat_map(|member| {
+            ctx.db
+                .workspace_member()
+                .workspace_id()
+                .filter(member.workspace_id)
+                .filter(|row| row.active)
+        })
+        .map(VisibleWorkspaceMember::from)
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_spaces, public)]
+pub fn visible_spaces(ctx: &ViewContext) -> Vec<Space> {
+    accessible_spaces(ctx)
+}
+
+#[spacetimedb::view(accessor = visible_posts, public)]
+pub fn visible_posts(ctx: &ViewContext) -> Vec<Post> {
+    accessible_spaces(ctx)
+        .into_iter()
+        .flat_map(|space| ctx.db.post().space_id().filter(space.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_named_threads, public)]
+pub fn visible_named_threads(ctx: &ViewContext) -> Vec<NamedThread> {
+    accessible_threads(ctx)
+}
+
+#[spacetimedb::view(accessor = visible_contributions, public)]
+pub fn visible_contributions(ctx: &ViewContext) -> Vec<Contribution> {
+    accessible_threads(ctx)
+        .into_iter()
+        .flat_map(|thread| ctx.db.contribution().thread_id().filter(thread.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_reply_ancestry, public)]
+pub fn visible_reply_ancestry(ctx: &ViewContext) -> Vec<ReplyAncestry> {
+    accessible_threads(ctx)
+        .into_iter()
+        .flat_map(|thread| ctx.db.contribution().thread_id().filter(thread.id))
+        .flat_map(|row| ctx.db.reply_ancestry().descendant_id().filter(row.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_decisions, public)]
+pub fn visible_decisions(ctx: &ViewContext) -> Vec<DecisionRecord> {
+    accessible_threads(ctx)
+        .into_iter()
+        .flat_map(|thread| ctx.db.decision_record().thread_id().filter(thread.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_tasks, public)]
+pub fn visible_tasks(ctx: &ViewContext) -> Vec<TaskItem> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| member.active)
+        .flat_map(|member| {
+            ctx.db
+                .task_item()
+                .workspace_id()
+                .filter(member.workspace_id)
+        })
+        .filter(|task| {
+            let thread_space_visible = task.thread_id.is_some_and(|thread_id| {
+                ctx.db
+                    .named_thread()
+                    .id()
+                    .find(thread_id)
+                    .is_some_and(|thread| {
+                        thread.workspace_id == task.workspace_id
+                            && visible_space(ctx, thread.space_id).is_some()
+                    })
+            });
+            policy::task_visible(true, task.thread_id.is_some(), thread_space_visible)
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_files, public)]
+pub fn visible_files(ctx: &ViewContext) -> Vec<VisibleFile> {
+    accessible_spaces(ctx)
+        .into_iter()
+        .flat_map(|space| ctx.db.file_record().space_id().filter(space.id))
+        .map(VisibleFile::from)
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_file_uploads, public)]
+pub fn my_file_uploads(ctx: &ViewContext) -> Vec<FileUpload> {
+    ctx.db
+        .file_upload()
+        .owner_identity()
+        .filter(ctx.sender())
+        .filter(|upload| {
+            !upload.completed && can_read_workspace(ctx, upload.workspace_id, ctx.sender())
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_notifications, public)]
+pub fn my_notifications(ctx: &ViewContext) -> Vec<Notification> {
+    ctx.db
+        .notification()
+        .recipient_identity()
+        .filter(ctx.sender())
+        .filter(|row| {
+            if !can_read_workspace(ctx, row.workspace_id, ctx.sender()) {
+                return false;
+            }
+            if row.resource_type == "task" {
+                return ctx
+                    .db
+                    .task_item()
+                    .id()
+                    .find(row.resource_id)
+                    .is_some_and(|task| {
+                        task.workspace_id == row.workspace_id
+                            && task.thread_id.is_none_or(|thread_id| {
+                                ctx.db
+                                    .named_thread()
+                                    .id()
+                                    .find(thread_id)
+                                    .is_some_and(|thread| {
+                                        visible_space(ctx, thread.space_id).is_some()
+                                    })
+                            })
+                    });
+            }
+            true
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_agent_installations, public)]
+pub fn visible_agent_installations(ctx: &ViewContext) -> Vec<VisibleAgentInstallation> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| member.active)
+        .flat_map(|member| {
+            ctx.db
+                .agent_installation()
+                .workspace_id()
+                .filter(member.workspace_id)
+        })
+        .map(VisibleAgentInstallation::from)
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_agent_scopes, public)]
+pub fn visible_agent_scopes(ctx: &ViewContext) -> Vec<VisibleAgentScope> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| member.active)
+        .flat_map(|member| {
+            ctx.db
+                .agent_installation()
+                .workspace_id()
+                .filter(member.workspace_id)
+        })
+        .flat_map(|installation| {
+            ctx.db
+                .agent_scope()
+                .installation_id()
+                .filter(installation.id)
+        })
+        .map(VisibleAgentScope::from)
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_agent_tool_policies, public)]
+pub fn visible_agent_tool_policies(ctx: &ViewContext) -> Vec<VisibleAgentToolPolicy> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| member.active)
+        .flat_map(|member| {
+            ctx.db
+                .agent_installation()
+                .workspace_id()
+                .filter(member.workspace_id)
+        })
+        .flat_map(|installation| {
+            ctx.db
+                .agent_tool_policy()
+                .installation_id()
+                .filter(installation.id)
+        })
+        .map(VisibleAgentToolPolicy::from)
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_agent_runs, public)]
+pub fn visible_agent_runs(ctx: &ViewContext) -> Vec<VisibleAgentRun> {
+    accessible_runs(ctx)
+        .into_iter()
+        .map(VisibleAgentRun::from)
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_agent_run_events, public)]
+pub fn visible_agent_run_events(ctx: &ViewContext) -> Vec<AgentRunEvent> {
+    accessible_runs(ctx)
+        .into_iter()
+        .flat_map(|run| ctx.db.agent_run_event().run_id().filter(run.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_agent_context_manifests, public)]
+pub fn visible_agent_context_manifests(ctx: &ViewContext) -> Vec<AgentContextManifest> {
+    accessible_runs(ctx)
+        .into_iter()
+        .flat_map(|run| ctx.db.agent_context_manifest().run_id().filter(run.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_agent_tool_calls, public)]
+pub fn visible_agent_tool_calls(ctx: &ViewContext) -> Vec<VisibleAgentToolCall> {
+    accessible_runs(ctx)
+        .into_iter()
+        .flat_map(|run| ctx.db.agent_tool_call().run_id().filter(run.id))
+        .map(VisibleAgentToolCall::from)
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_approvals, public)]
+pub fn visible_approvals(ctx: &ViewContext) -> Vec<VisibleApproval> {
+    accessible_runs(ctx)
+        .into_iter()
+        .filter(|run| {
+            run.initiated_by == ctx.sender()
+                || find_membership(ctx, run.workspace_id, ctx.sender())
+                    .is_some_and(|member| role_allows(member.role, Action::ManageAgents))
+        })
+        .flat_map(|run| ctx.db.approval_request().run_id().filter(run.id))
+        .map(VisibleApproval::from)
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_audit_log, public)]
+pub fn visible_audit_log(ctx: &ViewContext) -> Vec<AuditLog> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| member.active && role_allows(member.role, Action::ManageWorkspace))
+        .flat_map(|member| {
+            ctx.db
+                .audit_log()
+                .workspace_id()
+                .filter(member.workspace_id)
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_command_receipts, public)]
+pub fn my_command_receipts(ctx: &ViewContext) -> Vec<VisibleCommandReceipt> {
+    ctx.db
+        .command_receipt()
+        .actor_identity()
+        .filter(ctx.sender())
+        .filter(|receipt| {
+            receipt
+                .workspace_id
+                .is_none_or(|workspace_id| can_read_workspace(ctx, workspace_id, ctx.sender()))
+        })
+        .map(VisibleCommandReceipt::from)
+        .collect()
+}
+
+#[spacetimedb::view(accessor = agent_work_queue, public)]
+pub fn agent_work_queue(ctx: &ViewContext) -> Vec<AgentRun> {
+    let allowed = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_run_agents);
+    if !allowed {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| grant.enabled && grant.kind == "agent")
+        .flat_map(|grant| ctx.db.agent_run().workspace_id().filter(grant.workspace_id))
+        .filter(|run| {
+            !matches!(
+                run.state,
+                AgentRunState::Succeeded
+                    | AgentRunState::Failed
+                    | AgentRunState::Canceled
+                    | AgentRunState::Expired
+                    | AgentRunState::Revoked
+            )
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = agent_context_candidates, public)]
+pub fn agent_context_candidates(ctx: &ViewContext) -> Vec<AgentContextCandidate> {
+    let enabled = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_run_agents);
+    if !enabled {
+        return vec![];
+    }
+    let mut result = Vec::new();
+    for grant in ctx
+        .db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| grant.enabled && grant.kind == "agent")
+    {
+        for run in ctx
+            .db
+            .agent_run()
+            .workspace_id()
+            .filter(grant.workspace_id)
+            .filter(|run| run.lease_owner == Some(ctx.sender()))
+        {
+            let Some(thread_id) = run.thread_id else {
+                continue;
+            };
+            let Some(thread) = ctx.db.named_thread().id().find(thread_id) else {
+                continue;
+            };
+            let mut candidates = Vec::new();
+            if let Some(post) = ctx
+                .db
+                .post()
+                .id()
+                .find(thread.root_post_id)
+                .filter(|post| !post.deleted && post.space_id == run.space_id)
+            {
+                candidates.push(AgentContextCandidate {
+                    run_id: run.id,
+                    resource_type: "post".into(),
+                    resource_id: post.id,
+                    resource_revision: post.revision,
+                    title: post.title,
+                    body: post.body,
+                    created_at: post.created_at,
+                });
+            }
+            let history_enabled = [Some(run.space_id), None].into_iter().any(|space_id| {
+                ctx.db
+                    .agent_scope()
+                    .key()
+                    .find(agent_scope_key(
+                        run.installation_id,
+                        space_id,
+                        AgentCapability::ReadHistory,
+                    ))
+                    .is_some_and(|scope| scope.enabled)
+            });
+            if history_enabled {
+                for contribution in ctx
+                    .db
+                    .contribution()
+                    .thread_id()
+                    .filter(thread_id)
+                    .filter(|contribution| !contribution.deleted)
+                {
+                    candidates.push(AgentContextCandidate {
+                        run_id: run.id,
+                        resource_type: "contribution".into(),
+                        resource_id: contribution.id,
+                        resource_revision: contribution.revision,
+                        title: thread.title.clone(),
+                        body: contribution.body,
+                        created_at: contribution.created_at,
+                    });
+                }
+            }
+            candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.created_at));
+            candidates.truncate(64);
+            result.extend(candidates);
+        }
+    }
+    result
+}
+
+#[spacetimedb::view(accessor = pending_outbox_work, public)]
+pub fn pending_outbox_work(ctx: &ViewContext) -> Vec<OutboxJob> {
+    let allowed = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_process_outbox);
+    if !allowed {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| grant.enabled)
+        .flat_map(|grant| {
+            ctx.db
+                .outbox_job()
+                .workspace_id()
+                .filter(grant.workspace_id)
+                .filter(move |job| job.kind == grant.kind)
+        })
+        .filter(|job| {
+            matches!(
+                job.state,
+                OutboxState::Pending
+                    | OutboxState::Retry
+                    | OutboxState::OutcomeUnknown
+                    | OutboxState::Leased
+            )
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = pending_post_search_documents, public)]
+pub fn pending_post_search_documents(ctx: &ViewContext) -> Vec<SearchWorkItem> {
+    let allowed = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_process_outbox);
+    if !allowed {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| {
+            grant.enabled && matches!(grant.kind.as_str(), "search_upsert" | "search_tombstone")
+        })
+        .flat_map(|grant| {
+            ctx.db
+                .outbox_job()
+                .workspace_id()
+                .filter(grant.workspace_id)
+                .filter(move |job| job.kind == grant.kind)
+        })
+        .filter(|job| {
+            matches!(
+                job.state,
+                OutboxState::Pending | OutboxState::Retry | OutboxState::OutcomeUnknown
+            ) || (job.state == OutboxState::Leased && job.lease_owner == Some(ctx.sender()))
+        })
+        .filter_map(|job| {
+            ctx.db
+                .search_document_snapshot()
+                .effect_key()
+                .find(job.effect_key.clone())
+                .filter(|snapshot| {
+                    policy::search_snapshot_matches_job(
+                        snapshot.workspace_id == job.workspace_id,
+                        snapshot.effect_key == job.effect_key,
+                        snapshot.resource_revision == job.resource_revision,
+                    )
+                })
+                .map(|snapshot| SearchWorkItem {
+                    job_id: job.id,
+                    effect_key: job.effect_key,
+                    workspace_id: snapshot.workspace_id,
+                    space_id: snapshot.space_id,
+                    resource_type: snapshot.resource_type,
+                    resource_id: snapshot.resource_id,
+                    resource_revision: snapshot.resource_revision,
+                    acl_revision: snapshot.acl_revision,
+                    title: snapshot.title,
+                    body: snapshot.body,
+                    tombstone: snapshot.tombstone,
+                    allowed_identities: snapshot.allowed_identities,
+                    state: job.state,
+                    lease_generation: job.lease_generation,
+                })
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = file_processing_plans, public)]
+pub fn file_processing_plans(ctx: &ViewContext) -> Vec<FileProcessingPlanView> {
+    let enabled = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_process_outbox);
+    if !enabled {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| {
+            grant.enabled
+                && matches!(
+                    grant.kind.as_str(),
+                    "file_scan" | "file_extract" | "file_cleanup"
+                )
+        })
+        .flat_map(|grant| {
+            ctx.db
+                .outbox_job()
+                .workspace_id()
+                .filter(grant.workspace_id)
+                .filter(move |job| job.kind == grant.kind)
+        })
+        .filter(|job| {
+            matches!(
+                job.state,
+                OutboxState::Pending | OutboxState::Retry | OutboxState::OutcomeUnknown
+            ) || (job.state == OutboxState::Leased && job.lease_owner == Some(ctx.sender()))
+        })
+        .filter_map(|job| {
+            ctx.db
+                .file_record()
+                .id()
+                .find(job.resource_id)
+                .filter(|file| {
+                    file.workspace_id == job.workspace_id && file.revision >= job.resource_revision
+                })
+                .map(|file| FileProcessingPlanView {
+                    job_id: job.id,
+                    workspace_id: file.workspace_id,
+                    space_id: file.space_id,
+                    file_id: file.id,
+                    file_revision: file.revision,
+                    kind: job.kind,
+                    source_key: if file.clean_key.is_empty() {
+                        file.source_key.clone()
+                    } else {
+                        file.clean_key.clone()
+                    },
+                    clean_destination_key: format!("clean/{}/{}/1", file.workspace_id, file.id),
+                    cleanup_prefix: file.cleanup_prefix,
+                    max_bytes: file.declared_size_bytes,
+                    max_extracted_characters: 100_000,
+                    allowed_types: vec![
+                        "text/plain".into(),
+                        "application/pdf".into(),
+                        "image/png".into(),
+                        "image/jpeg".into(),
+                    ],
+                    state: file.state,
+                    lease_generation: job.lease_generation,
+                })
+        })
+        .collect()
+}
