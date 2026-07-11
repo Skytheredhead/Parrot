@@ -1,0 +1,44 @@
+# Dependencies and package-manager state
+node_modules/
+.pnpm-store/
+
+# Build and test output
+.next/
+dist/
+build/
+coverage/
+playwright-report/
+test-results/
+target/
+
+# Local runtime state
+.spacetime/
+.data/
+.cache/
+.turbo/
+.tools/
+tmp/
+
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*

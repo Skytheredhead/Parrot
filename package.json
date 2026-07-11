@@ -1,0 +1,21 @@
+{
+  "name": "project-conversation",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Neutral internal codename for a post-first, agent-native collaboration platform.",
+  "packageManager": "pnpm@10.10.0",
+  "engines": {
+    "node": ">=24 <25",
+    "pnpm": ">=10.10.0 <11"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "format": "pnpm -r --if-present format",
+    "format:check": "pnpm -r --if-present format:check",
+    "lint": "pnpm -r --if-present lint",
+    "test": "pnpm -r --if-present test",
+    "test:coverage": "pnpm -r --if-present test:coverage",
+    "typecheck": "pnpm -r --if-present typecheck"
+  }
+}
