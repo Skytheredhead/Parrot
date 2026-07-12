@@ -27,7 +27,8 @@ Gateway activation additionally requires:
    Cloudflare tunnel or another trusted reverse proxy, the exact source CIDRs, and the authenticated
    client-IP header semantics. Runtime gateway-profile validation rejects
    `PUBLIC_WSS_REAL_IP_MODE=not-configured` and TEST-NET/empty trusted CIDRs. The Nginx template also
-   contains an unrendered `__APPROVED_REAL_IP_DIRECTIVES__` token, so `nginx -t` fails until the exact
+   contains an unrendered `__APPROVED_REAL_IP_DIRECTIVES__` token, so the installed copy fails
+   `nginx -t` until the exact
    `set_real_ip_from`/`real_ip_header` policy is supplied. Without this, per-IP WSS limits collapse all
    clients onto the tunnel/proxy address and are not a valid public control. Each comma-separated
    trusted hop must be a syntactically valid IPv4 or IPv6 CIDR with a bounded prefix; malformed or
@@ -63,7 +64,7 @@ configuration retains the file path so the object adapter can enforce size/mode 
 entrypoint dereferences only `READINESS_TOKEN_FILE`; it deliberately does not convert arbitrary
 `*_FILE` references into environment secret values.
 
-Use mode `0700` for each `/srv/project-conversation/<environment>` root, its `spacetime`, `clamav`, and `state`
+Use mode `0700` for each `/srv/project-conversation/<environment>` root, its `spacetime` and `state`
 directories, each `/mnt/bigboi/project-conversation/<environment>` root and `backups` directory, and the shared restore-drill parent. `/srv`, `/mnt/bigboi`, and
 `/srv/project-conversation` may be traversable but must not be group/other-writable. Use protected
 operator/root ownership throughout. Runtime validation walks this fixed path chain and rejects

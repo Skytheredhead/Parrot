@@ -322,6 +322,8 @@ done
 
 grep -Fq '127.0.0.1:${EDGE_LOOPBACK_PORT' "$ROOT_DIR/infra/compose.yaml" \
   || die "fixture expected the edge listener to remain loopback-only"
+grep -Fq '__APPROVED_REAL_IP_DIRECTIVES__' "$ROOT_DIR/infra/nginx/edge.conf.template" \
+  || die "fixture expected the repository edge template to fail closed before real-IP review"
 grep -Fq 'location = /v1/database/${SPACETIMEDB_DATABASE_NAME}/subscribe' \
   "$ROOT_DIR/infra/nginx/edge.conf.template" \
   || die "fixture expected one exact public database subscription route"
