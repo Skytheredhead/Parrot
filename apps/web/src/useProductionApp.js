@@ -311,6 +311,12 @@ export function useProductionApp(auth) {
 
   const signIn = useCallback(() => {
     setError("");
+    // If AuthKit restored an identity but the downstream bootstrap connection failed,
+    // restart the provider session instead of looping with a stale in-memory token.
+    if (auth?.user) {
+      auth.signOut({ returnTo: `${window.location.origin}/` });
+      return undefined;
+    }
     // WorkOS staging stores its refresh token in localStorage. A failed or interrupted
     // callback can leave that disposable token unusable, so an explicit sign-in starts
     // a fresh PKCE session. Production custom-domain mode never touches localStorage.
