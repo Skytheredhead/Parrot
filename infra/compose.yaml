@@ -129,6 +129,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     init: true
+    user: "101:101"
     depends_on:
       gateway:
         condition: service_healthy
@@ -157,10 +158,10 @@ services:
       start_period: 10s
     read_only: true
     tmpfs:
-      - /etc/nginx/conf.d:rw,noexec,nosuid,size=1m
-      - /var/cache/nginx:rw,noexec,nosuid,size=16m
-      - /var/run:rw,noexec,nosuid,size=1m
-      - /tmp:rw,noexec,nosuid,size=16m
+      - /etc/nginx/conf.d:rw,noexec,nosuid,size=1m,uid=101,gid=101,mode=0700
+      - /var/cache/nginx:rw,noexec,nosuid,size=16m,uid=101,gid=101,mode=0700
+      - /var/run:rw,noexec,nosuid,size=1m,uid=101,gid=101,mode=0700
+      - /tmp:rw,noexec,nosuid,size=16m,uid=101,gid=101,mode=0700
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
