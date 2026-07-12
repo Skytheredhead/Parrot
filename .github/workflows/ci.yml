@@ -132,6 +132,7 @@ jobs:
             --module-path . \
             --out-dir ../packages/db-bindings/src \
             --yes
+          node ../scripts/normalize-generated-bindings.mjs
           git diff --exit-code -- ../packages/db-bindings
 
       - name: Publish and test fresh-host authentication denial

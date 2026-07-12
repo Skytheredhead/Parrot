@@ -23,3 +23,5 @@ export PROJECT_CONVERSATION_BOOTSTRAP_OWNER_SUBJECT="${PROJECT_CONVERSATION_BOOT
   --module-path "${root}/spacetimedb" \
   --out-dir "${root}/packages/db-bindings/src" \
   --yes
+
+node "${root}/scripts/normalize-generated-bindings.mjs"
