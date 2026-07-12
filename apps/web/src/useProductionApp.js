@@ -309,7 +309,17 @@ export function useProductionApp(auth) {
       setSelectedSpaceId(available[0]?.id ?? "");
   }, [data.spaces, selectedSpaceId, selectedWorkspaceId]);
 
-  const signIn = useCallback(() => auth?.signIn({ state: { returnTo: "/" } }), [auth]);
+  const signIn = useCallback(() => {
+    setError("");
+    // WorkOS staging stores its refresh token in localStorage. A failed or interrupted
+    // callback can leave that disposable token unusable, so an explicit sign-in starts
+    // a fresh PKCE session. Production custom-domain mode never touches localStorage.
+    if (config.devMode) {
+      window.localStorage.removeItem(`workos:refresh-token:${config.clientId}`);
+      window.localStorage.removeItem("workos:refresh-token");
+    }
+    return auth?.signIn({ state: { returnTo: "/" } });
+  }, [auth, config.clientId, config.devMode]);
   const signOut = useCallback(() => {
     connectionRef.current?.disconnect();
     connectionRef.current = null;
