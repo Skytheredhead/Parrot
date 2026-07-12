@@ -41,7 +41,7 @@ production environment:
 
 | WorkOS setting | Value |
 |---|---|
-| Default redirect URI | `https://parrot.skylarenns.com/callback` |
+| Default redirect URI | `https://parrot.skylarenns.com/auth/callback` |
 | Sign-in endpoint | `https://parrot.skylarenns.com/login` |
 | Sign-out redirect | `https://parrot.skylarenns.com/signed-out` |
 | Allowed CORS web origin | `https://parrot.skylarenns.com` |
@@ -54,7 +54,7 @@ Production web redirects require HTTPS. When WorkOS supplies the DNS target for 
 create that CNAME in Cloudflare as **DNS only**, not proxied; WorkOS documents that cross-account
 Cloudflare proxying is unsupported.
 
-The callback is a client-side route: Vercel must rewrite `/callback`, `/login`, and `/signed-out`
+The callback is a client-side route: Vercel must rewrite `/auth/callback`, `/login`, and `/signed-out`
 to the SPA entry document. `AuthKitProvider` processes the callback. The callback route must replace
 history after completion so the authorization code is not retained in browser history, logs, or
 later referrers.
@@ -64,7 +64,7 @@ later referrers.
 1. Wrap the SPA in `AuthKitProvider` using only the public client ID and
    `apiHostname="authapi.skylarenns.com"`. Do not set `devMode` in production.
 2. `/login` calls `signIn()`; Hosted AuthKit performs authentication and redirects to
-   `/callback` with an authorization code. AuthKit React completes its PKCE exchange.
+   `/auth/callback` with an authorization code. AuthKit React completes its PKCE exchange.
 3. Wait for AuthKit's loading state to settle. If authenticated, call `getAccessToken()` only when
    a gateway request or database-ticket renewal needs it. WorkOS documents that this returns the
    current token or refreshes it when necessary.

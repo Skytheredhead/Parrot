@@ -50,7 +50,7 @@ fails closed unless these public settings are present:
 - `VITE_SPACETIMEDB_DATABASE_NAME`
 - `VITE_PARROT_WORKSPACE_ID` optionally pins the initial ticket scope
 
-Production WorkOS configuration uses callback `https://parrot.skylarenns.com/callback`, login
+Production WorkOS configuration uses callback `https://parrot.skylarenns.com/auth/callback`, login
 `https://parrot.skylarenns.com/login`, sign-out return `https://parrot.skylarenns.com/signed-out`,
 and exact CORS origin `https://parrot.skylarenns.com`. Vercel rewrites these routes to the SPA. With
 a production WorkOS environment, configure a custom Authentication API hostname and leave dev mode

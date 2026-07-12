@@ -41,7 +41,7 @@ export function readProductionConfig(env = import.meta.env, location = window.lo
     databaseName,
     gatewayUrl,
     workspaceId,
-    redirectUri: `${location.origin}/callback`,
+    redirectUri: `${location.origin}/auth/callback`,
     signOutUri: `${location.origin}/signed-out`,
   };
 }

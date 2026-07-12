@@ -37,7 +37,7 @@ describe("Parrot production runtime", () => {
     );
     expect(config.configured).toBe(true);
     expect(config.devMode).toBe(true);
-    expect(config.redirectUri).toBe("https://parrot.skylarenns.com/callback");
+    expect(config.redirectUri).toBe("https://parrot.skylarenns.com/auth/callback");
   });
 
   it("mints a fresh gateway ticket for every initial connection and reconnect", async () => {
