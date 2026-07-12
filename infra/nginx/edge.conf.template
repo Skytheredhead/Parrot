@@ -3,6 +3,11 @@ map $http_upgrade $connection_upgrade {
     '' close;
 }
 
+map $http_origin $parrot_frontend_cors_origin {
+    default "";
+    "https://parrot.skylarenns.com" $http_origin;
+}
+
 # REQUIRED FAIL-CLOSED PLACEHOLDER: replace this token in the installed environment copy with
 # reviewed ngx_http_realip_module directives for the exact tunnel-to-Docker hop. The repository
 # template is intentionally not directly deployable.
@@ -10,6 +15,7 @@ __APPROVED_REAL_IP_DIRECTIVES__
 
 limit_conn_zone $binary_remote_addr zone=parrot_wss_per_source:1m;
 limit_conn_zone $server_name zone=parrot_wss_total:1m;
+limit_req_zone $binary_remote_addr zone=parrot_identity_per_source:1m rate=5r/s;
 
 upstream parrot_gateway {
     server gateway:8080;
@@ -54,7 +60,38 @@ server {
         proxy_send_timeout 60s;
     }
 
-    # The only direct public SpacetimeDB surface is this exact database subscription route.
+    # The SDK exchanges a caller token for a one-time WebSocket token before subscribing. Expose
+    # only that exact identity data-plane operation; every other identity route remains denied.
+    location = /v1/identity/websocket-token {
+        if ($request_method = OPTIONS) {
+            add_header Access-Control-Allow-Origin $parrot_frontend_cors_origin always;
+            add_header Access-Control-Allow-Methods "POST, OPTIONS" always;
+            add_header Access-Control-Allow-Headers "Authorization, Content-Type" always;
+            add_header Access-Control-Max-Age 600 always;
+            add_header Vary Origin always;
+            return 204;
+        }
+        if ($request_method != POST) { return 405; }
+
+        limit_req zone=parrot_identity_per_source burst=10 nodelay;
+        limit_req_status 429;
+        client_max_body_size 64k;
+        add_header Access-Control-Allow-Origin $parrot_frontend_cors_origin always;
+        add_header Vary Origin always;
+        proxy_pass http://parrot_spacetimedb;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Request-Id $request_id;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 15s;
+        proxy_send_timeout 15s;
+    }
+
+    # The only other direct public SpacetimeDB surface is this exact database subscription route.
     location = /v1/database/${SPACETIMEDB_DATABASE_NAME}/subscribe {
         limit_conn parrot_wss_per_source 16;
         limit_conn parrot_wss_total 128;
@@ -74,6 +111,6 @@ server {
     }
 
     # Gateway readiness remains token-protected. Deny SQL, reducers, publication, deletion, logs,
-    # identity, and every unknown route.
+    # all other identity operations, and every unknown route.
     location / { return 404; }
 }

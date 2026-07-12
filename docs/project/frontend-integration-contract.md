@@ -46,7 +46,8 @@ fails closed unless these public settings are present:
 - `VITE_WORKOS_API_HOSTNAME` (required unless staging dev mode is explicitly enabled)
 - `VITE_WORKOS_DEV_MODE=true` only for the temporary WorkOS staging evaluation
 - `VITE_GATEWAY_URL` (defaults to `https://parrotapi.skylarenns.com`)
-- `VITE_SPACETIMEDB_URI`
+- `VITE_SPACETIMEDB_URI=https://parrotapi.skylarenns.com` (HTTPS base; the SDK performs its
+  one-time WebSocket-token exchange over HTTPS and converts the subscribe transport to WSS)
 - `VITE_SPACETIMEDB_DATABASE_NAME`
 - `VITE_PARROT_WORKSPACE_ID` optionally pins the initial ticket scope
 

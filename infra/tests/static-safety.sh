@@ -327,8 +327,18 @@ grep -Fq '__APPROVED_REAL_IP_DIRECTIVES__' "$ROOT_DIR/infra/nginx/edge.conf.temp
 grep -Fq 'location = /v1/database/${SPACETIMEDB_DATABASE_NAME}/subscribe' \
   "$ROOT_DIR/infra/nginx/edge.conf.template" \
   || die "fixture expected one exact public database subscription route"
-[[ "$(grep -Fc 'proxy_pass http://parrot_spacetimedb;' "$ROOT_DIR/infra/nginx/edge.conf.template")" == 1 ]] \
-  || die "fixture expected exactly one direct SpacetimeDB proxy route"
+[[ "$(grep -Fc 'proxy_pass http://parrot_spacetimedb;' "$ROOT_DIR/infra/nginx/edge.conf.template")" == 2 ]] \
+  || die "fixture expected exactly two reviewed direct SpacetimeDB data-plane routes"
+[[ "$(grep -Fc 'location = /v1/identity/websocket-token' "$ROOT_DIR/infra/nginx/edge.conf.template")" == 1 ]] \
+  || die "fixture expected one exact WebSocket-token exchange route"
+grep -Fq 'limit_req zone=parrot_identity_per_source burst=10 nodelay;' \
+  "$ROOT_DIR/infra/nginx/edge.conf.template" \
+  || die "fixture expected per-source rate limiting on the identity token exchange"
+grep -Fq '"https://parrot.skylarenns.com" $http_origin;' \
+  "$ROOT_DIR/infra/nginx/edge.conf.template" \
+  || die "fixture expected only the exact Parrot frontend CORS origin"
+[[ "$(grep -Fc '/v1/identity/' "$ROOT_DIR/infra/nginx/edge.conf.template")" == 1 ]] \
+  || die "fixture forbids broad or additional public identity routes"
 grep -Fq 'location / { return 404; }' "$ROOT_DIR/infra/nginx/edge.conf.template" \
   || die "fixture expected the edge to deny unmatched routes"
 grep -Fq '/mnt/bigboi/project-conversation/production/backups' \

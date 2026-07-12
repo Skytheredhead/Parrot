@@ -29,7 +29,7 @@ describe("Parrot production runtime", () => {
         MODE: "production",
         PROD: true,
         VITE_WORKOS_DEV_MODE: "true",
-        VITE_SPACETIMEDB_URI: "wss://db.example.test",
+        VITE_SPACETIMEDB_URI: "https://db.example.test",
         VITE_SPACETIMEDB_DATABASE_NAME: "parrot",
         VITE_PARROT_WORKSPACE_ID: "01900000-0000-7000-8000-000000000001",
       },
