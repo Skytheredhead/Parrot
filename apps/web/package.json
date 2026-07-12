@@ -18,7 +18,7 @@
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "spacetimedb": "2.6.1",
-    "vite": "6.4.2"
+    "vite": "6.4.3"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "6.9.1",
