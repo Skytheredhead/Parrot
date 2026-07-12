@@ -76,6 +76,9 @@ server {
         limit_req zone=parrot_identity_per_source burst=10 nodelay;
         limit_req_status 429;
         client_max_body_size 64k;
+        # SpacetimeDB emits a wildcard CORS header. Hide it before adding the exact origin;
+        # browsers reject responses containing both wildcard and explicit ACAO values.
+        proxy_hide_header Access-Control-Allow-Origin;
         add_header Access-Control-Allow-Origin $parrot_frontend_cors_origin always;
         add_header Vary Origin always;
         proxy_pass http://parrot_spacetimedb;

@@ -334,6 +334,9 @@ grep -Fq 'location = /v1/database/${SPACETIMEDB_DATABASE_NAME}/subscribe' \
 grep -Fq 'limit_req zone=parrot_identity_per_source burst=10 nodelay;' \
   "$ROOT_DIR/infra/nginx/edge.conf.template" \
   || die "fixture expected per-source rate limiting on the identity token exchange"
+grep -Fq 'proxy_hide_header Access-Control-Allow-Origin;' \
+  "$ROOT_DIR/infra/nginx/edge.conf.template" \
+  || die "fixture expected upstream wildcard CORS suppression on the identity token exchange"
 grep -Fq '"https://parrot.skylarenns.com" $http_origin;' \
   "$ROOT_DIR/infra/nginx/edge.conf.template" \
   || die "fixture expected only the exact Parrot frontend CORS origin"
