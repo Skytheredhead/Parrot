@@ -33,6 +33,8 @@ sed \
 if docker info >/dev/null 2>&1; then
   docker run --rm \
     --entrypoint nginx \
+    --add-host gateway:127.0.0.1 \
+    --add-host spacetimedb:127.0.0.1 \
     --volume "$edge_config:/etc/nginx/conf.d/default.conf:ro" \
     nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c \
     -t
