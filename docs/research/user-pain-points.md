@@ -175,7 +175,7 @@ Twenty-four discussions were reviewed; the first twenty-one contain enough visib
 
 - Requiring every post to declare task/decision type, assignee, due date, tags and status before publishing.
 - Treating engagement, reactions, or unread volume as priority.
-- Infinite nested replies.
+- Unlimited visible reply indentation. Preserve logical ancestry, but use parent excerpts and branch focus instead of an endlessly narrowing tree.
 - Agent messages that are visually indistinguishable from humans or system events.
 - “AI summary” that silently replaces the record, omits dissent, or cannot show sources.
 - Workspace-wide agent/search access inferred from a single installation approval.

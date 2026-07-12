@@ -1,5 +1,7 @@
 # Agent collaboration source notes
 
+The canonical product synthesis now lives in [`agent-collaboration.md`](./agent-collaboration.md). This file remains the compact source-pattern companion.
+
 Status: initial primary-source synthesis
 Reviewed: 2026-07-11
 
