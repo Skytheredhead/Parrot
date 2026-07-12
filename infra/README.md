@@ -4,7 +4,7 @@ This directory is a guarded deployment candidate, not a release authorization. I
 
 ## Layout
 
-- `compose.yaml`: isolated, loopback-only SpacetimeDB baseline plus opt-in gateway, Nginx edge, worker, ClamAV, Ollama loopback relay, and telemetry profiles. Worker, scanner, model relay, and telemetry have no host ports. The edge is the only intended Cloudflare origin and binds dedicated loopback port `39090` (production) or `39190` (staging).
+- `compose.yaml`: isolated, loopback-only SpacetimeDB baseline plus opt-in gateway, Nginx edge, worker, ClamAV, Ollama loopback relay, and telemetry profiles. SpacetimeDB joins the egress-only network solely to fetch configured OIDC discovery/JWKS documents; it does not join telemetry. Worker, scanner, model relay, and telemetry have no host ports. The edge is the only intended Cloudflare origin and binds dedicated loopback port `39090` (production) or `39190` (staging).
 - `env/*.env.example`: separate production and staging identities, ports, paths, and placeholder provider values. They contain no secrets.
 - `docker/gateway.Dockerfile` and `docker/worker.Dockerfile`: reproducible non-root builds containing the reviewed repository-owned production compositions. Deployment still requires scanned/published output-image digests and private runtime configuration.
 - `nginx/edge.conf.template`: container edge with an exact gateway route allowlist, one exact database subscription route, and a default deny. `nginx/backend.conf.template` remains an unused host-Nginx reference; the approved Parrot topology does not install it.

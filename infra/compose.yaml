@@ -19,6 +19,8 @@ services:
           create_host_path: false
     networks:
       - backend
+      # Required only for the configured OIDC issuer discovery/JWKS fetch.
+      - egress
     healthcheck:
       test:
         - CMD
