@@ -258,10 +258,21 @@ pub(crate) fn find_membership<C: DbContext>(
     workspace_id: Uuid,
     identity: Identity,
 ) -> Option<WorkspaceMember> {
+    if !workspace_is_active(ctx, workspace_id) {
+        return None;
+    }
     ctx.db_read_only()
         .workspace_member()
         .key()
         .find(workspace_member_key(workspace_id, identity))
+}
+
+pub(crate) fn workspace_is_active<C: DbContext>(ctx: &C, workspace_id: Uuid) -> bool {
+    ctx.db_read_only()
+        .workspace_lifecycle()
+        .workspace_id()
+        .find(workspace_id)
+        .is_some_and(|lifecycle| lifecycle.state == WorkspaceLifecycleState::Active)
 }
 
 pub(crate) fn require_workspace_action(
@@ -346,6 +357,9 @@ pub(crate) fn require_service(
     kind: &str,
 ) -> Result<ServicePrincipal, String> {
     crate::reducers::require_oidc(ctx)?;
+    if !workspace_is_active(ctx, workspace_id) {
+        return Err("service capability denied".into());
+    }
     let service = ctx
         .db
         .service_principal()

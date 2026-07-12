@@ -1,4 +1,4 @@
-use crate::reducers::expire_presence_schedule;
+use crate::reducers::{drain_workspace_lifecycle_schedule, expire_presence_schedule};
 use spacetimedb::{Identity, SpacetimeType, Timestamp, Uuid};
 
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,6 +199,13 @@ pub enum OutboxState {
     DeadLetter,
 }
 
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceLifecycleState {
+    Active,
+    DeletionRequested,
+    DeletionFenced,
+}
+
 #[derive(SpacetimeType)]
 pub struct CreateTypedPostInput {
     pub space_id: Uuid,
@@ -377,6 +384,22 @@ pub struct SetNotificationPreferenceInput {
 }
 
 #[derive(SpacetimeType)]
+pub struct ConfigureWorkspaceLifecycleInput {
+    pub workspace_id: Uuid,
+    pub deleted_content_retention_days: Option<u32>,
+    pub deletion_grace_days: Option<u16>,
+    pub expected_revision: u64,
+    pub client_request_id: Uuid,
+}
+
+#[derive(SpacetimeType)]
+pub struct WorkspaceLifecycleCommandInput {
+    pub workspace_id: Uuid,
+    pub expected_revision: u64,
+    pub client_request_id: Uuid,
+}
+
+#[derive(SpacetimeType)]
 pub struct SearchWorkItem {
     pub job_id: Uuid,
     pub effect_key: String,
@@ -527,6 +550,38 @@ pub struct Workspace {
     pub revision: u64,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = workspace_lifecycle, private)]
+#[derive(Clone)]
+pub struct WorkspaceLifecycle {
+    #[primary_key]
+    pub workspace_id: Uuid,
+    pub state: WorkspaceLifecycleState,
+    pub lifecycle_epoch: u64,
+    pub deleted_content_retention_days: Option<u32>,
+    pub deletion_grace_days: Option<u16>,
+    pub deletion_requested_by: Option<Identity>,
+    pub deletion_requested_at: Option<Timestamp>,
+    pub deletion_execute_after: Option<Timestamp>,
+    pub revision: u64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(
+    accessor = workspace_lifecycle_drain_schedule,
+    private,
+    scheduled(drain_workspace_lifecycle_schedule)
+)]
+pub struct WorkspaceLifecycleDrainSchedule {
+    #[primary_key]
+    #[auto_inc]
+    pub scheduled_id: u64,
+    pub scheduled_at: spacetimedb::ScheduleAt,
+    #[unique]
+    pub workspace_id: Uuid,
+    pub lifecycle_epoch: u64,
 }
 
 #[spacetimedb::table(accessor = workspace_member, private)]
@@ -988,6 +1043,7 @@ pub struct NotificationDeliveryPermit {
     #[primary_key]
     pub job_id: Uuid,
     pub notification_id: Uuid,
+    #[index(btree)]
     pub workspace_id: Uuid,
     pub service_identity: Identity,
     pub worker_slot_id: String,
@@ -1185,7 +1241,11 @@ pub struct TrustedTool {
     pub configured_at: Timestamp,
 }
 
-#[spacetimedb::table(accessor = agent_run, private)]
+#[spacetimedb::table(
+    accessor = agent_run,
+    private,
+    index(accessor = workspace_state, btree(columns = [workspace_id, state]))
+)]
 #[derive(Clone)]
 pub struct AgentRun {
     #[primary_key]
@@ -1250,7 +1310,11 @@ pub struct AgentContextManifest {
     pub created_at: Timestamp,
 }
 
-#[spacetimedb::table(accessor = agent_tool_call, private)]
+#[spacetimedb::table(
+    accessor = agent_tool_call,
+    private,
+    index(accessor = run_state, btree(columns = [run_id, state]))
+)]
 pub struct AgentToolCall {
     #[primary_key]
     pub id: Uuid,
@@ -1271,7 +1335,11 @@ pub struct AgentToolCall {
     pub updated_at: Timestamp,
 }
 
-#[spacetimedb::table(accessor = approval_request, private)]
+#[spacetimedb::table(
+    accessor = approval_request,
+    private,
+    index(accessor = run_state, btree(columns = [run_id, state]))
+)]
 pub struct ApprovalRequest {
     #[primary_key]
     pub id: Uuid,
@@ -1306,7 +1374,11 @@ pub struct EffectLedger {
     pub updated_at: Timestamp,
 }
 
-#[spacetimedb::table(accessor = outbox_job, private)]
+#[spacetimedb::table(
+    accessor = outbox_job,
+    private,
+    index(accessor = workspace_state, btree(columns = [workspace_id, state]))
+)]
 pub struct OutboxJob {
     #[primary_key]
     pub id: Uuid,

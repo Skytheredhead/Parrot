@@ -7,6 +7,7 @@ const OUTBOX_MAX_ATTEMPTS: u32 = 12;
 const OUTBOX_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const MAX_REPLY_DEPTH: u32 = 32;
 const MAX_PRESENCE_SESSIONS_PER_SCOPE: usize = 8;
+const WORKSPACE_LIFECYCLE_DRAIN_BATCH: usize = 64;
 const NOTIFICATION_GROUP_WINDOW_SECONDS: i64 = 5 * 60;
 const NOTIFICATION_PERMIT_MAX_SECONDS: u32 = 5;
 const JOB_NOTIFICATION_DELIVER: &str =
@@ -32,6 +33,62 @@ fn normalized_input_hash(value: &str) -> String {
 fn new_id(ctx: &ReducerContext) -> Result<Uuid, String> {
     ctx.new_uuid_v7()
         .map_err(|_| "unable to allocate resource id".to_string())
+}
+
+fn new_workspace_lifecycle(workspace_id: Uuid, now: spacetimedb::Timestamp) -> WorkspaceLifecycle {
+    WorkspaceLifecycle {
+        workspace_id,
+        state: WorkspaceLifecycleState::Active,
+        lifecycle_epoch: 1,
+        deleted_content_retention_days: None,
+        deletion_grace_days: None,
+        deletion_requested_by: None,
+        deletion_requested_at: None,
+        deletion_execute_after: None,
+        revision: 1,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn policy_workspace_lifecycle_state(
+    state: WorkspaceLifecycleState,
+) -> crate::policy::PolicyWorkspaceLifecycleState {
+    match state {
+        WorkspaceLifecycleState::Active => crate::policy::PolicyWorkspaceLifecycleState::Active,
+        WorkspaceLifecycleState::DeletionRequested => {
+            crate::policy::PolicyWorkspaceLifecycleState::DeletionRequested
+        }
+        WorkspaceLifecycleState::DeletionFenced => {
+            crate::policy::PolicyWorkspaceLifecycleState::DeletionFenced
+        }
+    }
+}
+
+fn workspace_lifecycle_row_valid(row: &WorkspaceLifecycle) -> bool {
+    let request_fields = (
+        row.deletion_requested_by.is_some(),
+        row.deletion_requested_at,
+        row.deletion_execute_after,
+    );
+    row.lifecycle_epoch > 0
+        && row.revision > 0
+        && crate::policy::workspace_lifecycle_configuration_valid(
+            row.deleted_content_retention_days,
+            row.deletion_grace_days,
+        )
+        && match row.state {
+            WorkspaceLifecycleState::Active => request_fields == (false, None, None),
+            WorkspaceLifecycleState::DeletionRequested
+            | WorkspaceLifecycleState::DeletionFenced => {
+                row.deletion_grace_days.is_some()
+                    && request_fields.0
+                    && request_fields
+                        .1
+                        .zip(request_fields.2)
+                        .is_some_and(|(requested, execute_after)| execute_after > requested)
+            }
+        }
 }
 
 pub(crate) fn require_oidc(ctx: &ReducerContext) -> Result<(), String> {
@@ -199,6 +256,8 @@ fn has_application_state(ctx: &ReducerContext) -> bool {
         || ctx.db.platform_audit_log().count() != 0
         || ctx.db.user().count() != 0
         || ctx.db.workspace().count() != 0
+        || ctx.db.workspace_lifecycle().count() != 0
+        || ctx.db.workspace_lifecycle_drain_schedule().count() != 0
         || ctx.db.workspace_member().count() != 0
         || ctx.db.space().count() != 0
         || ctx.db.space_member().count() != 0
@@ -1269,6 +1328,317 @@ fn revoke_agent_outbox(ctx: &ReducerContext, run_id: Uuid, reason: &str) {
     }
 }
 
+fn drain_agent_run_children(ctx: &ReducerContext, run_id: Uuid) -> bool {
+    let approval_ids: Vec<_> = [ApprovalState::Pending, ApprovalState::Approved]
+        .into_iter()
+        .flat_map(|state| {
+            ctx.db
+                .approval_request()
+                .run_state()
+                .filter((run_id, state))
+        })
+        .take(WORKSPACE_LIFECYCLE_DRAIN_BATCH)
+        .map(|approval| approval.id)
+        .collect();
+    for approval_id in approval_ids {
+        let Some(mut approval) = ctx.db.approval_request().id().find(approval_id) else {
+            continue;
+        };
+        approval.state = ApprovalState::Rejected;
+        approval.decided_at = Some(ctx.timestamp);
+        ctx.db.approval_request().id().update(approval);
+    }
+
+    let tool_ids: Vec<_> = [
+        ToolCallState::Proposed,
+        ToolCallState::AwaitingApproval,
+        ToolCallState::Approved,
+        ToolCallState::Executing,
+    ]
+    .into_iter()
+    .flat_map(|state| ctx.db.agent_tool_call().run_state().filter((run_id, state)))
+    .take(WORKSPACE_LIFECYCLE_DRAIN_BATCH)
+    .map(|tool| tool.id)
+    .collect();
+    for tool_id in tool_ids {
+        let Some(mut tool) = ctx.db.agent_tool_call().id().find(tool_id) else {
+            continue;
+        };
+        if tool.state == ToolCallState::Executing {
+            tool.state = ToolCallState::OutcomeUnknown;
+            if let Some(mut ledger) = ctx
+                .db
+                .effect_ledger()
+                .effect_key()
+                .find(tool.effect_key.clone())
+            {
+                ledger.state = EffectLedgerState::OutcomeUnknown;
+                ledger.updated_at = ctx.timestamp;
+                ctx.db.effect_ledger().effect_key().update(ledger);
+            }
+        } else {
+            tool.state = ToolCallState::Canceled;
+        }
+        tool.updated_at = ctx.timestamp;
+        ctx.db.agent_tool_call().id().update(tool);
+    }
+
+    let approvals_remain = [ApprovalState::Pending, ApprovalState::Approved]
+        .into_iter()
+        .any(|state| {
+            ctx.db
+                .approval_request()
+                .run_state()
+                .filter((run_id, state))
+                .next()
+                .is_some()
+        });
+    let tools_remain = [
+        ToolCallState::Proposed,
+        ToolCallState::AwaitingApproval,
+        ToolCallState::Approved,
+        ToolCallState::Executing,
+    ]
+    .into_iter()
+    .any(|state| {
+        ctx.db
+            .agent_tool_call()
+            .run_state()
+            .filter((run_id, state))
+            .next()
+            .is_some()
+    });
+    !approvals_remain && !tools_remain
+}
+
+fn drain_workspace_runtime_batch(
+    ctx: &ReducerContext,
+    workspace_id: Uuid,
+    lifecycle_state: WorkspaceLifecycleState,
+) {
+    if lifecycle_state == WorkspaceLifecycleState::DeletionFenced {
+        let run_id = [
+            AgentRunState::Queued,
+            AgentRunState::Authorizing,
+            AgentRunState::CollectingContext,
+            AgentRunState::Running,
+            AgentRunState::AwaitingApproval,
+            AgentRunState::ExecutingTool,
+        ]
+        .into_iter()
+        .find_map(|state| {
+            ctx.db
+                .agent_run()
+                .workspace_state()
+                .filter((workspace_id, state))
+                .next()
+                .map(|run| run.id)
+        });
+        if let Some(run_id) = run_id
+            && drain_agent_run_children(ctx, run_id)
+            && let Some(mut run) = ctx.db.agent_run().id().find(run_id)
+        {
+            run.cancel_requested = true;
+            run.state = AgentRunState::Revoked;
+            run.lease_owner = None;
+            run.lease_until = None;
+            run.version = run.version.saturating_add(1);
+            run.updated_at = ctx.timestamp;
+            ctx.db.agent_run().id().update(run);
+        }
+
+        let job_ids: Vec<_> = [
+            OutboxState::Pending,
+            OutboxState::Leased,
+            OutboxState::Retry,
+            OutboxState::OutcomeUnknown,
+        ]
+        .into_iter()
+        .flat_map(|state| {
+            ctx.db
+                .outbox_job()
+                .workspace_state()
+                .filter((workspace_id, state))
+        })
+        .take(WORKSPACE_LIFECYCLE_DRAIN_BATCH)
+        .map(|job| job.id)
+        .collect();
+        for job_id in job_ids {
+            let Some(mut job) = ctx.db.outbox_job().id().find(job_id) else {
+                continue;
+            };
+            job.state = OutboxState::DeadLetter;
+            job.last_error = "workspace_lifecycle_fenced".into();
+            job.lease_owner = None;
+            job.worker_slot_id.clear();
+            job.lease_until = None;
+            job.updated_at = ctx.timestamp;
+            ctx.db.outbox_job().id().update(job);
+        }
+    }
+
+    let permit_job_ids: Vec<_> = ctx
+        .db
+        .notification_delivery_permit()
+        .workspace_id()
+        .filter(workspace_id)
+        .take(WORKSPACE_LIFECYCLE_DRAIN_BATCH)
+        .map(|permit| permit.job_id)
+        .collect();
+    for job_id in permit_job_ids {
+        ctx.db
+            .notification_delivery_permit()
+            .job_id()
+            .delete(job_id);
+    }
+
+    let presence_keys: Vec<_> = ctx
+        .db
+        .presence_session()
+        .workspace_id()
+        .filter(workspace_id)
+        .take(WORKSPACE_LIFECYCLE_DRAIN_BATCH)
+        .map(|session| session.key)
+        .collect();
+    for presence_key in presence_keys {
+        remove_presence_session(ctx, &presence_key);
+    }
+
+    let current_presence_keys: Vec<_> = ctx
+        .db
+        .current_presence()
+        .workspace_id()
+        .filter(workspace_id)
+        .take(WORKSPACE_LIFECYCLE_DRAIN_BATCH)
+        .map(|presence| presence.key)
+        .collect();
+    for key in current_presence_keys {
+        ctx.db.current_presence().key().delete(key);
+    }
+}
+
+fn workspace_runtime_drain_pending(
+    ctx: &ReducerContext,
+    workspace_id: Uuid,
+    lifecycle_state: WorkspaceLifecycleState,
+) -> bool {
+    let irreversible_work_pending = lifecycle_state == WorkspaceLifecycleState::DeletionFenced
+        && ([
+            AgentRunState::Queued,
+            AgentRunState::Authorizing,
+            AgentRunState::CollectingContext,
+            AgentRunState::Running,
+            AgentRunState::AwaitingApproval,
+            AgentRunState::ExecutingTool,
+        ]
+        .into_iter()
+        .any(|state| {
+            ctx.db
+                .agent_run()
+                .workspace_state()
+                .filter((workspace_id, state))
+                .next()
+                .is_some()
+        }) || [
+            OutboxState::Pending,
+            OutboxState::Leased,
+            OutboxState::Retry,
+            OutboxState::OutcomeUnknown,
+        ]
+        .into_iter()
+        .any(|state| {
+            ctx.db
+                .outbox_job()
+                .workspace_state()
+                .filter((workspace_id, state))
+                .next()
+                .is_some()
+        }));
+    irreversible_work_pending
+        || ctx
+            .db
+            .notification_delivery_permit()
+            .workspace_id()
+            .filter(workspace_id)
+            .next()
+            .is_some()
+        || ctx
+            .db
+            .presence_session()
+            .workspace_id()
+            .filter(workspace_id)
+            .next()
+            .is_some()
+        || ctx
+            .db
+            .current_presence()
+            .workspace_id()
+            .filter(workspace_id)
+            .next()
+            .is_some()
+}
+
+fn schedule_workspace_lifecycle_drain(
+    ctx: &ReducerContext,
+    workspace_id: Uuid,
+    lifecycle_epoch: u64,
+) {
+    let scheduled_at = (ctx.timestamp + TimeDuration::from_micros(1_000_000)).into();
+    if let Some(existing) = ctx
+        .db
+        .workspace_lifecycle_drain_schedule()
+        .workspace_id()
+        .find(workspace_id)
+    {
+        ctx.db
+            .workspace_lifecycle_drain_schedule()
+            .scheduled_id()
+            .update(WorkspaceLifecycleDrainSchedule {
+                scheduled_id: existing.scheduled_id,
+                scheduled_at,
+                workspace_id,
+                lifecycle_epoch,
+            });
+    } else {
+        ctx.db
+            .workspace_lifecycle_drain_schedule()
+            .insert(WorkspaceLifecycleDrainSchedule {
+                scheduled_id: 0,
+                scheduled_at,
+                workspace_id,
+                lifecycle_epoch,
+            });
+    }
+}
+
+#[spacetimedb::reducer]
+pub fn drain_workspace_lifecycle_schedule(
+    ctx: &ReducerContext,
+    schedule: WorkspaceLifecycleDrainSchedule,
+) -> Result<(), String> {
+    if ctx.sender() != ctx.database_identity() {
+        return Err("workspace lifecycle drain may only be invoked by the scheduler".into());
+    }
+    let Some(lifecycle) = ctx
+        .db
+        .workspace_lifecycle()
+        .workspace_id()
+        .find(schedule.workspace_id)
+    else {
+        return Ok(());
+    };
+    if lifecycle.state == WorkspaceLifecycleState::Active
+        || lifecycle.lifecycle_epoch != schedule.lifecycle_epoch
+    {
+        return Ok(());
+    }
+    drain_workspace_runtime_batch(ctx, schedule.workspace_id, lifecycle.state);
+    if workspace_runtime_drain_pending(ctx, schedule.workspace_id, lifecycle.state) {
+        schedule_workspace_lifecycle_drain(ctx, schedule.workspace_id, schedule.lifecycle_epoch);
+    }
+    Ok(())
+}
+
 fn agent_scope_enabled(
     ctx: &ReducerContext,
     installation_id: Uuid,
@@ -1616,6 +1986,37 @@ pub fn migrate_platform_authority(ctx: &ReducerContext) -> Result<(), String> {
         job.updated_at = ctx.timestamp;
         ctx.db.outbox_job().id().update(job);
     }
+    let workspace_ids: Vec<_> = ctx
+        .db
+        .workspace()
+        .iter()
+        .map(|workspace| workspace.id)
+        .collect();
+    for workspace_id in workspace_ids {
+        if ctx
+            .db
+            .workspace_lifecycle()
+            .workspace_id()
+            .find(workspace_id)
+            .is_none()
+        {
+            ctx.db
+                .workspace_lifecycle()
+                .insert(new_workspace_lifecycle(workspace_id, ctx.timestamp));
+        }
+    }
+    for lifecycle in ctx.db.workspace_lifecycle().iter() {
+        if ctx
+            .db
+            .workspace()
+            .id()
+            .find(lifecycle.workspace_id)
+            .is_none()
+            || !workspace_lifecycle_row_valid(&lifecycle)
+        {
+            return Err("workspace lifecycle migration invariant failed".into());
+        }
+    }
     Ok(())
 }
 
@@ -1689,6 +2090,9 @@ pub fn bootstrap_owner(
         created_at: ctx.timestamp,
         updated_at: ctx.timestamp,
     });
+    ctx.db
+        .workspace_lifecycle()
+        .insert(new_workspace_lifecycle(workspace_id, ctx.timestamp));
     ctx.db.workspace_member().insert(WorkspaceMember {
         key: workspace_member_key(workspace_id, ctx.sender()),
         workspace_id,
@@ -2024,6 +2428,9 @@ pub fn create_workspace(
         created_at: ctx.timestamp,
         updated_at: ctx.timestamp,
     });
+    ctx.db
+        .workspace_lifecycle()
+        .insert(new_workspace_lifecycle(id, ctx.timestamp));
     ctx.db.workspace_member().insert(WorkspaceMember {
         key: workspace_member_key(id, ctx.sender()),
         workspace_id: id,
@@ -2053,6 +2460,342 @@ pub fn create_workspace(
             request_id: client_request_id,
             effective_principal: "human",
             summary: "workspace created",
+        },
+    )
+}
+
+fn workspace_lifecycle_owner(
+    ctx: &ReducerContext,
+    workspace_id: Uuid,
+) -> Result<(Workspace, WorkspaceLifecycle), String> {
+    require_registered_user(ctx)?;
+    let workspace = ctx
+        .db
+        .workspace()
+        .id()
+        .find(workspace_id)
+        .ok_or_else(|| "workspace lifecycle unavailable".to_string())?;
+    if workspace.owner_identity != ctx.sender() {
+        return Err("workspace lifecycle unavailable".into());
+    }
+    let owner_membership = ctx
+        .db
+        .workspace_member()
+        .key()
+        .find(workspace_member_key(workspace_id, ctx.sender()))
+        .filter(|member| member.active && member.role == WorkspaceRole::Owner)
+        .ok_or_else(|| "workspace lifecycle unavailable".to_string())?;
+    if owner_membership.workspace_id != workspace_id {
+        return Err("workspace lifecycle unavailable".into());
+    }
+    let lifecycle = ctx
+        .db
+        .workspace_lifecycle()
+        .workspace_id()
+        .find(workspace_id)
+        .ok_or_else(|| "workspace lifecycle unavailable".to_string())?;
+    if !workspace_lifecycle_row_valid(&lifecycle) {
+        return Err("workspace lifecycle unavailable".into());
+    }
+    Ok((workspace, lifecycle))
+}
+
+fn advance_workspace_lifecycle(row: &mut WorkspaceLifecycle) -> Result<(), String> {
+    row.lifecycle_epoch = row
+        .lifecycle_epoch
+        .checked_add(1)
+        .ok_or_else(|| "workspace lifecycle epoch exhausted".to_string())?;
+    row.revision = row
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| "workspace lifecycle revision exhausted".to_string())?;
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn configure_workspace_lifecycle(
+    ctx: &ReducerContext,
+    input: ConfigureWorkspaceLifecycleInput,
+) -> Result<(), String> {
+    let ConfigureWorkspaceLifecycleInput {
+        workspace_id,
+        deleted_content_retention_days,
+        deletion_grace_days,
+        expected_revision,
+        client_request_id,
+    } = input;
+    let (_, mut lifecycle) = workspace_lifecycle_owner(ctx, workspace_id)?;
+    let input_hash = normalized_input_hash(&format!(
+        "{workspace_id}\0{deleted_content_retention_days:?}\0{deletion_grace_days:?}\0{expected_revision}"
+    ));
+    if existing_receipt(
+        ctx,
+        Some(workspace_id),
+        "configure_workspace_lifecycle",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    revision_matches(lifecycle.revision, expected_revision)?;
+    if lifecycle.state != WorkspaceLifecycleState::Active
+        || !crate::policy::workspace_lifecycle_configuration_valid(
+            deleted_content_retention_days,
+            deletion_grace_days,
+        )
+    {
+        return Err("workspace lifecycle configuration denied".into());
+    }
+    lifecycle.deleted_content_retention_days = deleted_content_retention_days;
+    lifecycle.deletion_grace_days = deletion_grace_days;
+    lifecycle.revision = lifecycle
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| "workspace lifecycle revision exhausted".to_string())?;
+    lifecycle.updated_at = ctx.timestamp;
+    ctx.db
+        .workspace_lifecycle()
+        .workspace_id()
+        .update(lifecycle.clone());
+    insert_receipt(
+        ctx,
+        Some(workspace_id),
+        "configure_workspace_lifecycle",
+        client_request_id,
+        input_hash,
+        "workspace_lifecycle",
+        workspace_id,
+    );
+    audit(
+        ctx,
+        AuditInput {
+            workspace_id,
+            action: "configure_workspace_lifecycle",
+            resource_type: "workspace_lifecycle",
+            resource_id: workspace_id,
+            request_id: client_request_id,
+            effective_principal: "human",
+            summary: "workspace retention and deletion grace configuration updated",
+        },
+    )
+}
+
+#[spacetimedb::reducer]
+pub fn request_workspace_deletion(
+    ctx: &ReducerContext,
+    input: WorkspaceLifecycleCommandInput,
+) -> Result<(), String> {
+    let WorkspaceLifecycleCommandInput {
+        workspace_id,
+        expected_revision,
+        client_request_id,
+    } = input;
+    let (_, mut lifecycle) = workspace_lifecycle_owner(ctx, workspace_id)?;
+    let input_hash = normalized_input_hash(&format!("{workspace_id}\0{expected_revision}"));
+    if existing_receipt(
+        ctx,
+        Some(workspace_id),
+        "request_workspace_deletion",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    revision_matches(lifecycle.revision, expected_revision)?;
+    let grace_days = lifecycle
+        .deletion_grace_days
+        .ok_or_else(|| "workspace deletion grace is not configured".to_string())?;
+    if !crate::policy::workspace_lifecycle_transition_allowed(
+        policy_workspace_lifecycle_state(lifecycle.state),
+        crate::policy::PolicyWorkspaceLifecycleState::DeletionRequested,
+        true,
+        true,
+        false,
+    ) {
+        return Err("workspace deletion request denied".into());
+    }
+    let execute_after =
+        ctx.timestamp + TimeDuration::from_micros(i64::from(grace_days) * 24 * 60 * 60 * 1_000_000);
+    lifecycle.state = WorkspaceLifecycleState::DeletionRequested;
+    lifecycle.deletion_requested_by = Some(ctx.sender());
+    lifecycle.deletion_requested_at = Some(ctx.timestamp);
+    lifecycle.deletion_execute_after = Some(execute_after);
+    advance_workspace_lifecycle(&mut lifecycle)?;
+    lifecycle.updated_at = ctx.timestamp;
+    let lifecycle_epoch = lifecycle.lifecycle_epoch;
+    ctx.db
+        .workspace_lifecycle()
+        .workspace_id()
+        .update(lifecycle);
+    schedule_workspace_lifecycle_drain(ctx, workspace_id, lifecycle_epoch);
+    insert_receipt(
+        ctx,
+        Some(workspace_id),
+        "request_workspace_deletion",
+        client_request_id,
+        input_hash,
+        "workspace_lifecycle",
+        workspace_id,
+    );
+    audit(
+        ctx,
+        AuditInput {
+            workspace_id,
+            action: "request_workspace_deletion",
+            resource_type: "workspace_lifecycle",
+            resource_id: workspace_id,
+            request_id: client_request_id,
+            effective_principal: "human",
+            summary: "workspace deletion requested; access and runtime work fenced",
+        },
+    )
+}
+
+#[spacetimedb::reducer]
+pub fn cancel_workspace_deletion(
+    ctx: &ReducerContext,
+    input: WorkspaceLifecycleCommandInput,
+) -> Result<(), String> {
+    let WorkspaceLifecycleCommandInput {
+        workspace_id,
+        expected_revision,
+        client_request_id,
+    } = input;
+    let (_, mut lifecycle) = workspace_lifecycle_owner(ctx, workspace_id)?;
+    let input_hash = normalized_input_hash(&format!("{workspace_id}\0{expected_revision}"));
+    if existing_receipt(
+        ctx,
+        Some(workspace_id),
+        "cancel_workspace_deletion",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    revision_matches(lifecycle.revision, expected_revision)?;
+    if !crate::policy::workspace_lifecycle_transition_allowed(
+        policy_workspace_lifecycle_state(lifecycle.state),
+        crate::policy::PolicyWorkspaceLifecycleState::Active,
+        true,
+        lifecycle.deletion_grace_days.is_some(),
+        false,
+    ) {
+        return Err("workspace deletion cancellation denied".into());
+    }
+    lifecycle.state = WorkspaceLifecycleState::Active;
+    lifecycle.deletion_requested_by = None;
+    lifecycle.deletion_requested_at = None;
+    lifecycle.deletion_execute_after = None;
+    advance_workspace_lifecycle(&mut lifecycle)?;
+    lifecycle.updated_at = ctx.timestamp;
+    ctx.db
+        .workspace_lifecycle()
+        .workspace_id()
+        .update(lifecycle);
+    if let Some(schedule) = ctx
+        .db
+        .workspace_lifecycle_drain_schedule()
+        .workspace_id()
+        .find(workspace_id)
+    {
+        ctx.db
+            .workspace_lifecycle_drain_schedule()
+            .scheduled_id()
+            .delete(schedule.scheduled_id);
+    }
+    insert_receipt(
+        ctx,
+        Some(workspace_id),
+        "cancel_workspace_deletion",
+        client_request_id,
+        input_hash,
+        "workspace_lifecycle",
+        workspace_id,
+    );
+    audit(
+        ctx,
+        AuditInput {
+            workspace_id,
+            action: "cancel_workspace_deletion",
+            resource_type: "workspace_lifecycle",
+            resource_id: workspace_id,
+            request_id: client_request_id,
+            effective_principal: "human",
+            summary: "workspace deletion request canceled; prior jobs remain revoked",
+        },
+    )
+}
+
+#[spacetimedb::reducer]
+pub fn finalize_workspace_deletion_fence(
+    ctx: &ReducerContext,
+    input: WorkspaceLifecycleCommandInput,
+) -> Result<(), String> {
+    let WorkspaceLifecycleCommandInput {
+        workspace_id,
+        expected_revision,
+        client_request_id,
+    } = input;
+    let (_, mut lifecycle) = workspace_lifecycle_owner(ctx, workspace_id)?;
+    let input_hash = normalized_input_hash(&format!("{workspace_id}\0{expected_revision}"));
+    if existing_receipt(
+        ctx,
+        Some(workspace_id),
+        "finalize_workspace_deletion_fence",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    revision_matches(lifecycle.revision, expected_revision)?;
+    let grace_elapsed = lifecycle
+        .deletion_execute_after
+        .is_some_and(|execute_after| execute_after <= ctx.timestamp);
+    if !crate::policy::workspace_lifecycle_transition_allowed(
+        policy_workspace_lifecycle_state(lifecycle.state),
+        crate::policy::PolicyWorkspaceLifecycleState::DeletionFenced,
+        true,
+        lifecycle.deletion_grace_days.is_some(),
+        grace_elapsed,
+    ) {
+        return Err("workspace deletion fence cannot be finalized".into());
+    }
+    lifecycle.state = WorkspaceLifecycleState::DeletionFenced;
+    advance_workspace_lifecycle(&mut lifecycle)?;
+    lifecycle.updated_at = ctx.timestamp;
+    let lifecycle_epoch = lifecycle.lifecycle_epoch;
+    ctx.db
+        .workspace_lifecycle()
+        .workspace_id()
+        .update(lifecycle);
+    schedule_workspace_lifecycle_drain(ctx, workspace_id, lifecycle_epoch);
+    insert_receipt(
+        ctx,
+        Some(workspace_id),
+        "finalize_workspace_deletion_fence",
+        client_request_id,
+        input_hash,
+        "workspace_lifecycle",
+        workspace_id,
+    );
+    audit(
+        ctx,
+        AuditInput {
+            workspace_id,
+            action: "finalize_workspace_deletion_fence",
+            resource_type: "workspace_lifecycle",
+            resource_id: workspace_id,
+            request_id: client_request_id,
+            effective_principal: "human",
+            summary: "irreversible workspace access fence finalized; provider purge remains separate",
         },
     )
 }

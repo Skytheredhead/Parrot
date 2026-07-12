@@ -86,6 +86,27 @@ Evidence:
 - A real SpacetimeDB 2.6.1 automatic publish from the previous committed schema to the new schema
   completed successfully.
 
+### S-007 — Workspace deletion authority and stale-runtime access (P1)
+
+Resolved for authoritative access fencing, not physical erasure. Every workspace has an additive,
+fail-closed lifecycle row. Only the active owner with an active owner membership can configure
+bounded retention/grace inputs or transition the lifecycle. A deletion request immediately removes
+human and service visibility and increments the lifecycle epoch in a bounded transaction. During the
+reversible grace window, generation-bound scheduler batches clear notification permits and both raw
+and aggregate presence while durable jobs/agent state remain paused for safe cancellation and effect
+reconciliation. Post-grace finalization is irreversible and then drains durable work, normalizing
+open approval/tool/effect state before terminal run revocation.
+
+Evidence:
+
+- `spacetimedb/src/authz.rs` requires an active lifecycle for membership and service authority.
+- `spacetimedb/src/views.rs` filters every human/service content surface while retaining a
+  content-free lifecycle status view for current members.
+- `spacetimedb/src/reducers.rs` backfills lifecycle rows, validates transition invariants, commits
+  access fencing before size-bounded epoch-checked runtime drains.
+- Rust policy tests cover bounded configuration, grace enforcement, cancellation, and irreversible
+  final fencing; exact 2.6.1 fresh publish and automatic committed-schema migration pass.
+
 ## Open release blockers
 
 ### B-001 — Production provider composition and conformance (High)
@@ -124,8 +145,8 @@ Static container and configuration checks pass, but the local environment did no
 daemon for an actual image build. Backup documentation and a bounded restored-state verifier exist,
 but a real deployed backup/restore drill and measured RPO/RTO have not been completed. The bounded
 verifier intentionally remains ineligible for traffic or live upgrades until current module code
-can be independently bound, outbox lease recovery can be verified without a public global scan, and deletion-overlay, object, search, provider, and
-authorization-behavior checks exist.
+can be independently bound, outbox lease recovery can be verified without a public global scan, and
+downstream deletion propagation, object, search, provider, and authorization-behavior checks exist.
 
 Required before release:
 
@@ -148,7 +169,7 @@ Current passing test counts at this review checkpoint are:
 - Client SDK: 11/11
 - Gateway: 62/62
 - Worker: 90/90
-- Rust policy and reducer-contract tests: 48/48
+- Rust policy and reducer-contract tests: 49/49
 - Job-envelope contract: 2/2
 
 The counts are evidence for the checked-in provider-neutral implementation only; they are not substitutes for the open environment-specific release gates above.

@@ -122,6 +122,8 @@ platform_command_receipt
 platform_audit_log
 user
 workspace
+workspace_lifecycle
+workspace_lifecycle_drain_schedule
 workspace_member
 space
 space_member
@@ -176,7 +178,7 @@ file_upload
 audit_log
 command_receipt
 TABLES
-[[ "$required_private_table_count" == 61 ]] || die "internal required private-table inventory drifted"
+[[ "$required_private_table_count" == 63 ]] || die "internal required private-table inventory drifted"
 
 domain_invariant_count=0
 while IFS='|' read -r child parent child_column parent_column; do
@@ -188,6 +190,8 @@ while IFS='|' read -r child parent child_column parent_column; do
   domain_invariant_count=$((domain_invariant_count + 1))
 done <<'INVARIANTS'
 workspace_member|workspace|workspace_id|id
+workspace_lifecycle|workspace|workspace_id|id
+workspace_lifecycle_drain_schedule|workspace_lifecycle|workspace_id|workspace_id
 space|workspace|workspace_id|id
 space_member|space|space_id|id
 post|workspace|workspace_id|id
@@ -253,7 +257,7 @@ file_upload|file_record|file_id|id
 file_upload|workspace|workspace_id|id
 audit_log|workspace|workspace_id|id
 INVARIANTS
-[[ "$domain_invariant_count" == 65 ]] || die "internal restored-state invariant inventory drifted"
+[[ "$domain_invariant_count" == 67 ]] || die "internal restored-state invariant inventory drifted"
 
 umask 077
 {

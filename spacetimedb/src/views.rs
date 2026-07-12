@@ -1,5 +1,6 @@
 use crate::authz::{
     Action, agent_scope_key, can_read_space, can_read_workspace, find_membership, role_allows,
+    workspace_is_active,
 };
 use crate::model::*;
 use crate::policy;
@@ -26,6 +27,17 @@ pub struct VisibleWorkspaceMember {
     pub identity: Identity,
     pub role: WorkspaceRole,
     pub active: bool,
+}
+
+#[derive(SpacetimeType)]
+pub struct VisibleWorkspaceLifecycle {
+    pub workspace_id: Uuid,
+    pub state: WorkspaceLifecycleState,
+    pub lifecycle_epoch: u64,
+    pub deleted_content_retention_days: Option<u32>,
+    pub deletion_grace_days: Option<u16>,
+    pub deletion_execute_after: Option<Timestamp>,
+    pub revision: u64,
 }
 
 #[derive(SpacetimeType)]
@@ -316,7 +328,7 @@ fn accessible_spaces(ctx: &ViewContext) -> Vec<Space> {
         .workspace_member()
         .identity()
         .filter(ctx.sender())
-        .filter(|member| member.active)
+        .filter(|member| member.active && workspace_is_active(ctx, member.workspace_id))
         .flat_map(|member| {
             ctx.db
                 .space()
@@ -420,7 +432,7 @@ fn accessible_runs(ctx: &ViewContext) -> Vec<AgentRun> {
         .workspace_member()
         .identity()
         .filter(ctx.sender())
-        .filter(|member| member.active)
+        .filter(|member| member.active && workspace_is_active(ctx, member.workspace_id))
         .flat_map(|member| {
             ctx.db
                 .agent_run()
@@ -446,7 +458,7 @@ pub fn my_workspace_memberships(ctx: &ViewContext) -> Vec<VisibleWorkspaceMember
         .workspace_member()
         .identity()
         .filter(ctx.sender())
-        .filter(|row| row.active)
+        .filter(|row| row.active && workspace_is_active(ctx, row.workspace_id))
         .map(VisibleWorkspaceMember::from)
         .collect()
 }
@@ -457,8 +469,33 @@ pub fn my_workspaces(ctx: &ViewContext) -> Vec<Workspace> {
         .workspace_member()
         .identity()
         .filter(ctx.sender())
-        .filter(|row| row.active)
+        .filter(|row| row.active && workspace_is_active(ctx, row.workspace_id))
         .filter_map(|member| ctx.db.workspace().id().find(member.workspace_id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_workspace_lifecycles, public)]
+pub fn my_workspace_lifecycles(ctx: &ViewContext) -> Vec<VisibleWorkspaceLifecycle> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| member.active)
+        .filter_map(|member| {
+            ctx.db
+                .workspace_lifecycle()
+                .workspace_id()
+                .find(member.workspace_id)
+        })
+        .map(|lifecycle| VisibleWorkspaceLifecycle {
+            workspace_id: lifecycle.workspace_id,
+            state: lifecycle.state,
+            lifecycle_epoch: lifecycle.lifecycle_epoch,
+            deleted_content_retention_days: lifecycle.deleted_content_retention_days,
+            deletion_grace_days: lifecycle.deletion_grace_days,
+            deletion_execute_after: lifecycle.deletion_execute_after,
+            revision: lifecycle.revision,
+        })
         .collect()
 }
 
@@ -468,7 +505,7 @@ pub fn visible_presence(ctx: &ViewContext) -> Vec<VisiblePresence> {
         .workspace_member()
         .identity()
         .filter(ctx.sender())
-        .filter(|membership| membership.active)
+        .filter(|membership| membership.active && workspace_is_active(ctx, membership.workspace_id))
         .flat_map(|membership| {
             ctx.db
                 .current_presence()
@@ -518,7 +555,7 @@ pub fn visible_workspace_members(ctx: &ViewContext) -> Vec<VisibleWorkspaceMembe
         .workspace_member()
         .identity()
         .filter(ctx.sender())
-        .filter(|member| member.active)
+        .filter(|member| member.active && workspace_is_active(ctx, member.workspace_id))
         .flat_map(|member| {
             ctx.db
                 .workspace_member()
@@ -779,7 +816,7 @@ pub fn visible_tasks(ctx: &ViewContext) -> Vec<TaskItem> {
         .workspace_member()
         .identity()
         .filter(ctx.sender())
-        .filter(|member| member.active)
+        .filter(|member| member.active && workspace_is_active(ctx, member.workspace_id))
         .flat_map(|member| {
             ctx.db
                 .task_item()
@@ -875,7 +912,7 @@ pub fn visible_agent_installations(ctx: &ViewContext) -> Vec<VisibleAgentInstall
         .workspace_member()
         .identity()
         .filter(ctx.sender())
-        .filter(|member| member.active)
+        .filter(|member| member.active && workspace_is_active(ctx, member.workspace_id))
         .flat_map(|member| {
             ctx.db
                 .agent_installation()
@@ -892,7 +929,7 @@ pub fn visible_agent_scopes(ctx: &ViewContext) -> Vec<VisibleAgentScope> {
         .workspace_member()
         .identity()
         .filter(ctx.sender())
-        .filter(|member| member.active)
+        .filter(|member| member.active && workspace_is_active(ctx, member.workspace_id))
         .flat_map(|member| {
             ctx.db
                 .agent_installation()
@@ -915,7 +952,7 @@ pub fn visible_agent_tool_policies(ctx: &ViewContext) -> Vec<VisibleAgentToolPol
         .workspace_member()
         .identity()
         .filter(ctx.sender())
-        .filter(|member| member.active)
+        .filter(|member| member.active && workspace_is_active(ctx, member.workspace_id))
         .flat_map(|member| {
             ctx.db
                 .agent_installation()
@@ -985,7 +1022,11 @@ pub fn visible_audit_log(ctx: &ViewContext) -> Vec<AuditLog> {
         .workspace_member()
         .identity()
         .filter(ctx.sender())
-        .filter(|member| member.active && role_allows(member.role, Action::ManageWorkspace))
+        .filter(|member| {
+            member.active
+                && workspace_is_active(ctx, member.workspace_id)
+                && role_allows(member.role, Action::ManageWorkspace)
+        })
         .flat_map(|member| {
             ctx.db
                 .audit_log()
@@ -1039,7 +1080,11 @@ pub fn agent_work_queue(ctx: &ViewContext) -> Vec<AgentRun> {
         .service_grant()
         .service_identity()
         .filter(ctx.sender())
-        .filter(|grant| grant.enabled && grant.kind == "agent.run")
+        .filter(|grant| {
+            grant.enabled
+                && grant.kind == "agent.run"
+                && workspace_is_active(ctx, grant.workspace_id)
+        })
         .flat_map(|grant| ctx.db.agent_run().workspace_id().filter(grant.workspace_id))
         .filter(|run| {
             !matches!(
@@ -1071,7 +1116,11 @@ pub fn agent_context_candidates(ctx: &ViewContext) -> Vec<AgentContextCandidate>
         .service_grant()
         .service_identity()
         .filter(ctx.sender())
-        .filter(|grant| grant.enabled && grant.kind == "agent.run")
+        .filter(|grant| {
+            grant.enabled
+                && grant.kind == "agent.run"
+                && workspace_is_active(ctx, grant.workspace_id)
+        })
     {
         for run in ctx
             .db
@@ -1157,7 +1206,7 @@ pub fn pending_outbox_work(ctx: &ViewContext) -> Vec<OutboxJobEnvelopeView> {
         .service_grant()
         .service_identity()
         .filter(ctx.sender())
-        .filter(|grant| grant.enabled)
+        .filter(|grant| grant.enabled && workspace_is_active(ctx, grant.workspace_id))
         .flat_map(|grant| {
             ctx.db
                 .outbox_job()
@@ -1222,7 +1271,11 @@ pub fn pending_notification_delivery_plans(ctx: &ViewContext) -> Vec<Notificatio
         .service_grant()
         .service_identity()
         .filter(ctx.sender())
-        .filter(|grant| grant.enabled && grant.kind == "notification.deliver")
+        .filter(|grant| {
+            grant.enabled
+                && grant.kind == "notification.deliver"
+                && workspace_is_active(ctx, grant.workspace_id)
+        })
         .flat_map(|grant| {
             ctx.db
                 .outbox_job()
@@ -1324,7 +1377,9 @@ pub fn pending_post_search_documents(ctx: &ViewContext) -> Vec<SearchWorkItem> {
         .service_identity()
         .filter(ctx.sender())
         .filter(|grant| {
-            grant.enabled && matches!(grant.kind.as_str(), "search.upsert" | "search.tombstone")
+            grant.enabled
+                && workspace_is_active(ctx, grant.workspace_id)
+                && matches!(grant.kind.as_str(), "search.upsert" | "search.tombstone")
         })
         .flat_map(|grant| {
             ctx.db
@@ -1389,6 +1444,7 @@ pub fn file_processing_plans(ctx: &ViewContext) -> Vec<FileProcessingPlanView> {
         .filter(ctx.sender())
         .filter(|grant| {
             grant.enabled
+                && workspace_is_active(ctx, grant.workspace_id)
                 && matches!(
                     grant.kind.as_str(),
                     "file.scan" | "file.extract" | "file.cleanup"

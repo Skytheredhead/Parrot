@@ -39,7 +39,8 @@ logs, URLs owned by the UI, error reports, or persisted client state.
 
 The generated package is the source of truth for the current list. The core surfaces include:
 
-- identity/workspace: `current_user`, `my_workspaces`, `my_workspace_memberships`
+- identity/workspace: `current_user`, `my_workspaces`, `my_workspace_memberships`,
+  `my_workspace_lifecycles`
 - collaboration: `visible_spaces`, `visible_posts`, `visible_named_threads`,
   `visible_contributions`, `visible_reply_ancestry`, `visible_post_tags`,
   `visible_post_mentions`, `visible_post_reactions`, `visible_post_pins`,
@@ -73,6 +74,16 @@ must compare the aggregate `expires_at` value with its own current time because 
 lag. Notification settings use `set_notification_preference`; workspace defaults may be overridden
 per visible space. Local mute and digest minutes are stored with an IANA-style timezone identifier
 so a future scheduler can apply daylight-saving rules rather than persisting a stale UTC offset.
+
+Workspace owners configure explicit retention/grace inputs with `configure_workspace_lifecycle`.
+`request_workspace_deletion` immediately removes the workspace from human and service views and
+starts the configured grace window. Epoch-bound scheduler batches clear ephemeral notification
+permits and presence, while durable jobs and agent state remain paused so cancellation can recover
+and reconcile ambiguous external effects safely. `cancel_workspace_deletion` restores authoritative
+access subject to fresh authorization. `finalize_workspace_deletion_fence` is irreversible after the
+grace window and only then drains durable work through bounded batches. It is an access fence, not
+proof that search, objects, backups, or providers have physically purged data; never label the
+workspace as fully erased until downstream reconciliation exists.
 
 Optimistic UI is allowed only when it can roll back. Never optimistically elevate a role, reveal a
 private object, approve an agent tool, mark a quarantined file clean, or display a search result that
@@ -109,6 +120,7 @@ by the authoritative views.
 ## Current intentional gaps
 
 The contract is not a claim that a production environment exists. Provider selection, public
-domains, durable production adapters, production restore evidence, and the final threat-model
-assumptions remain approval-gated. The requirements matrix records feature-level readiness. The UI
-should not fabricate flows for rows marked `not started` or `blocked on decision`.
+domains, durable production adapters, downstream deletion/export reconciliation, production restore
+evidence, and the final threat-model assumptions remain approval-gated. The requirements matrix
+records feature-level readiness. The UI should not fabricate flows for rows marked `not started` or
+`blocked on decision`.

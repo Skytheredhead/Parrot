@@ -15,8 +15,8 @@ Spaces show substantial posts rather than an endless stream of every message. A 
 
 The repository is in active development. Source research, product options, architecture ADRs, and
 the provider-neutral database, gateway, worker host, authentication/invitation/session boundaries,
-post/social domain, private direct messages, advisory presence, notification controls, typed client
-contracts, and guarded operations foundations are implemented and tested. Durable provider
+post/social domain, private direct messages, advisory presence, notification controls, workspace
+deletion access fences, typed client contracts, and guarded operations foundations are implemented and tested. Durable provider
 adapters, approved deployment inputs, and integration with the user-owned frontend remain before a
 release candidate exists.
 

@@ -310,6 +310,15 @@ export const ConfigurePollInput = __t.object("ConfigurePollInput", {
 });
 export type ConfigurePollInput = __Infer<typeof ConfigurePollInput>;
 
+export const ConfigureWorkspaceLifecycleInput = __t.object("ConfigureWorkspaceLifecycleInput", {
+  workspaceId: __t.uuid(),
+  deletedContentRetentionDays: __t.option(__t.u32()),
+  deletionGraceDays: __t.option(__t.u16()),
+  expectedRevision: __t.u64(),
+  clientRequestId: __t.uuid(),
+});
+export type ConfigureWorkspaceLifecycleInput = __Infer<typeof ConfigureWorkspaceLifecycleInput>;
+
 export const Contribution = __t.object("Contribution", {
   id: __t.uuid(),
   workspaceId: __t.uuid(),
@@ -1556,6 +1565,19 @@ export const VisibleUser = __t.object("VisibleUser", {
 });
 export type VisibleUser = __Infer<typeof VisibleUser>;
 
+export const VisibleWorkspaceLifecycle = __t.object("VisibleWorkspaceLifecycle", {
+  workspaceId: __t.uuid(),
+  get state() {
+    return WorkspaceLifecycleState;
+  },
+  lifecycleEpoch: __t.u64(),
+  deletedContentRetentionDays: __t.option(__t.u32()),
+  deletionGraceDays: __t.option(__t.u16()),
+  deletionExecuteAfter: __t.option(__t.timestamp()),
+  revision: __t.u64(),
+});
+export type VisibleWorkspaceLifecycle = __Infer<typeof VisibleWorkspaceLifecycle>;
+
 export const VisibleWorkspaceMember = __t.object("VisibleWorkspaceMember", {
   workspaceId: __t.uuid(),
   identity: __t.identity(),
@@ -1575,6 +1597,46 @@ export const Workspace = __t.object("Workspace", {
   updatedAt: __t.timestamp(),
 });
 export type Workspace = __Infer<typeof Workspace>;
+
+export const WorkspaceLifecycle = __t.object("WorkspaceLifecycle", {
+  workspaceId: __t.uuid(),
+  get state() {
+    return WorkspaceLifecycleState;
+  },
+  lifecycleEpoch: __t.u64(),
+  deletedContentRetentionDays: __t.option(__t.u32()),
+  deletionGraceDays: __t.option(__t.u16()),
+  deletionRequestedBy: __t.option(__t.identity()),
+  deletionRequestedAt: __t.option(__t.timestamp()),
+  deletionExecuteAfter: __t.option(__t.timestamp()),
+  revision: __t.u64(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type WorkspaceLifecycle = __Infer<typeof WorkspaceLifecycle>;
+
+export const WorkspaceLifecycleCommandInput = __t.object("WorkspaceLifecycleCommandInput", {
+  workspaceId: __t.uuid(),
+  expectedRevision: __t.u64(),
+  clientRequestId: __t.uuid(),
+});
+export type WorkspaceLifecycleCommandInput = __Infer<typeof WorkspaceLifecycleCommandInput>;
+
+export const WorkspaceLifecycleDrainSchedule = __t.object("WorkspaceLifecycleDrainSchedule", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  workspaceId: __t.uuid(),
+  lifecycleEpoch: __t.u64(),
+});
+export type WorkspaceLifecycleDrainSchedule = __Infer<typeof WorkspaceLifecycleDrainSchedule>;
+
+// The tagged union or sum type for the algebraic type `WorkspaceLifecycleState`.
+export const WorkspaceLifecycleState = __t.enum("WorkspaceLifecycleState", {
+  Active: __t.unit(),
+  DeletionRequested: __t.unit(),
+  DeletionFenced: __t.unit(),
+});
+export type WorkspaceLifecycleState = __Infer<typeof WorkspaceLifecycleState>;
 
 export const WorkspaceMember = __t.object("WorkspaceMember", {
   key: __t.string(),

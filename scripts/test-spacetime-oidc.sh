@@ -304,6 +304,48 @@ if ! rg -q 'Workspace' "${runtime_root}/public-sql.out"; then
   exit 1
 fi
 
+"${cli}" --root-dir "${runtime_root}/owner-cli" sql --server oidc-test \
+  "${database}" "SELECT * FROM my_workspace_lifecycles" >"${runtime_root}/lifecycle-sql.out"
+if ! rg -Fq '(active = ())' "${runtime_root}/lifecycle-sql.out"; then
+  echo "Authenticated lifecycle SQL did not return the fail-closed active authority row" >&2
+  sed -n '1,100p' "${runtime_root}/lifecycle-sql.out" >&2
+  exit 1
+fi
+workspace_id="$(rg -o '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+  "${runtime_root}/lifecycle-sql.out" | head -1)"
+[[ -n "${workspace_id}" ]] || { echo "Lifecycle SQL did not expose a workspace identifier" >&2; exit 1; }
+workspace_u128="$("${node}" -e 'console.log(BigInt(`0x${process.argv[1].replaceAll("-", "")}`).toString())' "${workspace_id}")"
+lifecycle_configuration="$(printf '{"workspace_id":{"__uuid__":%s},"deleted_content_retention_days":{"some":30},"deletion_grace_days":{"some":1},"expected_revision":1,"client_request_id":{"__uuid__":11}}' "${workspace_u128}")"
+"${cli}" --root-dir "${runtime_root}/owner-cli" call --server oidc-test \
+  "${database}" configure_workspace_lifecycle "${lifecycle_configuration}" >/dev/null
+lifecycle_request="$(printf '{"workspace_id":{"__uuid__":%s},"expected_revision":2,"client_request_id":{"__uuid__":12}}' "${workspace_u128}")"
+"${cli}" --root-dir "${runtime_root}/owner-cli" call --server oidc-test \
+  "${database}" request_workspace_deletion "${lifecycle_request}" >/dev/null
+"${cli}" --root-dir "${runtime_root}/owner-cli" sql --server oidc-test \
+  "${database}" "SELECT * FROM my_workspace_lifecycles" >"${runtime_root}/lifecycle-requested.out"
+if ! rg -Fq '(deletionRequested = ())' "${runtime_root}/lifecycle-requested.out"; then
+  echo "Workspace deletion request did not publish the lifecycle fence" >&2
+  sed -n '1,100p' "${runtime_root}/lifecycle-requested.out" >&2
+  exit 1
+fi
+"${cli}" --root-dir "${runtime_root}/owner-cli" sql --server oidc-test \
+  "${database}" "SELECT * FROM my_workspaces" >"${runtime_root}/fenced-workspaces.out"
+if rg -Fq '"Workspace"' "${runtime_root}/fenced-workspaces.out"; then
+  echo "Lifecycle-fenced workspace remained visible through my_workspaces" >&2
+  sed -n '1,100p' "${runtime_root}/fenced-workspaces.out" >&2
+  exit 1
+fi
+lifecycle_cancel="$(printf '{"workspace_id":{"__uuid__":%s},"expected_revision":3,"client_request_id":{"__uuid__":13}}' "${workspace_u128}")"
+"${cli}" --root-dir "${runtime_root}/owner-cli" call --server oidc-test \
+  "${database}" cancel_workspace_deletion "${lifecycle_cancel}" >/dev/null
+"${cli}" --root-dir "${runtime_root}/owner-cli" sql --server oidc-test \
+  "${database}" "SELECT * FROM my_workspaces" >"${runtime_root}/restored-workspaces.out"
+if ! rg -Fq '"Workspace"' "${runtime_root}/restored-workspaces.out"; then
+  echo "Canceling the lifecycle fence did not restore authoritative workspace visibility" >&2
+  sed -n '1,100p' "${runtime_root}/restored-workspaces.out" >&2
+  exit 1
+fi
+
 "${cli}" --root-dir "${runtime_root}/owner-cli" subscribe \
   --server oidc-test \
   --print-initial-update \

@@ -20,6 +20,46 @@ pub(crate) enum PolicyAction {
     RecordDecisionOrTask,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyWorkspaceLifecycleState {
+    Active,
+    DeletionRequested,
+    DeletionFenced,
+}
+
+pub(crate) fn workspace_lifecycle_configuration_valid(
+    deleted_content_retention_days: Option<u32>,
+    deletion_grace_days: Option<u16>,
+) -> bool {
+    deleted_content_retention_days.is_none_or(|days| (1..=3_650).contains(&days))
+        && deletion_grace_days.is_none_or(|days| (1..=30).contains(&days))
+}
+
+pub(crate) fn workspace_lifecycle_transition_allowed(
+    current: PolicyWorkspaceLifecycleState,
+    next: PolicyWorkspaceLifecycleState,
+    caller_is_owner: bool,
+    grace_configured: bool,
+    grace_elapsed: bool,
+) -> bool {
+    caller_is_owner
+        && match (current, next) {
+            (
+                PolicyWorkspaceLifecycleState::Active,
+                PolicyWorkspaceLifecycleState::DeletionRequested,
+            ) => grace_configured,
+            (
+                PolicyWorkspaceLifecycleState::DeletionRequested,
+                PolicyWorkspaceLifecycleState::Active,
+            ) => true,
+            (
+                PolicyWorkspaceLifecycleState::DeletionRequested,
+                PolicyWorkspaceLifecycleState::DeletionFenced,
+            ) => grace_elapsed,
+            _ => false,
+        }
+}
+
 pub(crate) fn role_allows(role: PolicyRole, action: PolicyAction) -> bool {
     match role {
         PolicyRole::Owner | PolicyRole::Admin => true,
@@ -1586,6 +1626,49 @@ mod tests {
         assert!(!decision_transition_allowed(
             PolicyDecisionState::Superseded,
             PolicyDecisionState::Proposed,
+        ));
+    }
+
+    #[test]
+    fn workspace_deletion_is_explicit_bounded_and_irreversible() {
+        assert!(workspace_lifecycle_configuration_valid(Some(30), Some(7)));
+        assert!(workspace_lifecycle_configuration_valid(None, None));
+        assert!(!workspace_lifecycle_configuration_valid(Some(0), Some(7)));
+        assert!(!workspace_lifecycle_configuration_valid(Some(30), Some(31)));
+        assert!(workspace_lifecycle_transition_allowed(
+            PolicyWorkspaceLifecycleState::Active,
+            PolicyWorkspaceLifecycleState::DeletionRequested,
+            true,
+            true,
+            false,
+        ));
+        assert!(workspace_lifecycle_transition_allowed(
+            PolicyWorkspaceLifecycleState::DeletionRequested,
+            PolicyWorkspaceLifecycleState::Active,
+            true,
+            true,
+            false,
+        ));
+        assert!(!workspace_lifecycle_transition_allowed(
+            PolicyWorkspaceLifecycleState::DeletionRequested,
+            PolicyWorkspaceLifecycleState::DeletionFenced,
+            true,
+            true,
+            false,
+        ));
+        assert!(workspace_lifecycle_transition_allowed(
+            PolicyWorkspaceLifecycleState::DeletionRequested,
+            PolicyWorkspaceLifecycleState::DeletionFenced,
+            true,
+            true,
+            true,
+        ));
+        assert!(!workspace_lifecycle_transition_allowed(
+            PolicyWorkspaceLifecycleState::DeletionFenced,
+            PolicyWorkspaceLifecycleState::Active,
+            true,
+            true,
+            true,
         ));
     }
 }
