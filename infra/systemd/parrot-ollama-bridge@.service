@@ -23,3 +23,6 @@ ReadWritePaths=/srv/project-conversation/%i/state/worker/ollama-bridge
 RestrictAddressFamilies=AF_UNIX AF_INET
 RestrictSUIDSGID=true
 LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
