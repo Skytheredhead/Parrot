@@ -51,7 +51,7 @@ while IFS= read -r id; do
   case "$role" in spacetimedb|gateway|edge|telemetry|worker|clamav|ollama-loopback) ;; *) die "unrecognized role in approved Compose project: $role" ;; esac
 done < <(docker ps --all --quiet --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")
 
-for network in "${COMPOSE_PROJECT_NAME}_backend" "${COMPOSE_PROJECT_NAME}_telemetry" "${COMPOSE_PROJECT_NAME}_egress"; do
+for network in "${COMPOSE_PROJECT_NAME}_ingress" "${COMPOSE_PROJECT_NAME}_backend" "${COMPOSE_PROJECT_NAME}_telemetry" "${COMPOSE_PROJECT_NAME}_egress"; do
   if docker network inspect "$network" >/dev/null 2>&1; then
     label="$(docker network inspect --format '{{ index .Labels "com.project-conversation.stack" }}' "$network")"
     environment="$(docker network inspect --format '{{ index .Labels "com.project-conversation.environment" }}' "$network")"

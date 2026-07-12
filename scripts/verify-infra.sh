@@ -18,6 +18,7 @@ rendered="$(docker compose \
   --env-file infra/env/validation.env \
   --file infra/compose.yaml \
   --profile gateway \
+  --profile edge \
   --profile worker \
   --profile telemetry \
   config --format json)"
@@ -42,6 +43,7 @@ node -e '
   const database = config.services.spacetimedb.networks;
   const telemetry = config.services["otel-collector"].networks;
   const worker = config.services.worker.networks;
+  const edge = config.services.edge.networks;
   if (!("backend" in database) || "telemetry" in database) process.exit(1);
   if (!("telemetry" in telemetry) || !("egress" in telemetry) || "backend" in telemetry) {
     process.exit(1);
@@ -50,6 +52,9 @@ node -e '
     process.exit(1);
   }
   if (config.services.worker.ports) process.exit(1);
+  if (!("backend" in edge) || !("ingress" in edge) || "egress" in edge || "telemetry" in edge) {
+    process.exit(1);
+  }
 ' "$rendered"
 
 echo "Infrastructure static safety and network-isolation checks passed"

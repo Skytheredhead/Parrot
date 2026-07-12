@@ -150,6 +150,7 @@ services:
           create_host_path: false
     networks:
       - backend
+      - ingress
     healthcheck:
       test: [CMD, wget, --quiet, --tries=1, --spider, http://127.0.0.1:8082/_edge/health]
       interval: 15s
@@ -447,6 +448,13 @@ volumes:
       com.project-conversation.role: clamav-runtime
 
 networks:
+  ingress:
+    ipam:
+      config:
+        - subnet: 192.168.48.0/28
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
   backend:
     internal: true
     labels:
