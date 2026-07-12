@@ -276,18 +276,39 @@ services:
       com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
       com.project-conversation.role: worker
 
+  clamav-volume-init:
+    profiles: [scanner, worker]
+    image: ${CLAMAV_IMAGE:-clamav/clamav:1.4.3_base@sha256:be37f82c9cccf6c2559a44b8fb537e6f11e8547b37988650b169c4540c2f298c}
+    entrypoint: [/bin/chown]
+    command: ["100:101", /var/lib/clamav, /run/clamav]
+    network_mode: none
+    user: "0:0"
+    volumes:
+      - clamav-database:/var/lib/clamav
+      - clamav-runtime:/run/clamav
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+      com.project-conversation.role: clamav
+
   clamav:
     profiles: [scanner, worker]
     image: ${CLAMAV_IMAGE:-clamav/clamav:1.4.3_base@sha256:be37f82c9cccf6c2559a44b8fb537e6f11e8547b37988650b169c4540c2f298c}
+    depends_on:
+      clamav-volume-init:
+        condition: service_completed_successfully
     restart: unless-stopped
     stop_grace_period: 2m
     init: true
+    entrypoint: [/init-unprivileged]
+    user: "100:101"
     volumes:
-      - type: bind
-        source: ${CLAMAV_DATA_DIR:?set CLAMAV_DATA_DIR}
-        target: /var/lib/clamav
-        bind:
-          create_host_path: false
+      - clamav-database:/var/lib/clamav
       - clamav-runtime:/run/clamav
       - type: bind
         source: ${CLAMAV_CONFIG_PATH:?set CLAMAV_CONFIG_PATH}
@@ -409,6 +430,11 @@ secrets:
     file: ${WORKOS_M2M_CLIENT_SECRET_FILE:?set WORKOS_M2M_CLIENT_SECRET_FILE}
 
 volumes:
+  clamav-database:
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+      com.project-conversation.role: clamav-database
   clamav-runtime:
     labels:
       com.project-conversation.stack: "true"

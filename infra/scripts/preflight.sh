@@ -60,14 +60,16 @@ for network in "${COMPOSE_PROJECT_NAME}_backend" "${COMPOSE_PROJECT_NAME}_teleme
 done
 
 
-volume="${COMPOSE_PROJECT_NAME}_clamav-runtime"
-if docker volume inspect "$volume" >/dev/null 2>&1; then
-  label="$(docker volume inspect --format '{{ index .Labels "com.project-conversation.stack" }}' "$volume")"
-  environment="$(docker volume inspect --format '{{ index .Labels "com.project-conversation.environment" }}' "$volume")"
-  role="$(docker volume inspect --format '{{ index .Labels "com.project-conversation.role" }}' "$volume")"
-  [[ "$label" == true && "$environment" == "$DEPLOY_ENVIRONMENT" && "$role" == clamav-runtime ]] \
-    || die "volume name collision outside the approved project: $volume"
-fi
+for role in clamav-database clamav-runtime; do
+  volume="${COMPOSE_PROJECT_NAME}_${role}"
+  if docker volume inspect "$volume" >/dev/null 2>&1; then
+    label="$(docker volume inspect --format '{{ index .Labels "com.project-conversation.stack" }}' "$volume")"
+    environment="$(docker volume inspect --format '{{ index .Labels "com.project-conversation.environment" }}' "$volume")"
+    observed_role="$(docker volume inspect --format '{{ index .Labels "com.project-conversation.role" }}' "$volume")"
+    [[ "$label" == true && "$environment" == "$DEPLOY_ENVIRONMENT" && "$observed_role" == "$role" ]] \
+      || die "volume name collision outside the approved project: $volume"
+  fi
+done
 
 for port in "$SPACETIMEDB_LOOPBACK_PORT" "$GATEWAY_LOOPBACK_PORT" "$EDGE_LOOPBACK_PORT"; do
   if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :$port" | grep -q .; then

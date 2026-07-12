@@ -31,12 +31,11 @@ if [[ "$mode" == runtime ]]; then
   assert_environment_path_chain /mnt/bigboi "$DEPLOY_ENVIRONMENT"
   assert_trusted_directory "$SPACETIMEDB_DATA_DIR" "SpacetimeDB data directory" true
   assert_trusted_directory "$BACKUP_DIR" "backup directory" true
-  assert_trusted_directory "$CLAMAV_DATA_DIR" "ClamAV signature directory" true
   for state_path in "$GATEWAY_STATE_DIR" "$WORKER_STATE_DIR" "$OBJECT_DATA_DIR" "$EXPORT_DATA_DIR" "$OLLAMA_BRIDGE_DIR"; do
     assert_container_state_directory "$state_path" "provider state directory"
   done
-  [[ -w "$SPACETIMEDB_DATA_DIR" && -w "$BACKUP_DIR" && -w "$CLAMAV_DATA_DIR" ]] \
-    || die "data, signature, and backup directories must be writable"
+  [[ -w "$SPACETIMEDB_DATA_DIR" && -w "$BACKUP_DIR" ]] \
+    || die "data and backup directories must be writable"
   require_state_dir
   load_reviewed_spacetimedb_image_pin false >/dev/null || \
     [[ "$SPACETIMEDB_IMAGE" == "$EXPECTED_SPACETIMEDB_IMAGE" ]] \
