@@ -78,6 +78,235 @@ const notificationJob = (id: string, intentId = `intent-${id}`) =>
     1_000,
   );
 
+const consumerForStore = (
+  clock: FakeClock,
+  store: InMemoryTransactionalOutbox,
+  workerId: string,
+  options: {
+    readonly leaseMs?: number;
+    readonly heartbeatMs?: number;
+    readonly heartbeatTimeoutMs?: number;
+    readonly claimTimeoutMs?: number;
+    readonly shutdownTimeoutMs?: number;
+  } = {},
+) => {
+  const ledger = new InMemoryEffectLedger(clock);
+  const authorization = new InMemoryAuthorizationGate();
+  const provider = new InMemoryNotificationProvider();
+  const registry = new HandlerRegistry().register(
+    "notification.deliver",
+    createNotificationDeliveryHandler(authorization, provider),
+  );
+  const retry = new RetryPolicy(
+    { baseMs: 10, capMs: 100, jitterRatio: 0, maxAttempts: 4, maxAgeMs: 60_000 },
+    () => 0.5,
+  );
+  const sink = new MemoryLogSink();
+  const consumer = new OutboxConsumer(
+    { workerId, leaseMs: 1_000, ...options },
+    clock,
+    store,
+    ledger,
+    registry,
+    retry,
+    new StructuredLogger("test-worker", "debug", sink),
+    new OpenTelemetry(clock, new InMemorySpanExporter()),
+  );
+  return { consumer, provider };
+};
+
+test("a late claim is retained, re-awaited, and never duplicated", async () => {
+  const clock = new FakeClock(1_000);
+  let releaseClaim: (() => void) | undefined;
+  const claimGate = new Promise<void>((resolve) => {
+    releaseClaim = resolve;
+  });
+  class DelayedClaimStore extends InMemoryTransactionalOutbox {
+    claims = 0;
+    recoveries = 0;
+
+    override async recoverOwned(...args: Parameters<InMemoryTransactionalOutbox["recoverOwned"]>) {
+      this.recoveries += 1;
+      return super.recoverOwned(...args);
+    }
+
+    override async claim(...args: Parameters<InMemoryTransactionalOutbox["claim"]>) {
+      this.claims += 1;
+      await claimGate;
+      // Deliberately ignore the now-aborted signal: a remote atomic claim can already be committed.
+      return super.claim(args[0], args[1]);
+    }
+  }
+  const store = new DelayedClaimStore(clock);
+  const { consumer, provider } = consumerForStore(clock, store, "worker-stable", {
+    claimTimeoutMs: 5,
+  });
+  await store.enqueue(notificationJob("job-late-claim"));
+
+  await assert.rejects(consumer.tick(), (error: Error) => error.name === "outbox_claim_timeout");
+  await assert.rejects(consumer.tick(), (error: Error) => error.name === "outbox_claim_timeout");
+  assert.equal(store.claims, 1);
+  assert.equal(store.recoveries, 1);
+
+  releaseClaim?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await consumer.tick(), true);
+  assert.equal(store.claims, 1);
+  assert.equal(store.recoveries, 1);
+  assert.equal(provider.calls.length, 1);
+  assert.equal((await store.get("job-late-claim"))?.state, "succeeded");
+});
+
+test("the stable worker id recovers and extends a response-lost lease before processing", async () => {
+  const clock = new FakeClock(1_000);
+  class TrackingStore extends InMemoryTransactionalOutbox {
+    claims = 0;
+    recoveries = 0;
+
+    override async recoverOwned(...args: Parameters<InMemoryTransactionalOutbox["recoverOwned"]>) {
+      this.recoveries += 1;
+      return super.recoverOwned(...args);
+    }
+
+    override async claim(...args: Parameters<InMemoryTransactionalOutbox["claim"]>) {
+      this.claims += 1;
+      return super.claim(...args);
+    }
+  }
+  const store = new TrackingStore(clock);
+  await store.enqueue(notificationJob("job-response-lost"));
+  const abandoned = await store.claim("worker-stable", 100);
+  assert.ok(abandoned);
+  clock.advance(80);
+  const { consumer, provider } = consumerForStore(clock, store, "worker-stable", {
+    leaseMs: 1_000,
+  });
+
+  assert.equal(await consumer.tick(), true);
+  assert.equal(store.recoveries, 1);
+  assert.equal(store.claims, 1);
+  assert.equal(provider.calls.length, 1);
+  assert.equal((await store.get("job-response-lost"))?.state, "succeeded");
+  assert.equal((await store.get("job-response-lost"))?.leaseGeneration, 2);
+});
+
+test("restart recovery advances generation and invalidates every prior outbox mutation", async () => {
+  const clock = new FakeClock(1_000);
+  const store = new InMemoryTransactionalOutbox(clock);
+  await store.enqueue(notificationJob("job-recovery-generation"));
+  const prior = await store.claim("worker-stable", 1_000);
+  assert.ok(prior);
+  const recovered = await store.recoverOwned("worker-stable", 1_000);
+  assert.ok(recovered);
+  assert.equal(recovered.lease.generation, prior.lease.generation + 1);
+  assert.equal(recovered.job.leaseGeneration, recovered.lease.generation);
+
+  const staleMutations: readonly (() => Promise<unknown>)[] = [
+    () => store.heartbeat(prior.lease, clock.now() + 1_000),
+    () => store.complete(prior.lease),
+    () => store.retry(prior.lease, clock.now() + 10, "stale_retry"),
+    () => store.outcomeUnknown(prior.lease, clock.now() + 10, "stale_unknown"),
+    () => store.deadLetter(prior.lease, "stale_dead_letter"),
+  ];
+  for (const mutate of staleMutations) await assert.rejects(mutate(), StaleLeaseError);
+
+  await store.complete(recovered.lease);
+  assert.equal((await store.get("job-recovery-generation"))?.state, "succeeded");
+});
+
+test("owned-lease recovery excludes expired and foreign leases", async () => {
+  const clock = new FakeClock(1_000);
+  const store = new InMemoryTransactionalOutbox(clock);
+  await store.enqueue(notificationJob("job-expired-owned"));
+  await store.enqueue(notificationJob("job-foreign-owned"));
+  assert.ok(await store.claim("worker-stable", 10));
+  assert.ok(await store.claim("worker-foreign", 1_000));
+
+  clock.advance(11);
+  assert.equal(await store.recoverOwned("worker-stable", 1_000), undefined);
+  assert.equal(await store.recoverOwned("worker-other", 1_000), undefined);
+  const foreign = await store.get("job-foreign-owned");
+  assert.equal(foreign?.leaseWorkerSlotId, "worker-foreign");
+  assert.equal(foreign?.state, "leased");
+});
+
+test("lease acknowledgements and recovery are fenced to the exact worker slot", async () => {
+  const clock = new FakeClock(1_000);
+  const store = new InMemoryTransactionalOutbox(clock);
+  await store.enqueue(notificationJob("job-worker-slot-fence"));
+  const claimed = await store.claim("worker-slot-a", 1_000);
+  assert.ok(claimed);
+
+  assert.equal(await store.recoverOwned("worker-slot-b", 1_000), undefined);
+  await assert.rejects(
+    store.complete({ ...claimed.lease, workerSlotId: "worker-slot-b" }),
+    StaleLeaseError,
+  );
+  await store.complete(claimed.lease);
+  assert.equal((await store.get("job-worker-slot-fence"))?.state, "succeeded");
+});
+
+test("consumer rejects an adapter result leased to a different worker slot", async () => {
+  const clock = new FakeClock(1_000);
+  class WrongSlotStore extends InMemoryTransactionalOutbox {
+    override recoverOwned(
+      _workerSlotId: string,
+      leaseMs: number,
+      signal?: AbortSignal,
+    ): ReturnType<InMemoryTransactionalOutbox["recoverOwned"]> {
+      return super.recoverOwned("worker-slot-a", leaseMs, signal);
+    }
+  }
+  const store = new WrongSlotStore(clock);
+  await store.enqueue(notificationJob("job-wrong-slot-result"));
+  assert.ok(await store.claim("worker-slot-a", 1_000));
+  const { consumer, provider } = consumerForStore(clock, store, "worker-slot-b");
+
+  await assert.rejects(consumer.tick(), StaleLeaseError);
+  assert.equal(provider.calls.length, 0);
+  assert.equal((await store.get("job-wrong-slot-result"))?.leaseWorkerSlotId, "worker-slot-a");
+});
+
+test("shutdown aborts a retained claim wait without starting another claim", async () => {
+  const clock = new FakeClock(1_000);
+  let claimStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    claimStarted = resolve;
+  });
+  class HangingClaimStore extends InMemoryTransactionalOutbox {
+    claims = 0;
+    observedAbort = false;
+
+    override async claim(_owner: string, _leaseMs: number, signal?: AbortSignal): Promise<never> {
+      this.claims += 1;
+      claimStarted?.();
+      return new Promise<never>(() => {
+        signal?.addEventListener(
+          "abort",
+          () => {
+            this.observedAbort = true;
+          },
+          { once: true },
+        );
+      });
+    }
+  }
+  const store = new HangingClaimStore(clock);
+  const { consumer } = consumerForStore(clock, store, "worker-shutdown", {
+    claimTimeoutMs: 1_000,
+  });
+  const controller = new AbortController();
+  const running = consumer.tick(controller.signal);
+  await started;
+
+  const before = Date.now();
+  controller.abort(new Error("worker_shutdown_timeout"));
+  await assert.rejects(running, /worker_shutdown_timeout/);
+  assert.equal(Date.now() - before < 100, true);
+  assert.equal(store.claims, 1);
+  assert.equal(store.observedAbort, true);
+});
+
 test("a crashed worker lease is reclaimed and completed by another worker", async () => {
   const setupA = setup("worker-a");
   await setupA.store.enqueue(notificationJob("job-crash"));
@@ -440,7 +669,7 @@ test("effect acquisition is atomic and stale owners cannot publish outcomes", as
   assert.equal((await ledger.get("effect:race"))?.state, "succeeded");
 });
 
-test("a newer owner generation cannot take over an unexpired effect lease", async () => {
+test("overlapping same-slot recovery cannot share unexpired effect ownership", async () => {
   const clock = new FakeClock(10);
   const ledger = new InMemoryEffectLedger(clock);
   const first = await ledger.acquire({
@@ -453,6 +682,7 @@ test("a newer owner generation cannot take over an unexpired effect lease", asyn
     allowTakeover: true,
   });
   assert.equal(first.acquired, true);
+  if (!first.acquired) return;
   const newer = await ledger.acquire({
     effectKey: "effect:leased",
     identityFingerprint: "identity-leased",
@@ -462,7 +692,15 @@ test("a newer owner generation cannot take over an unexpired effect lease", asyn
     leaseExpiresAt: 200,
     allowTakeover: true,
   });
-  assert.equal(newer.acquired, false);
+  assert.equal(newer.acquired, true);
+  if (!newer.acquired) return;
+  assert.equal(newer.claim.ownerGeneration, 2);
+  assert.equal(newer.previousState, "started");
+  await assert.rejects(ledger.heartbeat(first.claim, 200), EffectOwnershipError);
+  await assert.rejects(ledger.succeeded(first.claim), EffectOwnershipError);
+  await assert.rejects(ledger.outcomeUnknown(first.claim), EffectOwnershipError);
+  await assert.rejects(ledger.failedPermanent(first.claim), EffectOwnershipError);
+  await ledger.succeeded(newer.claim);
 });
 
 test("effect keys reject payload fingerprint conflicts", async () => {

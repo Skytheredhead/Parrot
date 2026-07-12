@@ -127,6 +127,7 @@ const durableAdapter = (name: string, methods: readonly string[]): RuntimeAdapte
     adapterKind: "durable",
     adapterName: name,
     assertProductionReady: () => true,
+    ready: async () => true,
   };
   for (const method of methods) adapter[method] = () => Promise.resolve(undefined);
   return adapter as unknown as RuntimeAdapter;
@@ -145,6 +146,7 @@ test("production composition validates methods, the complete handler graph, and 
   const ports = {
     outbox: durableAdapter("outbox", [
       "enqueue",
+      "recoverOwned",
       "claim",
       "heartbeat",
       "complete",
@@ -221,6 +223,7 @@ test("production composition validates methods, the complete handler graph, and 
     adapterKind: "durable",
     adapterName: "durable-tool",
     assertProductionReady: () => true,
+    ready: async () => true,
     name: "durable-tool",
     version: "1",
     effectClass: "read",
@@ -350,6 +353,15 @@ test("production composition validates methods, the complete handler graph, and 
     scanner: durableAdapter("broken-scanner", []),
   } as WorkerProductionPorts;
   assert.throws(() => composeWorkerRuntime("production", incomplete), /missing_method:scan/);
+  const { recoverOwned: _recoverOwned, ...outboxWithoutRecovery } = ports.outbox;
+  const noOwnedLeaseRecovery = {
+    ...ports,
+    outbox: outboxWithoutRecovery,
+  } as WorkerProductionPorts;
+  assert.throws(
+    () => composeWorkerRuntime("production", noOwnedLeaseRecovery),
+    /outbox:missing_method:recoverOwned/,
+  );
   const nonconformant = {
     ...ports,
     scanner: {
@@ -358,5 +370,14 @@ test("production composition validates methods, the complete handler graph, and 
     },
   } as WorkerProductionPorts;
   assert.throws(() => composeWorkerRuntime("production", nonconformant), /conformance_failed/);
+  const { ready: _ready, ...scannerWithoutReadiness } = ports.scanner;
+  const noLiveReadiness = {
+    ...ports,
+    scanner: scannerWithoutReadiness,
+  } as WorkerProductionPorts;
+  assert.throws(
+    () => composeWorkerRuntime("production", noLiveReadiness),
+    /scanner:missing_readiness_check/,
+  );
   assert.equal(base.handlers.entries().length, jobKinds.length);
 });

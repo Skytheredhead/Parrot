@@ -9,6 +9,20 @@ Security invariants enforced here:
 - Distributed IP throttling uses the external rate adapter and trusts only configured proxy CIDRs.
   Separate interfaces require principal-global budgets before request-controlled workspace data and
   workspace budgets only after authorization.
+- Invitation creation requires live workspace authorization, then generates a one-time response token
+  with 256 bits of CSPRNG bearer material. Only a keyed SHA-256 digest, key ID, expiry, role/scope,
+  optional normalized email binding, creator, use limit, and audit metadata cross the durable adapter
+  boundary. Redemption is authenticated, requires a current verified human email, and delegates
+  constant-time hash verification plus expiry/revocation/email/use-limit checks, membership creation,
+  and audit creation to one atomic durable operation. Failure responses do not reveal which check
+  failed. Tokens travel only in POST bodies; all responses are `no-store` and `no-referrer`.
+- Current human principals can list only bounded, allowlisted metadata for their own active sessions,
+  revoke one owned session, or revoke every other owned session. The durable authority atomically
+  rechecks principal ownership and authorization epoch and writes audit metadata with each revocation.
+  Revoke-others retains the exact current session and requires a cryptographically verified recent
+  `auth_time` (or provider-equivalent assertion); access-token issuance time is never treated as
+  reauthentication. Cookie clients use the normal Origin and session-bound CSRF boundary, and unknown,
+  foreign, malformed, or already-revoked session IDs share one non-enumerating response.
 - Database, file, search, agent stream, and tool requests require live authoritative authorization. Tool authorization includes the exact tool, and capabilities carry purpose, audience, authorization epoch, and one-use intent.
 - Agent-tool idempotency scopes are namespaced by principal, authorization epoch, workspace, run,
   and tool. A separate canonical argument hash lets the durable adapter reject reuse of the same
@@ -26,6 +40,15 @@ Provider release gates:
 - Session adapters must prove expiry, revocation, rotation, fixation resistance, secure cookie issuance, and server-bound CSRF state. Principal resolution must query current authoritative identity state.
 - Search adapters must treat engine cursors as opaque derived state, honor supplied authorization scopes, cap upstream response sizes, and support deletion/permission reconciliation.
 - Proxy CIDRs, identity/JWKS egress, telemetry destination, cursor/CSRF key management, and distributed rate-limit storage require deployment-specific review.
+- Invitation HMAC keys must be loaded by the reviewed adapter composition from secret storage, retain
+  old verification keys only for the maximum invitation lifetime, and never enter environment samples,
+  logs, database rows, frontend bundles, or API responses. The invitation store must pass the atomic
+  redemption and constant-time digest conformance suite before release.
+- The session provider adapter must map provider sessions to stable opaque IDs, query only the current
+  authoritative principal, atomically enforce ownership/epoch on revocation, propagate revocation to
+  the provider, and prove current-session retention for revoke-others. Session-cookie and access-token
+  verifiers must expose the provider's real authentication time when available; refresh or token issue
+  time must not refresh that marker.
 
 Invalid or unsafe environment configuration fails startup. Production requires HTTPS origins/identity endpoints, `__Host-` cookie names, and a 32-byte-or-longer readiness token.
 
@@ -34,3 +57,8 @@ provider-specific conformance tests before release. File capabilities and agent 
 restricted to explicit approved origins. Upload capabilities must bind content type, exact length,
 checksum, and first-write-only headers; stream tickets must use the exact `wss:` run path and
 bounded token/expiry.
+
+Invitation routes and their deliberately generic error contract are documented in
+[`docs/invitations-api.md`](docs/invitations-api.md).
+Session administration routes and client integration requirements are documented in
+[`docs/sessions-api.md`](docs/sessions-api.md).

@@ -105,24 +105,69 @@ services:
       com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
       com.project-conversation.role: gateway
 
-  worker-disabled:
-    profiles: [worker-disabled]
-    image: ${WORKER_IMAGE:?set WORKER_IMAGE to the documented placeholder}
-    command: [sh, -c, "echo 'worker profile is intentionally disabled'; exit 78"]
-    deploy:
-      replicas: 0
-    restart: "no"
+  worker:
+    profiles: [worker]
+    image: ${WORKER_IMAGE:?set WORKER_IMAGE to an immutable digest or the documented placeholder}
+    restart: unless-stopped
+    stop_grace_period: 2m
+    init: true
+    depends_on:
+      spacetimedb:
+        condition: service_healthy
+    environment:
+      WORKER_ENVIRONMENT: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+      WORKER_ID: ${WORKER_ID:-project-conversation-worker-1}
+      WORKER_ADAPTER_MODULE: ${WORKER_ADAPTER_MODULE:?set WORKER_ADAPTER_MODULE}
+      WORKER_HEALTH_HOST: 0.0.0.0
+      WORKER_HEALTH_PORT: "8081"
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-500}
+      WORKER_CLAIM_TIMEOUT_MS: ${WORKER_CLAIM_TIMEOUT_MS:-5000}
+      WORKER_READINESS_TIMEOUT_MS: ${WORKER_READINESS_TIMEOUT_MS:-2000}
+      WORKER_LEASE_MS: ${WORKER_LEASE_MS:-30000}
+      WORKER_HEARTBEAT_MS: ${WORKER_HEARTBEAT_MS:-10000}
+      WORKER_HANDLER_TIMEOUT_MS: ${WORKER_HANDLER_TIMEOUT_MS:-120000}
+      WORKER_HEARTBEAT_TIMEOUT_MS: ${WORKER_HEARTBEAT_TIMEOUT_MS:-5000}
+      WORKER_SHUTDOWN_TIMEOUT_MS: ${WORKER_SHUTDOWN_TIMEOUT_MS:-10000}
+      WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-8}
+      WORKER_MAX_JOB_AGE_MS: ${WORKER_MAX_JOB_AGE_MS:-604800000}
+      WORKER_BACKOFF_BASE_MS: ${WORKER_BACKOFF_BASE_MS:-1000}
+      WORKER_BACKOFF_CAP_MS: ${WORKER_BACKOFF_CAP_MS:-300000}
+      WORKER_BACKOFF_JITTER_RATIO: ${WORKER_BACKOFF_JITTER_RATIO:-0.2}
+      WORKER_CHECKPOINT_MS: ${WORKER_CHECKPOINT_MS:-2000}
+      AGENT_MAX_CONTEXT_BYTES: ${AGENT_MAX_CONTEXT_BYTES:-1000000}
+      AGENT_MAX_OUTPUT_TOKENS: ${AGENT_MAX_OUTPUT_TOKENS:-16000}
+      AGENT_MAX_TOOL_CALLS: ${AGENT_MAX_TOOL_CALLS:-32}
+      AGENT_MAX_RUN_COST_MICROS: ${AGENT_MAX_RUN_COST_MICROS:-5000000}
+      WORKER_LOG_LEVEL: ${WORKER_LOG_LEVEL:-info}
+      OTEL_SERVICE_NAME: project-conversation-worker
+    healthcheck:
+      test: [CMD, node, /usr/local/libexec/worker-readiness.mjs]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
     networks:
       - backend
+      - telemetry
       - egress
     read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    pids_limit: ${WORKER_PIDS_LIMIT:-256}
+    mem_limit: ${WORKER_MEMORY_LIMIT:-2g}
+    cpus: ${WORKER_CPU_LIMIT:-2.0}
+    logging:
+      driver: json-file
+      options:
+        max-size: ${CONTAINER_LOG_MAX_SIZE:-20m}
+        max-file: ${CONTAINER_LOG_MAX_FILES:-5}
     labels:
       com.project-conversation.stack: "true"
       com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
-      com.project-conversation.role: worker-disabled
+      com.project-conversation.role: worker
 
   otel-collector:
     profiles: [telemetry]

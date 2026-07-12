@@ -8,7 +8,7 @@ while (($#)); do
   case "$1" in
     --env-file) [[ $# -ge 2 ]] || die "--env-file requires a path"; env_file="$2"; shift 2 ;;
     --profile) [[ $# -ge 2 ]] || die "--profile requires a name"; profiles+=("$2"); shift 2 ;;
-    -h|--help) printf 'Usage: %s --env-file PATH [--profile gateway|telemetry]\n' "$0"; exit 0 ;;
+    -h|--help) printf 'Usage: %s --env-file PATH [--profile gateway|worker|telemetry]\n' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -42,7 +42,7 @@ while IFS= read -r id; do
   environment="$(docker inspect --format '{{ index .Config.Labels "com.project-conversation.environment" }}' "$id")"
   role="$(docker inspect --format '{{ index .Config.Labels "com.project-conversation.role" }}' "$id")"
   [[ "$label" == true && "$environment" == "$DEPLOY_ENVIRONMENT" ]] || die "Compose project name is already used by a container outside this environment: $id"
-  case "$role" in spacetimedb|gateway|telemetry|worker-disabled) ;; *) die "unrecognized role in approved Compose project: $role" ;; esac
+  case "$role" in spacetimedb|gateway|telemetry|worker) ;; *) die "unrecognized role in approved Compose project: $role" ;; esac
 done < <(docker ps --all --quiet --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")
 
 for network in "${COMPOSE_PROJECT_NAME}_backend" "${COMPOSE_PROJECT_NAME}_telemetry" "${COMPOSE_PROJECT_NAME}_egress"; do

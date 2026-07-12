@@ -40,31 +40,44 @@ import AddContributionReducer from "./add_contribution_reducer";
 import AppendAgentRunEventReducer from "./append_agent_run_event_reducer";
 import BootstrapOwnerReducer from "./bootstrap_owner_reducer";
 import CancelAgentRunReducer from "./cancel_agent_run_reducer";
+import CancelDmPromotionReducer from "./cancel_dm_promotion_reducer";
 import CancelPlatformOperatorTransferReducer from "./cancel_platform_operator_transfer_reducer";
+import CastPollVoteReducer from "./cast_poll_vote_reducer";
 import ClaimAgentRunReducer from "./claim_agent_run_reducer";
 import ClaimOutboxJobReducer from "./claim_outbox_job_reducer";
 import CompleteAgentRunReducer from "./complete_agent_run_reducer";
 import CompleteFileUploadReducer from "./complete_file_upload_reducer";
 import CompleteOutboxJobReducer from "./complete_outbox_job_reducer";
+import ConfigurePollReducer from "./configure_poll_reducer";
+import CreateDirectConversationReducer from "./create_direct_conversation_reducer";
 import CreateFileUploadReducer from "./create_file_upload_reducer";
 import CreateNamedThreadReducer from "./create_named_thread_reducer";
 import CreatePostReducer from "./create_post_reducer";
 import CreateSpaceReducer from "./create_space_reducer";
 import CreateTaskReducer from "./create_task_reducer";
+import CreateTypedPostReducer from "./create_typed_post_reducer";
 import CreateWorkspaceReducer from "./create_workspace_reducer";
+import DecideDmPromotionReducer from "./decide_dm_promotion_reducer";
 import DecideToolApprovalReducer from "./decide_tool_approval_reducer";
 import DeleteContributionReducer from "./delete_contribution_reducer";
+import DeleteDirectMessageReducer from "./delete_direct_message_reducer";
 import DeleteFileReducer from "./delete_file_reducer";
 import DeletePostReducer from "./delete_post_reducer";
 import EditContributionReducer from "./edit_contribution_reducer";
+import EditDirectMessageReducer from "./edit_direct_message_reducer";
 import EditPostReducer from "./edit_post_reducer";
+import ExpireDmPromotionReducer from "./expire_dm_promotion_reducer";
 import ExpirePlatformOperatorTransferReducer from "./expire_platform_operator_transfer_reducer";
 import ExpireToolApprovalReducer from "./expire_tool_approval_reducer";
+import FinalizeDmPromotionReducer from "./finalize_dm_promotion_reducer";
 import HeartbeatAgentRunReducer from "./heartbeat_agent_run_reducer";
 import HeartbeatOutboxJobReducer from "./heartbeat_outbox_job_reducer";
 import InstallAgentReducer from "./install_agent_reducer";
+import LeaveDirectConversationReducer from "./leave_direct_conversation_reducer";
+import MarkDirectReadReducer from "./mark_direct_read_reducer";
 import MarkNotificationReadReducer from "./mark_notification_read_reducer";
 import MigratePlatformAuthorityReducer from "./migrate_platform_authority_reducer";
+import ProposeDmPromotionReducer from "./propose_dm_promotion_reducer";
 import ProposePlatformOperatorTransferReducer from "./propose_platform_operator_transfer_reducer";
 import ReconcileAgentToolEffectReducer from "./reconcile_agent_tool_effect_reducer";
 import RecordAgentContextContributionReducer from "./record_agent_context_contribution_reducer";
@@ -73,19 +86,28 @@ import RecordDecisionReducer from "./record_decision_reducer";
 import RecordFileExtractionReducer from "./record_file_extraction_reducer";
 import RecordFileScanOutcomeReducer from "./record_file_scan_outcome_reducer";
 import RecordToolOutcomeReducer from "./record_tool_outcome_reducer";
+import RecoverOutboxJobReducer from "./recover_outbox_job_reducer";
 import RegisterServicePrincipalReducer from "./register_service_principal_reducer";
 import RegisterTrustedToolReducer from "./register_trusted_tool_reducer";
 import RegisterUserReducer from "./register_user_reducer";
 import RequestAgentToolCallReducer from "./request_agent_tool_call_reducer";
+import RequestSearchRebuildReducer from "./request_search_rebuild_reducer";
 import RevokeAgentReducer from "./revoke_agent_reducer";
+import SendDirectMessageReducer from "./send_direct_message_reducer";
 import SetAgentScopeReducer from "./set_agent_scope_reducer";
 import SetAgentToolPolicyReducer from "./set_agent_tool_policy_reducer";
+import SetPollClosedReducer from "./set_poll_closed_reducer";
+import SetPostMetadataReducer from "./set_post_metadata_reducer";
+import SetPostPersonalStateReducer from "./set_post_personal_state_reducer";
+import SetPostPinReducer from "./set_post_pin_reducer";
+import SetPostReactionReducer from "./set_post_reaction_reducer";
 import SetServiceGrantReducer from "./set_service_grant_reducer";
 import SetSpaceMemberReducer from "./set_space_member_reducer";
 import SetWorkspaceMemberReducer from "./set_workspace_member_reducer";
 import StartAgentRunReducer from "./start_agent_run_reducer";
 import UpdateDecisionStatusReducer from "./update_decision_status_reducer";
 import UpdateNamedThreadReducer from "./update_named_thread_reducer";
+import UpdatePostLifecycleReducer from "./update_post_lifecycle_reducer";
 import UpdateTaskStatusReducer from "./update_task_status_reducer";
 
 // Import all procedure arg schemas
@@ -96,8 +118,10 @@ import AgentWorkQueueRow from "./agent_work_queue_table";
 import CurrentUserRow from "./current_user_table";
 import FileProcessingPlansRow from "./file_processing_plans_table";
 import MyCommandReceiptsRow from "./my_command_receipts_table";
+import MyDirectReadStatesRow from "./my_direct_read_states_table";
 import MyFileUploadsRow from "./my_file_uploads_table";
 import MyNotificationsRow from "./my_notifications_table";
+import MyPostStatesRow from "./my_post_states_table";
 import MyWorkspaceMembershipsRow from "./my_workspace_memberships_table";
 import MyWorkspacesRow from "./my_workspaces_table";
 import PendingOutboxWorkRow from "./pending_outbox_work_table";
@@ -113,8 +137,22 @@ import VisibleApprovalsRow from "./visible_approvals_table";
 import VisibleAuditLogRow from "./visible_audit_log_table";
 import VisibleContributionsRow from "./visible_contributions_table";
 import VisibleDecisionsRow from "./visible_decisions_table";
+import VisibleDirectConversationsRow from "./visible_direct_conversations_table";
+import VisibleDirectMessagesRow from "./visible_direct_messages_table";
+import VisibleDirectParticipantsRow from "./visible_direct_participants_table";
+import VisibleDirectReplyAncestryRow from "./visible_direct_reply_ancestry_table";
+import VisibleDmPromotionConsentsRow from "./visible_dm_promotion_consents_table";
+import VisibleDmPromotionProposalsRow from "./visible_dm_promotion_proposals_table";
+import VisibleDmPromotionSourcesRow from "./visible_dm_promotion_sources_table";
 import VisibleFilesRow from "./visible_files_table";
 import VisibleNamedThreadsRow from "./visible_named_threads_table";
+import VisiblePollOptionsRow from "./visible_poll_options_table";
+import VisiblePollsRow from "./visible_polls_table";
+import VisiblePostActivityRow from "./visible_post_activity_table";
+import VisiblePostMentionsRow from "./visible_post_mentions_table";
+import VisiblePostPinsRow from "./visible_post_pins_table";
+import VisiblePostReactionsRow from "./visible_post_reactions_table";
+import VisiblePostTagsRow from "./visible_post_tags_table";
 import VisiblePostsRow from "./visible_posts_table";
 import VisibleReplyAncestryRow from "./visible_reply_ancestry_table";
 import VisibleSpacesRow from "./visible_spaces_table";
@@ -160,6 +198,13 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, MyCommandReceiptsRow),
+  my_direct_read_states: __table({
+    name: 'my_direct_read_states',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, MyDirectReadStatesRow),
   my_file_uploads: __table({
     name: 'my_file_uploads',
     indexes: [
@@ -174,6 +219,13 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, MyNotificationsRow),
+  my_post_states: __table({
+    name: 'my_post_states',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, MyPostStatesRow),
   my_workspace_memberships: __table({
     name: 'my_workspace_memberships',
     indexes: [
@@ -279,6 +331,55 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, VisibleDecisionsRow),
+  visible_direct_conversations: __table({
+    name: 'visible_direct_conversations',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisibleDirectConversationsRow),
+  visible_direct_messages: __table({
+    name: 'visible_direct_messages',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisibleDirectMessagesRow),
+  visible_direct_participants: __table({
+    name: 'visible_direct_participants',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisibleDirectParticipantsRow),
+  visible_direct_reply_ancestry: __table({
+    name: 'visible_direct_reply_ancestry',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisibleDirectReplyAncestryRow),
+  visible_dm_promotion_consents: __table({
+    name: 'visible_dm_promotion_consents',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisibleDmPromotionConsentsRow),
+  visible_dm_promotion_proposals: __table({
+    name: 'visible_dm_promotion_proposals',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisibleDmPromotionProposalsRow),
+  visible_dm_promotion_sources: __table({
+    name: 'visible_dm_promotion_sources',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisibleDmPromotionSourcesRow),
   visible_files: __table({
     name: 'visible_files',
     indexes: [
@@ -293,6 +394,55 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, VisibleNamedThreadsRow),
+  visible_poll_options: __table({
+    name: 'visible_poll_options',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisiblePollOptionsRow),
+  visible_polls: __table({
+    name: 'visible_polls',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisiblePollsRow),
+  visible_post_activity: __table({
+    name: 'visible_post_activity',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisiblePostActivityRow),
+  visible_post_mentions: __table({
+    name: 'visible_post_mentions',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisiblePostMentionsRow),
+  visible_post_pins: __table({
+    name: 'visible_post_pins',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisiblePostPinsRow),
+  visible_post_reactions: __table({
+    name: 'visible_post_reactions',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisiblePostReactionsRow),
+  visible_post_tags: __table({
+    name: 'visible_post_tags',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisiblePostTagsRow),
   visible_posts: __table({
     name: 'visible_posts',
     indexes: [
@@ -338,31 +488,44 @@ const reducersSchema = __reducers(
   __reducerSchema("append_agent_run_event", AppendAgentRunEventReducer),
   __reducerSchema("bootstrap_owner", BootstrapOwnerReducer),
   __reducerSchema("cancel_agent_run", CancelAgentRunReducer),
+  __reducerSchema("cancel_dm_promotion", CancelDmPromotionReducer),
   __reducerSchema("cancel_platform_operator_transfer", CancelPlatformOperatorTransferReducer),
+  __reducerSchema("cast_poll_vote", CastPollVoteReducer),
   __reducerSchema("claim_agent_run", ClaimAgentRunReducer),
   __reducerSchema("claim_outbox_job", ClaimOutboxJobReducer),
   __reducerSchema("complete_agent_run", CompleteAgentRunReducer),
   __reducerSchema("complete_file_upload", CompleteFileUploadReducer),
   __reducerSchema("complete_outbox_job", CompleteOutboxJobReducer),
+  __reducerSchema("configure_poll", ConfigurePollReducer),
+  __reducerSchema("create_direct_conversation", CreateDirectConversationReducer),
   __reducerSchema("create_file_upload", CreateFileUploadReducer),
   __reducerSchema("create_named_thread", CreateNamedThreadReducer),
   __reducerSchema("create_post", CreatePostReducer),
   __reducerSchema("create_space", CreateSpaceReducer),
   __reducerSchema("create_task", CreateTaskReducer),
+  __reducerSchema("create_typed_post", CreateTypedPostReducer),
   __reducerSchema("create_workspace", CreateWorkspaceReducer),
+  __reducerSchema("decide_dm_promotion", DecideDmPromotionReducer),
   __reducerSchema("decide_tool_approval", DecideToolApprovalReducer),
   __reducerSchema("delete_contribution", DeleteContributionReducer),
+  __reducerSchema("delete_direct_message", DeleteDirectMessageReducer),
   __reducerSchema("delete_file", DeleteFileReducer),
   __reducerSchema("delete_post", DeletePostReducer),
   __reducerSchema("edit_contribution", EditContributionReducer),
+  __reducerSchema("edit_direct_message", EditDirectMessageReducer),
   __reducerSchema("edit_post", EditPostReducer),
+  __reducerSchema("expire_dm_promotion", ExpireDmPromotionReducer),
   __reducerSchema("expire_platform_operator_transfer", ExpirePlatformOperatorTransferReducer),
   __reducerSchema("expire_tool_approval", ExpireToolApprovalReducer),
+  __reducerSchema("finalize_dm_promotion", FinalizeDmPromotionReducer),
   __reducerSchema("heartbeat_agent_run", HeartbeatAgentRunReducer),
   __reducerSchema("heartbeat_outbox_job", HeartbeatOutboxJobReducer),
   __reducerSchema("install_agent", InstallAgentReducer),
+  __reducerSchema("leave_direct_conversation", LeaveDirectConversationReducer),
+  __reducerSchema("mark_direct_read", MarkDirectReadReducer),
   __reducerSchema("mark_notification_read", MarkNotificationReadReducer),
   __reducerSchema("migrate_platform_authority", MigratePlatformAuthorityReducer),
+  __reducerSchema("propose_dm_promotion", ProposeDmPromotionReducer),
   __reducerSchema("propose_platform_operator_transfer", ProposePlatformOperatorTransferReducer),
   __reducerSchema("reconcile_agent_tool_effect", ReconcileAgentToolEffectReducer),
   __reducerSchema("record_agent_context_contribution", RecordAgentContextContributionReducer),
@@ -371,19 +534,28 @@ const reducersSchema = __reducers(
   __reducerSchema("record_file_extraction", RecordFileExtractionReducer),
   __reducerSchema("record_file_scan_outcome", RecordFileScanOutcomeReducer),
   __reducerSchema("record_tool_outcome", RecordToolOutcomeReducer),
+  __reducerSchema("recover_outbox_job", RecoverOutboxJobReducer),
   __reducerSchema("register_service_principal", RegisterServicePrincipalReducer),
   __reducerSchema("register_trusted_tool", RegisterTrustedToolReducer),
   __reducerSchema("register_user", RegisterUserReducer),
   __reducerSchema("request_agent_tool_call", RequestAgentToolCallReducer),
+  __reducerSchema("request_search_rebuild", RequestSearchRebuildReducer),
   __reducerSchema("revoke_agent", RevokeAgentReducer),
+  __reducerSchema("send_direct_message", SendDirectMessageReducer),
   __reducerSchema("set_agent_scope", SetAgentScopeReducer),
   __reducerSchema("set_agent_tool_policy", SetAgentToolPolicyReducer),
+  __reducerSchema("set_poll_closed", SetPollClosedReducer),
+  __reducerSchema("set_post_metadata", SetPostMetadataReducer),
+  __reducerSchema("set_post_personal_state", SetPostPersonalStateReducer),
+  __reducerSchema("set_post_pin", SetPostPinReducer),
+  __reducerSchema("set_post_reaction", SetPostReactionReducer),
   __reducerSchema("set_service_grant", SetServiceGrantReducer),
   __reducerSchema("set_space_member", SetSpaceMemberReducer),
   __reducerSchema("set_workspace_member", SetWorkspaceMemberReducer),
   __reducerSchema("start_agent_run", StartAgentRunReducer),
   __reducerSchema("update_decision_status", UpdateDecisionStatusReducer),
   __reducerSchema("update_named_thread", UpdateNamedThreadReducer),
+  __reducerSchema("update_post_lifecycle", UpdatePostLifecycleReducer),
   __reducerSchema("update_task_status", UpdateTaskStatusReducer),
 );
 

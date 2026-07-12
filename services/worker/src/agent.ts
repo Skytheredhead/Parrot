@@ -275,6 +275,8 @@ export class AgentToolRegistry {
       ...(typeof tool.assertProductionReady === "function"
         ? { assertProductionReady: tool.assertProductionReady.bind(tool) }
         : {}),
+      ...(typeof tool.ready === "function" ? { ready: tool.ready.bind(tool) } : {}),
+      ...(typeof tool.close === "function" ? { close: tool.close.bind(tool) } : {}),
       name: tool.name,
       version: tool.version,
       effectClass: tool.effectClass,

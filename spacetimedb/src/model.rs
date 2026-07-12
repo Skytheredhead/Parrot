@@ -23,6 +23,25 @@ pub enum ContributionKind {
 }
 
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostKind {
+    Discussion,
+    Question,
+    Announcement,
+    Decision,
+    Task,
+    Poll,
+    Incident,
+    MediaDrop,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PostState {
+    Active,
+    Resolved,
+    Archived,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecisionStatus {
     Proposed,
     Accepted,
@@ -120,6 +139,21 @@ pub enum ApprovalState {
 }
 
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DmPromotionState {
+    Pending,
+    Rejected,
+    Canceled,
+    Expired,
+    Finalized,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DmPromotionDecision {
+    Approve,
+    Reject,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutboxState {
     Pending,
     Leased,
@@ -127,6 +161,39 @@ pub enum OutboxState {
     Retry,
     OutcomeUnknown,
     DeadLetter,
+}
+
+#[derive(SpacetimeType)]
+pub struct CreateTypedPostInput {
+    pub space_id: Uuid,
+    pub title: String,
+    pub body: String,
+    pub kind: PostKind,
+    pub owner_identity: Identity,
+    pub assignee_identity: Option<Identity>,
+    pub tags: Vec<String>,
+    pub mentions: Vec<Identity>,
+    pub client_request_id: Uuid,
+}
+
+#[derive(SpacetimeType)]
+pub struct UpdatePostLifecycleInput {
+    pub post_id: Uuid,
+    pub state: PostState,
+    pub locked: bool,
+    pub owner_identity: Identity,
+    pub assignee_identity: Option<Identity>,
+    pub expected_revision: u64,
+    pub client_request_id: Uuid,
+}
+
+#[derive(SpacetimeType)]
+pub struct ConfigurePollInput {
+    pub post_id: Uuid,
+    pub options: Vec<String>,
+    pub allows_multiple: bool,
+    pub expected_post_revision: u64,
+    pub client_request_id: Uuid,
 }
 
 #[derive(SpacetimeType)]
@@ -231,6 +298,24 @@ pub struct FileExtractionInput {
 }
 
 #[derive(SpacetimeType)]
+pub struct CreateDirectConversationInput {
+    pub workspace_id: Uuid,
+    pub participants: Vec<Identity>,
+    pub client_request_id: Uuid,
+}
+
+#[derive(SpacetimeType)]
+pub struct ProposeDmPromotionInput {
+    pub conversation_id: Uuid,
+    pub destination_space_id: Uuid,
+    pub title: String,
+    pub body: String,
+    pub source_message_ids: Vec<Uuid>,
+    pub expires_in_seconds: u32,
+    pub client_request_id: Uuid,
+}
+
+#[derive(SpacetimeType)]
 pub struct SearchWorkItem {
     pub job_id: Uuid,
     pub effect_key: String,
@@ -246,6 +331,38 @@ pub struct SearchWorkItem {
     pub allowed_identities: Vec<Identity>,
     pub state: OutboxState,
     pub lease_generation: u64,
+}
+
+#[derive(SpacetimeType)]
+pub struct OutboxJobEnvelopeView {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub kind: String,
+    pub effect_key: String,
+    pub resource_type: String,
+    pub resource_id: Uuid,
+    pub resource_revision: u64,
+    pub acl_revision: Option<u64>,
+    pub intent_id: Option<Uuid>,
+    pub recipient_id: Option<Identity>,
+    pub channel: String,
+    pub authorization_epoch: Option<u64>,
+    pub minimal_message: String,
+    pub payload_resource_id: Option<Uuid>,
+    pub rebuild_id: Option<Uuid>,
+    pub generation: Option<u64>,
+    pub file_id: Option<Uuid>,
+    pub version: Option<u64>,
+    pub run_id: Option<Uuid>,
+    pub created_at: Timestamp,
+    pub next_attempt_at: Timestamp,
+    pub attempt: u32,
+    pub state: OutboxState,
+    pub lease_owner: Option<Identity>,
+    pub worker_slot_id: String,
+    pub lease_until: Option<Timestamp>,
+    pub lease_generation: u64,
+    pub last_error: String,
 }
 
 #[derive(SpacetimeType)]
@@ -406,12 +523,131 @@ pub struct Post {
     #[index(btree)]
     pub space_id: Uuid,
     pub author_identity: Identity,
+    pub owner_identity: Identity,
+    pub assignee_identity: Option<Identity>,
+    pub kind: PostKind,
+    pub state: PostState,
+    pub locked: bool,
     pub title: String,
     pub body: String,
     pub revision: u64,
+    pub activity_sequence: u64,
+    pub last_activity_at: Timestamp,
     pub deleted: bool,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = post_tag, private)]
+pub struct PostTag {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub post_id: Uuid,
+    pub workspace_id: Uuid,
+    pub space_id: Uuid,
+    pub tag: String,
+    pub created_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = post_mention, private)]
+pub struct PostMention {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub post_id: Uuid,
+    #[index(btree)]
+    pub identity: Identity,
+    pub workspace_id: Uuid,
+    pub space_id: Uuid,
+    pub created_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = post_reaction, private)]
+pub struct PostReaction {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub post_id: Uuid,
+    #[index(btree)]
+    pub identity: Identity,
+    pub emoji: String,
+    pub created_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = post_user_state, private)]
+pub struct PostUserState {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub post_id: Uuid,
+    #[index(btree)]
+    pub identity: Identity,
+    pub following: bool,
+    pub bookmarked: bool,
+    pub last_read_sequence: u64,
+    pub read_at: Option<Timestamp>,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = post_pin, private)]
+pub struct PostPin {
+    #[primary_key]
+    pub post_id: Uuid,
+    pub workspace_id: Uuid,
+    #[index(btree)]
+    pub space_id: Uuid,
+    pub pinned_by: Identity,
+    pub pinned_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = post_activity, private)]
+pub struct PostActivity {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub post_id: Uuid,
+    pub sequence: u64,
+    pub actor_identity: Identity,
+    pub kind: String,
+    pub summary: String,
+    pub created_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = poll, private)]
+pub struct Poll {
+    #[primary_key]
+    pub post_id: Uuid,
+    pub workspace_id: Uuid,
+    pub space_id: Uuid,
+    pub allows_multiple: bool,
+    pub closed: bool,
+    pub revision: u64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = poll_option, private)]
+pub struct PollOption {
+    #[primary_key]
+    pub id: Uuid,
+    #[index(btree)]
+    pub post_id: Uuid,
+    pub label: String,
+    pub position: u32,
+}
+
+#[spacetimedb::table(accessor = poll_vote, private)]
+pub struct PollVote {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub post_id: Uuid,
+    #[index(btree)]
+    pub option_id: Uuid,
+    #[index(btree)]
+    pub identity: Identity,
+    pub created_at: Timestamp,
 }
 
 #[spacetimedb::table(accessor = named_thread, private)]
@@ -465,6 +701,132 @@ pub struct ReplyAncestry {
     pub descendant_id: Uuid,
     pub thread_id: Uuid,
     pub depth: u32,
+}
+
+#[spacetimedb::table(accessor = direct_conversation, private)]
+#[derive(Clone)]
+pub struct DirectConversation {
+    #[primary_key]
+    pub id: Uuid,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    pub created_by: Identity,
+    pub next_sequence: u64,
+    pub revision: u64,
+    pub deactivated_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = direct_participant, private)]
+#[derive(Clone)]
+pub struct DirectParticipant {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub conversation_id: Uuid,
+    #[index(btree)]
+    pub identity: Identity,
+    pub workspace_id: Uuid,
+    pub joined_at: Timestamp,
+    pub left_at: Option<Timestamp>,
+    pub participant_epoch: u64,
+}
+
+#[spacetimedb::table(accessor = direct_message, private)]
+#[derive(Clone)]
+pub struct DirectMessage {
+    #[primary_key]
+    pub id: Uuid,
+    #[unique]
+    pub sequence_key: String,
+    #[index(btree)]
+    pub conversation_id: Uuid,
+    #[index(btree)]
+    pub author_identity: Identity,
+    pub workspace_id: Uuid,
+    pub sequence: u64,
+    pub parent_message_id: Option<Uuid>,
+    pub body: String,
+    pub revision: u64,
+    pub deleted: bool,
+    pub created_at: Timestamp,
+    pub edited_at: Option<Timestamp>,
+    pub deleted_at: Option<Timestamp>,
+}
+
+#[spacetimedb::table(accessor = direct_reply_ancestry, private)]
+pub struct DirectReplyAncestry {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub ancestor_message_id: Uuid,
+    #[index(btree)]
+    pub descendant_message_id: Uuid,
+    #[index(btree)]
+    pub conversation_id: Uuid,
+    pub depth: u32,
+}
+
+#[spacetimedb::table(accessor = direct_read_state, private)]
+pub struct DirectReadState {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub conversation_id: Uuid,
+    #[index(btree)]
+    pub identity: Identity,
+    pub last_read_sequence: u64,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = dm_promotion_proposal, private)]
+#[derive(Clone)]
+pub struct DmPromotionProposal {
+    #[primary_key]
+    pub id: Uuid,
+    #[index(btree)]
+    pub conversation_id: Uuid,
+    pub workspace_id: Uuid,
+    pub destination_space_id: Uuid,
+    pub proposer_identity: Identity,
+    pub title: String,
+    pub body: String,
+    pub draft_hash: String,
+    pub source_revision_hash: String,
+    pub proposal_hash: String,
+    pub participant_epoch_hash: String,
+    pub state: DmPromotionState,
+    pub revision: u64,
+    pub expires_at: Timestamp,
+    pub finalized_post_id: Option<Uuid>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = dm_promotion_source, private)]
+pub struct DmPromotionSource {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub proposal_id: Uuid,
+    #[index(btree)]
+    pub message_id: Uuid,
+    pub message_revision: u64,
+    pub ordinal: u32,
+}
+
+#[spacetimedb::table(accessor = dm_promotion_consent, private)]
+pub struct DmPromotionConsent {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub proposal_id: Uuid,
+    #[index(btree)]
+    pub identity: Identity,
+    pub decision: DmPromotionDecision,
+    pub proposal_hash: String,
+    pub decided_at: Timestamp,
 }
 
 #[spacetimedb::table(accessor = decision_record, private)]
@@ -751,9 +1113,22 @@ pub struct OutboxJob {
     pub resource_type: String,
     pub resource_id: Uuid,
     pub resource_revision: u64,
+    pub acl_revision: Option<u64>,
+    pub intent_id: Option<Uuid>,
+    pub recipient_id: Option<Identity>,
+    pub channel: String,
+    pub authorization_epoch: Option<u64>,
+    pub minimal_message: String,
+    pub payload_resource_id: Option<Uuid>,
+    pub rebuild_id: Option<Uuid>,
+    pub generation: Option<u64>,
+    pub file_id: Option<Uuid>,
+    pub version: Option<u64>,
+    pub run_id: Option<Uuid>,
     pub expires_at: Timestamp,
     pub attempt: u32,
     pub lease_owner: Option<Identity>,
+    pub worker_slot_id: String,
     pub lease_until: Option<Timestamp>,
     pub lease_generation: u64,
     pub next_attempt_at: Timestamp,

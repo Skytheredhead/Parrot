@@ -78,6 +78,20 @@ describe("OidcJwtVerifier", () => {
     expect(result).not.toHaveProperty("authz_epoch");
   });
 
+  it("accepts only a numeric non-future OIDC auth_time fresh-auth marker", async () => {
+    const subjectVerifier = await verifier();
+    const now = Math.floor(Date.now() / 1_000);
+    await expect(
+      subjectVerifier.verify(await token({ claims: { auth_time: now - 30 } })),
+    ).resolves.toMatchObject({ authenticatedAt: now - 30 });
+    await expect(
+      subjectVerifier.verify(await token({ claims: { auth_time: now + 60 } })),
+    ).rejects.toMatchObject({ statusCode: 401 });
+    await expect(
+      subjectVerifier.verify(await token({ claims: { auth_time: "recent" } })),
+    ).rejects.toMatchObject({ statusCode: 401 });
+  });
+
   it.each([
     { typ: "JWT" },
     { lifetime: 600 },

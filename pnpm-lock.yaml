@@ -12,6 +12,18 @@ importers:
         specifier: 2.5.3
         version: 2.5.3
 
+  packages/client-sdk:
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(vite@8.1.4(@types/node@24.13.3)(tsx@4.20.6)(yaml@2.9.0))
+
   packages/db-bindings:
     dependencies:
       spacetimedb:

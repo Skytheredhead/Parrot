@@ -7,7 +7,7 @@ These are candidate input pins, not proof of vulnerability status, application c
 | Purpose | Exact candidate reference | Scope/status |
 | --- | --- | --- |
 | SpacetimeDB | `clockworklabs/spacetime:v2.6.1@sha256:53100591a8bfd62c6e088e801b68e96871a8fc6e68eb4fb031bc6ac76f77a72e` | Exact Linux/amd64 manifest selected by the audited production plan. Used by the baseline Compose service. Do not substitute this into or upgrade the existing unrelated host service. |
-| Gateway Node base | `node:24.18.0-bookworm-slim@sha256:cb4e8f7c443347358b7875e717c29e27bf9befc8f5a26cf18af3c3dec80e58c5` | Official Node base input for `infra/docker/gateway.Dockerfile`. The finished gateway requires its own registry digest; this pin is not that digest. |
+| Gateway/worker Node base | `node:24.18.0-bookworm-slim@sha256:cb4e8f7c443347358b7875e717c29e27bf9befc8f5a26cf18af3c3dec80e58c5` | Official Node base input for both process Dockerfiles. Each finished image requires its own registry digest; this pin is not either output digest. |
 | OpenTelemetry Collector Contrib | `otel/opentelemetry-collector-contrib:0.156.0@sha256:125bdbeb7590cc1952c5b3430ecf14063568980c2c93d5b38676cc0446ed8108` | Collector candidate used only by the opt-in telemetry profile. Destination/provider approval remains required. |
 
 Official image sources accessed 2026-07-11:

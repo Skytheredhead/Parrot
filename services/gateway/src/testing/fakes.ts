@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { resourceAuthorizationKey } from "../contracts.js";
 import type {
   AgentStreamBroker,
@@ -10,6 +10,9 @@ import type {
   FileMetadataStore,
   GatewayDependencies,
   IpRateLimitInput,
+  InvitationCreateRecord,
+  InvitationRedemptionResult,
+  InvitationStore,
   ObjectStore,
   PendingUpload,
   Principal,
@@ -20,9 +23,11 @@ import type {
   SearchAdapter,
   SearchCandidate,
   SearchScope,
+  SessionAdministration,
   SessionVerifier,
   StoredFile,
   TokenVerifier,
+  UserSessionMetadata,
   VerifiedIdentity,
   WebhookReceiptStore,
   WebhookRegistry,
@@ -31,6 +36,7 @@ import type {
 import { GatewayError } from "../errors.js";
 import { unauthorized } from "../errors.js";
 import { HmacSearchCursorCodec } from "../search/cursor.js";
+import { HmacInvitationTokenHasher } from "../invitations/token.js";
 
 export const TEST_IDENTITY: VerifiedIdentity = {
   issuer: "https://issuer.test",
@@ -39,6 +45,7 @@ export const TEST_IDENTITY: VerifiedIdentity = {
   expiresAt: 4_000_000_000,
   tokenType: "access",
   sessionId: "session-1",
+  authenticatedAt: Math.floor(Date.now() / 1_000),
 };
 
 export const TEST_PRINCIPAL: Principal = {
@@ -238,6 +245,7 @@ export class InMemorySearch extends ReadyFake implements SearchAdapter {
 
 export class InMemoryRateLimits extends ReadyFake implements RateLimitClient {
   ipAllowed = true;
+  ipAllowedFor?: (input: IpRateLimitInput) => boolean;
   principalAllowed = true;
   workspaceAllowed = true;
   retryAfterSeconds = 1;
@@ -247,9 +255,10 @@ export class InMemoryRateLimits extends ReadyFake implements RateLimitClient {
 
   async consumeIp(input: IpRateLimitInput) {
     this.ipCalls.push(input);
+    const allowed = this.ipAllowedFor?.(input) ?? this.ipAllowed;
     return {
-      allowed: this.ipAllowed,
-      ...(this.ipAllowed ? {} : { retryAfterSeconds: this.retryAfterSeconds }),
+      allowed,
+      ...(allowed ? {} : { retryAfterSeconds: this.retryAfterSeconds }),
     };
   }
 
@@ -335,6 +344,196 @@ export class FakeAgentToolGateway extends ReadyFake implements AgentToolGateway 
   }
 }
 
+interface StoredInvitation extends InvitationCreateRecord {
+  revoked: boolean;
+  useCount: number;
+}
+
+export class InMemoryInvitations extends ReadyFake implements InvitationStore {
+  readonly records = new Map<string, StoredInvitation>();
+  readonly memberships = new Map<string, string>();
+  readonly audits: Array<Readonly<Record<string, unknown>>> = [];
+
+  async createAtomic(input: InvitationCreateRecord): Promise<void> {
+    if (this.records.has(input.invitationId)) throw new Error("invitation_id_conflict");
+    this.records.set(input.invitationId, {
+      ...structuredClone(input),
+      revoked: false,
+      useCount: 0,
+    });
+    this.audits.push({
+      action: "invitation.created",
+      invitationId: input.invitationId,
+      actorId: input.creator.id,
+      requestId: input.requestId,
+    });
+  }
+
+  async redeemAtomic(input: {
+    invitationId: string;
+    verificationHashes: readonly { keyId: string; digest: string }[];
+    principal: Principal;
+    normalizedVerifiedEmail: string;
+    now: string;
+    requestId: string;
+  }): Promise<InvitationRedemptionResult> {
+    const record = this.records.get(input.invitationId);
+    const expected = record ? Buffer.from(record.tokenHash.digest, "base64url") : Buffer.alloc(32);
+    let hashMatches = false;
+    for (const candidate of input.verificationHashes) {
+      const decoded = Buffer.from(candidate.digest, "base64url");
+      const fixed = Buffer.alloc(32);
+      decoded.copy(fixed, 0, 0, Math.min(decoded.length, fixed.length));
+      const digestMatches = timingSafeEqual(expected, fixed);
+      hashMatches ||=
+        record !== undefined &&
+        decoded.length === 32 &&
+        candidate.keyId === record.tokenHash.keyId &&
+        digestMatches;
+    }
+    if (
+      !record ||
+      !hashMatches ||
+      record.revoked ||
+      Date.parse(record.expiresAt) <= Date.parse(input.now) ||
+      record.useCount >= record.useLimit ||
+      (record.normalizedEmail !== undefined &&
+        record.normalizedEmail !== input.normalizedVerifiedEmail)
+    ) {
+      return { status: "unavailable" };
+    }
+    const membershipKey = `${input.principal.id}\0${record.workspaceId}`;
+    const existingMembership = this.memberships.get(membershipKey);
+    if (existingMembership) {
+      return {
+        status: "accepted",
+        workspaceId: record.workspaceId,
+        membershipId: existingMembership,
+        role: record.role,
+        useCount: record.useCount,
+        useLimit: record.useLimit,
+      };
+    }
+    record.useCount += 1;
+    const membershipId = createHash("sha256").update(membershipKey).digest("hex").slice(0, 24);
+    this.memberships.set(membershipKey, membershipId);
+    this.audits.push({
+      action: "invitation.redeemed",
+      invitationId: record.invitationId,
+      actorId: input.principal.id,
+      membershipId,
+      requestId: input.requestId,
+    });
+    return {
+      status: "accepted",
+      workspaceId: record.workspaceId,
+      membershipId,
+      role: record.role,
+      useCount: record.useCount,
+      useLimit: record.useLimit,
+    };
+  }
+
+  revoke(invitationId: string): void {
+    const record = this.records.get(invitationId);
+    if (record) record.revoked = true;
+  }
+}
+
+interface StoredUserSession extends UserSessionMetadata {
+  ownerPrincipalId: string;
+  revoked: boolean;
+}
+
+export class InMemorySessions extends ReadyFake implements SessionAdministration {
+  readonly sessions = new Map<string, StoredUserSession>();
+  readonly audits: Array<Readonly<Record<string, unknown>>> = [];
+
+  add(ownerPrincipalId: string, session: UserSessionMetadata): void {
+    this.sessions.set(session.sessionId, {
+      ...structuredClone(session),
+      ownerPrincipalId,
+      revoked: false,
+    });
+  }
+
+  async listOwned(input: {
+    principal: Principal;
+    currentSessionId?: string;
+    limit: number;
+  }): Promise<readonly UserSessionMetadata[]> {
+    return [...this.sessions.values()]
+      .filter((session) => session.ownerPrincipalId === input.principal.id && !session.revoked)
+      .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))
+      .slice(0, input.limit)
+      .map(({ ownerPrincipalId: _owner, revoked: _revoked, ...session }) => ({
+        ...structuredClone(session),
+        current: session.sessionId === input.currentSessionId,
+      }));
+  }
+
+  async revokeOwnedAtomic(input: {
+    principal: Principal;
+    targetSessionId: string;
+    currentSessionId?: string;
+    now: string;
+    requestId: string;
+    reason: "user_requested";
+  }): Promise<"revoked" | "unavailable"> {
+    const session = this.sessions.get(input.targetSessionId);
+    if (!session || session.revoked || session.ownerPrincipalId !== input.principal.id) {
+      return "unavailable";
+    }
+    session.revoked = true;
+    this.audits.push({
+      action: "session.revoked",
+      actorId: input.principal.id,
+      targetSessionId: input.targetSessionId,
+      currentSessionId: input.currentSessionId,
+      requestId: input.requestId,
+      occurredAt: input.now,
+      reason: input.reason,
+    });
+    return "revoked";
+  }
+
+  async revokeOthersAtomic(input: {
+    principal: Principal;
+    currentSessionId: string;
+    authenticatedAt: number;
+    now: string;
+    requestId: string;
+    reason: "user_requested_revoke_others";
+  }): Promise<{ status: "revoked"; revokedCount: number } | { status: "unavailable" }> {
+    const current = this.sessions.get(input.currentSessionId);
+    if (!current || current.revoked || current.ownerPrincipalId !== input.principal.id) {
+      return { status: "unavailable" };
+    }
+    let revokedCount = 0;
+    for (const session of this.sessions.values()) {
+      if (
+        session.ownerPrincipalId === input.principal.id &&
+        session.sessionId !== input.currentSessionId &&
+        !session.revoked
+      ) {
+        session.revoked = true;
+        revokedCount += 1;
+      }
+    }
+    this.audits.push({
+      action: "session.others_revoked",
+      actorId: input.principal.id,
+      currentSessionId: input.currentSessionId,
+      authenticatedAt: input.authenticatedAt,
+      revokedCount,
+      requestId: input.requestId,
+      occurredAt: input.now,
+      reason: input.reason,
+    });
+    return { status: "revoked", revokedCount };
+  }
+}
+
 export interface TestDependencies extends GatewayDependencies {
   tokenVerifier: FakeTokenVerifier;
   sessionVerifier: FakeTokenVerifier;
@@ -351,10 +550,30 @@ export interface TestDependencies extends GatewayDependencies {
   webhookReceipts: InMemoryWebhookReceipts;
   agentStreams: FakeAgentStreamBroker;
   agentTools: FakeAgentToolGateway;
+  invitationTokens: HmacInvitationTokenHasher;
+  invitations: InMemoryInvitations;
+  sessions: InMemorySessions;
 }
 
 export function createTestDependencies(): TestDependencies {
   const credentials = new FakeTokenVerifier();
+  const sessions = new InMemorySessions();
+  sessions.add(TEST_PRINCIPAL.id, {
+    sessionId: "session-1",
+    current: true,
+    createdAt: "2026-07-10T12:00:00.000Z",
+    lastSeenAt: "2026-07-11T12:00:00.000Z",
+    expiresAt: "2026-07-18T12:00:00.000Z",
+    kind: "browser",
+  });
+  sessions.add(TEST_PRINCIPAL.id, {
+    sessionId: "session-2",
+    current: false,
+    createdAt: "2026-07-09T12:00:00.000Z",
+    lastSeenAt: "2026-07-10T12:00:00.000Z",
+    expiresAt: "2026-07-17T12:00:00.000Z",
+    kind: "browser",
+  });
   return {
     tokenVerifier: credentials,
     sessionVerifier: credentials,
@@ -371,5 +590,10 @@ export function createTestDependencies(): TestDependencies {
     webhookReceipts: new InMemoryWebhookReceipts(),
     agentStreams: new FakeAgentStreamBroker(),
     agentTools: new FakeAgentToolGateway(),
+    invitationTokens: new HmacInvitationTokenHasher([
+      { keyId: "test-key", key: Buffer.alloc(32, 11) },
+    ]),
+    invitations: new InMemoryInvitations(),
+    sessions,
   };
 }

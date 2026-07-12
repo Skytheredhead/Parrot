@@ -2,7 +2,13 @@ export type WorkerEnvironment = "development" | "test" | "staging" | "production
 
 export interface WorkerConfig {
   readonly environment: WorkerEnvironment;
+  readonly adapterModule: string | undefined;
   readonly workerId: string;
+  readonly healthHost: "127.0.0.1" | "0.0.0.0";
+  readonly healthPort: number;
+  readonly pollIntervalMs: number;
+  readonly claimTimeoutMs: number;
+  readonly readinessTimeoutMs: number;
   readonly leaseMs: number;
   readonly heartbeatMs: number;
   readonly handlerTimeoutMs: number;
@@ -82,6 +88,19 @@ export const loadWorkerConfig = (env: NodeJS.ProcessEnv): WorkerConfig => {
     issues.push("WORKER_ID must be 3-128 safe identifier characters");
   }
 
+  const adapterModule = env.WORKER_ADAPTER_MODULE?.trim();
+  if (
+    adapterModule !== undefined &&
+    (!adapterModule.startsWith("/") || adapterModule.length > 1_024)
+  ) {
+    issues.push("WORKER_ADAPTER_MODULE must be an absolute path no longer than 1024 characters");
+  }
+
+  const healthHost = env.WORKER_HEALTH_HOST ?? "127.0.0.1";
+  if (healthHost !== "127.0.0.1" && healthHost !== "0.0.0.0") {
+    issues.push("WORKER_HEALTH_HOST must be 127.0.0.1 or 0.0.0.0");
+  }
+
   const leaseMs = integer(env, "WORKER_LEASE_MS", issues, {
     min: 1_000,
     max: 900_000,
@@ -110,7 +129,29 @@ export const loadWorkerConfig = (env: NodeJS.ProcessEnv): WorkerConfig => {
 
   const config: WorkerConfig = {
     environment: environment as WorkerEnvironment,
+    adapterModule,
     workerId,
+    healthHost: healthHost as WorkerConfig["healthHost"],
+    healthPort: integer(env, "WORKER_HEALTH_PORT", issues, {
+      min: 1_024,
+      max: 65_535,
+      defaultValue: 8_081,
+    }),
+    pollIntervalMs: integer(env, "WORKER_POLL_INTERVAL_MS", issues, {
+      min: 25,
+      max: 60_000,
+      defaultValue: 500,
+    }),
+    claimTimeoutMs: integer(env, "WORKER_CLAIM_TIMEOUT_MS", issues, {
+      min: 100,
+      max: 60_000,
+      defaultValue: 5_000,
+    }),
+    readinessTimeoutMs: integer(env, "WORKER_READINESS_TIMEOUT_MS", issues, {
+      min: 100,
+      max: 30_000,
+      defaultValue: 2_000,
+    }),
     leaseMs,
     heartbeatMs,
     handlerTimeoutMs: integer(env, "WORKER_HANDLER_TIMEOUT_MS", issues, {
@@ -183,6 +224,9 @@ export const loadWorkerConfig = (env: NodeJS.ProcessEnv): WorkerConfig => {
   }
   if (config.heartbeatTimeoutMs >= config.leaseMs) {
     issues.push("WORKER_HEARTBEAT_TIMEOUT_MS must be less than WORKER_LEASE_MS");
+  }
+  if (config.claimTimeoutMs >= config.leaseMs) {
+    issues.push("WORKER_CLAIM_TIMEOUT_MS must be less than WORKER_LEASE_MS");
   }
   if (issues.length > 0) throw new EnvValidationError(issues);
   return Object.freeze(config);

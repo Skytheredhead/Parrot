@@ -74,6 +74,26 @@ pub(crate) fn file_version_key(file_id: Uuid, content_version: u64) -> String {
     format!("{file_id}:{content_version}")
 }
 
+pub(crate) fn post_tag_key(post_id: Uuid, tag: &str) -> String {
+    format!("{post_id}:{}:{tag}", tag.len())
+}
+
+pub(crate) fn post_identity_key(post_id: Uuid, identity: Identity) -> String {
+    format!("{post_id}:{identity}")
+}
+
+pub(crate) fn post_reaction_key(post_id: Uuid, identity: Identity, emoji: &str) -> String {
+    format!("{post_id}:{identity}:{}:{emoji}", emoji.len())
+}
+
+pub(crate) fn post_activity_key(post_id: Uuid, sequence: u64) -> String {
+    format!("{post_id}:{sequence}")
+}
+
+pub(crate) fn poll_vote_key(post_id: Uuid, option_id: Uuid, identity: Identity) -> String {
+    format!("{post_id}:{option_id}:{identity}")
+}
+
 pub(crate) fn role_allows(role: WorkspaceRole, action: Action) -> bool {
     policy::role_allows(role.into(), action.into())
 }
@@ -336,7 +356,7 @@ pub(crate) fn require_service(
         || !policy::service_runtime_scope_allows(
             service.can_run_agents,
             service.can_process_outbox,
-            kind == "agent",
+            kind == "agent.run",
         )
         || !service_has_grant(ctx, ctx.sender(), workspace_id, kind)
     {

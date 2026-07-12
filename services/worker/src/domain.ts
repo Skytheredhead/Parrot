@@ -48,7 +48,10 @@ export interface OutboxJob<TPayload extends JsonValue = JsonValue> {
   readonly nextAttemptAt: number;
   readonly attempt: number;
   readonly state: JobState;
+  /** Authenticated adapter/service identity that owns the authority lease. */
   readonly leaseOwner?: string;
+  /** Stable logical worker slot, independently fenced within the adapter identity. */
+  readonly leaseWorkerSlotId?: string;
   readonly leaseExpiresAt?: number;
   readonly leaseGeneration: number;
   readonly lastErrorCode?: string;
@@ -57,7 +60,10 @@ export interface OutboxJob<TPayload extends JsonValue = JsonValue> {
 
 export interface LeaseToken {
   readonly jobId: string;
+  /** Authenticated adapter/service identity. */
   readonly owner: string;
+  /** Stable logical worker slot supplied by WORKER_ID. */
+  readonly workerSlotId: string;
   readonly generation: number;
   readonly expiresAt: number;
 }

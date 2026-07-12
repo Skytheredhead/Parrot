@@ -61,6 +61,9 @@ describe("gateway security boundaries", () => {
     expect(response.json().checks).toContainEqual({ name: "webhook-receipts", ready: false });
     expect(response.json().checks).toContainEqual({ name: "principal-resolver", ready: true });
     expect(response.json().checks).toContainEqual({ name: "agent-tools", ready: true });
+    expect(response.json().checks).toContainEqual({ name: "invitation-tokens", ready: true });
+    expect(response.json().checks).toContainEqual({ name: "invitations", ready: true });
+    expect(response.json().checks).toContainEqual({ name: "sessions", ready: true });
   });
 
   it("coalesces readiness polls and aborts a hanging probe", async () => {

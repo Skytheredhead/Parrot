@@ -4,4 +4,6 @@ export * from "./config.js";
 export * from "./composition.js";
 export * from "./domain.js";
 export * from "./outbox.js";
+export * from "./spacetime-outbox.js";
+export * from "./runtime.js";
 export * from "./telemetry.js";

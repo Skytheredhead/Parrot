@@ -56,7 +56,17 @@ const entries = (ports: WorkerProductionPorts): readonly AdapterEntry[] => [
   [
     "outbox",
     ports.outbox,
-    ["enqueue", "claim", "heartbeat", "complete", "retry", "outcomeUnknown", "deadLetter", "get"],
+    [
+      "enqueue",
+      "recoverOwned",
+      "claim",
+      "heartbeat",
+      "complete",
+      "retry",
+      "outcomeUnknown",
+      "deadLetter",
+      "get",
+    ],
   ],
   [
     "effects",
@@ -115,6 +125,14 @@ const entries = (ports: WorkerProductionPorts): readonly AdapterEntry[] => [
   ["spanExporter", ports.spanExporter, ["export"]],
 ];
 
+export const workerRuntimeAdapters = (ports: WorkerProductionPorts): readonly RuntimeAdapter[] => {
+  const adapters = new Set<RuntimeAdapter>(entries(ports).map(([, adapter]) => adapter));
+  if (typeof ports.tools?.entries === "function") {
+    for (const tool of ports.tools.entries()) adapters.add(tool);
+  }
+  return Object.freeze([...adapters]);
+};
+
 const allJobKinds: readonly JobKind[] = [
   "notification.deliver",
   "search.upsert",
@@ -170,6 +188,7 @@ const graphIssues = (ports: WorkerProductionPorts): string[] => {
         issues.push(`${port}:conformance_failed`);
       }
     }
+    if (typeof adapter.ready !== "function") issues.push(`${port}:missing_readiness_check`);
     for (const method of methods) {
       if (typeof (adapter as unknown as Record<string, unknown>)[method] !== "function") {
         issues.push(`${port}:missing_method:${method}`);
@@ -242,6 +261,7 @@ const graphIssues = (ports: WorkerProductionPorts): string[] => {
         issues.push(`tools:conformance_failed:${key}`);
       }
     }
+    if (typeof tool.ready !== "function") issues.push(`tools:missing_readiness_check:${key}`);
     if (
       !/^[A-Za-z0-9._:-]{1,128}$/.test(tool.name) ||
       !/^[A-Za-z0-9._:-]{1,64}$/.test(tool.version)

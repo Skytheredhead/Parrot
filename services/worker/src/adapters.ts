@@ -203,7 +203,10 @@ export class InMemoryNotificationProvider implements NotificationProvider {
 export interface SearchDocument {
   readonly workspaceId: string;
   readonly resourceId: string;
-  readonly version: number;
+  /** Content/resource revision within one authorization generation. */
+  readonly resourceRevision: number;
+  /** Authorization generation; always ordered before resourceRevision. */
+  readonly aclRevision: number;
   readonly body: string;
   readonly visibilityIds: readonly string[];
   readonly tombstone: boolean;
@@ -211,10 +214,16 @@ export interface SearchDocument {
 }
 
 export interface SearchVersion {
-  readonly version: number;
+  readonly resourceRevision: number;
+  readonly aclRevision: number;
   readonly tombstone: boolean;
   readonly contentHash: string;
 }
+
+const compareSearchVersion = (
+  left: Pick<SearchVersion, "aclRevision" | "resourceRevision">,
+  right: Pick<SearchVersion, "aclRevision" | "resourceRevision">,
+): number => left.aclRevision - right.aclRevision || left.resourceRevision - right.resourceRevision;
 
 export interface SearchBackend extends RuntimeAdapter {
   apply(document: SearchDocument): Promise<void>;
@@ -248,7 +257,8 @@ export const searchContentHash = (document: Omit<SearchDocument, "contentHash">)
       JSON.stringify({
         workspaceId: document.workspaceId,
         resourceId: document.resourceId,
-        version: document.version,
+        resourceRevision: document.resourceRevision,
+        aclRevision: document.aclRevision,
         body: document.body,
         visibilityIds: [...document.visibilityIds].sort(),
         tombstone: document.tombstone,
@@ -257,7 +267,12 @@ export const searchContentHash = (document: Omit<SearchDocument, "contentHash">)
     .digest("hex");
 
 const normalizedDocument = (document: SearchDocument): Required<SearchDocument> => {
-  if (!Number.isSafeInteger(document.version) || document.version < 0) {
+  if (
+    !Number.isSafeInteger(document.resourceRevision) ||
+    document.resourceRevision < 0 ||
+    !Number.isSafeInteger(document.aclRevision) ||
+    document.aclRevision < 0
+  ) {
     throw new Error("search_invalid_version");
   }
   const normalized: Omit<Required<SearchDocument>, "contentHash"> = {
@@ -315,7 +330,8 @@ export class SearchIndexHandler implements JobHandler {
     const document: SearchDocument = {
       workspaceId: job.workspaceId,
       resourceId: stringField(payload, "resourceId"),
-      version: numberField(payload, "version"),
+      resourceRevision: numberField(payload, "resourceRevision"),
+      aclRevision: numberField(payload, "aclRevision"),
       body: job.kind === "search.tombstone" ? "" : stringField(payload, "body"),
       visibilityIds:
         Array.isArray(payload.visibilityIds) &&
@@ -331,7 +347,8 @@ export class SearchIndexHandler implements JobHandler {
       type: "succeeded",
       result: {
         resourceId: normalized.resourceId,
-        version: normalized.version,
+        resourceRevision: normalized.resourceRevision,
+        aclRevision: normalized.aclRevision,
         contentHash: normalized.contentHash,
       },
     };
@@ -358,7 +375,8 @@ export class SearchIndexHandler implements JobHandler {
     const expected = normalizedDocument({
       workspaceId: job.workspaceId,
       resourceId: stringField(payload, "resourceId"),
-      version: numberField(payload, "version"),
+      resourceRevision: numberField(payload, "resourceRevision"),
+      aclRevision: numberField(payload, "aclRevision"),
       body: job.kind === "search.tombstone" ? "" : stringField(payload, "body"),
       visibilityIds:
         Array.isArray(payload.visibilityIds) &&
@@ -370,14 +388,18 @@ export class SearchIndexHandler implements JobHandler {
     const current = await this.backend.version(job.workspaceId, expected.resourceId);
     if (
       current &&
-      (current.version > expected.version ||
-        (current.version === expected.version &&
+      (compareSearchVersion(current, expected) > 0 ||
+        (compareSearchVersion(current, expected) === 0 &&
           current.tombstone === expected.tombstone &&
           current.contentHash === expected.contentHash))
     ) {
       return {
         type: "succeeded",
-        result: { resourceId: expected.resourceId, version: current.version },
+        result: {
+          resourceId: expected.resourceId,
+          resourceRevision: current.resourceRevision,
+          aclRevision: current.aclRevision,
+        },
       };
     }
     return { type: "not_found" };
@@ -410,11 +432,12 @@ const applyStrict = (
   const document = normalizedDocument(documentValue);
   const key = `${document.workspaceId}:${document.resourceId}`;
   const current = target.get(key);
-  if (!current || document.version > current.version) {
+  const ordering = current ? compareSearchVersion(document, current) : 1;
+  if (!current || ordering > 0) {
     target.set(key, structuredClone(document));
     return;
   }
-  if (document.version < current.version) return;
+  if (ordering < 0) return;
   if (current.tombstone && !document.tombstone) return;
   if (!current.tombstone && document.tombstone) {
     target.set(key, structuredClone(document));
@@ -446,7 +469,8 @@ export class InMemorySearchBackend implements SearchBackend, SearchRebuildSource
     const document = this.index.get(`${workspaceId}:${resourceId}`);
     return document
       ? {
-          version: document.version,
+          resourceRevision: document.resourceRevision,
+          aclRevision: document.aclRevision,
           tombstone: document.tombstone,
           contentHash: document.contentHash,
         }

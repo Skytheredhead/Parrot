@@ -30,6 +30,10 @@ export class JsonConsoleSink implements LogSink {
     return typeof process.stdout.write === "function";
   }
 
+  async ready(): Promise<boolean> {
+    return typeof process.stdout.write === "function";
+  }
+
   write(record: LogRecord): void {
     try {
       process.stdout.write(`${JSON.stringify(record)}\n`);

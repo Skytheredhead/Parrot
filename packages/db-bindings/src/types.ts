@@ -301,6 +301,15 @@ export const CompleteAgentRunInput = __t.object("CompleteAgentRunInput", {
 });
 export type CompleteAgentRunInput = __Infer<typeof CompleteAgentRunInput>;
 
+export const ConfigurePollInput = __t.object("ConfigurePollInput", {
+  postId: __t.uuid(),
+  options: __t.array(__t.string()),
+  allowsMultiple: __t.bool(),
+  expectedPostRevision: __t.u64(),
+  clientRequestId: __t.uuid(),
+});
+export type ConfigurePollInput = __Infer<typeof ConfigurePollInput>;
+
 export const Contribution = __t.object("Contribution", {
   id: __t.uuid(),
   workspaceId: __t.uuid(),
@@ -329,6 +338,28 @@ export const ContributionKind = __t.enum("ContributionKind", {
 });
 export type ContributionKind = __Infer<typeof ContributionKind>;
 
+export const CreateDirectConversationInput = __t.object("CreateDirectConversationInput", {
+  workspaceId: __t.uuid(),
+  participants: __t.array(__t.identity()),
+  clientRequestId: __t.uuid(),
+});
+export type CreateDirectConversationInput = __Infer<typeof CreateDirectConversationInput>;
+
+export const CreateTypedPostInput = __t.object("CreateTypedPostInput", {
+  spaceId: __t.uuid(),
+  title: __t.string(),
+  body: __t.string(),
+  get kind() {
+    return PostKind;
+  },
+  ownerIdentity: __t.identity(),
+  assigneeIdentity: __t.option(__t.identity()),
+  tags: __t.array(__t.string()),
+  mentions: __t.array(__t.identity()),
+  clientRequestId: __t.uuid(),
+});
+export type CreateTypedPostInput = __Infer<typeof CreateTypedPostInput>;
+
 export const DecisionRecord = __t.object("DecisionRecord", {
   id: __t.uuid(),
   workspaceId: __t.uuid(),
@@ -354,6 +385,125 @@ export const DecisionStatus = __t.enum("DecisionStatus", {
   Superseded: __t.unit(),
 });
 export type DecisionStatus = __Infer<typeof DecisionStatus>;
+
+export const DirectConversation = __t.object("DirectConversation", {
+  id: __t.uuid(),
+  workspaceId: __t.uuid(),
+  createdBy: __t.identity(),
+  nextSequence: __t.u64(),
+  revision: __t.u64(),
+  deactivatedAt: __t.option(__t.timestamp()),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type DirectConversation = __Infer<typeof DirectConversation>;
+
+export const DirectMessage = __t.object("DirectMessage", {
+  id: __t.uuid(),
+  sequenceKey: __t.string(),
+  conversationId: __t.uuid(),
+  authorIdentity: __t.identity(),
+  workspaceId: __t.uuid(),
+  sequence: __t.u64(),
+  parentMessageId: __t.option(__t.uuid()),
+  body: __t.string(),
+  revision: __t.u64(),
+  deleted: __t.bool(),
+  createdAt: __t.timestamp(),
+  editedAt: __t.option(__t.timestamp()),
+  deletedAt: __t.option(__t.timestamp()),
+});
+export type DirectMessage = __Infer<typeof DirectMessage>;
+
+export const DirectParticipant = __t.object("DirectParticipant", {
+  key: __t.string(),
+  conversationId: __t.uuid(),
+  identity: __t.identity(),
+  workspaceId: __t.uuid(),
+  joinedAt: __t.timestamp(),
+  leftAt: __t.option(__t.timestamp()),
+  participantEpoch: __t.u64(),
+});
+export type DirectParticipant = __Infer<typeof DirectParticipant>;
+
+export const DirectReadState = __t.object("DirectReadState", {
+  key: __t.string(),
+  conversationId: __t.uuid(),
+  identity: __t.identity(),
+  lastReadSequence: __t.u64(),
+  updatedAt: __t.timestamp(),
+});
+export type DirectReadState = __Infer<typeof DirectReadState>;
+
+export const DirectReplyAncestry = __t.object("DirectReplyAncestry", {
+  key: __t.string(),
+  ancestorMessageId: __t.uuid(),
+  descendantMessageId: __t.uuid(),
+  conversationId: __t.uuid(),
+  depth: __t.u32(),
+});
+export type DirectReplyAncestry = __Infer<typeof DirectReplyAncestry>;
+
+export const DmPromotionConsent = __t.object("DmPromotionConsent", {
+  key: __t.string(),
+  proposalId: __t.uuid(),
+  identity: __t.identity(),
+  get decision() {
+    return DmPromotionDecision;
+  },
+  proposalHash: __t.string(),
+  decidedAt: __t.timestamp(),
+});
+export type DmPromotionConsent = __Infer<typeof DmPromotionConsent>;
+
+// The tagged union or sum type for the algebraic type `DmPromotionDecision`.
+export const DmPromotionDecision = __t.enum("DmPromotionDecision", {
+  Approve: __t.unit(),
+  Reject: __t.unit(),
+});
+export type DmPromotionDecision = __Infer<typeof DmPromotionDecision>;
+
+export const DmPromotionProposal = __t.object("DmPromotionProposal", {
+  id: __t.uuid(),
+  conversationId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  destinationSpaceId: __t.uuid(),
+  proposerIdentity: __t.identity(),
+  title: __t.string(),
+  body: __t.string(),
+  draftHash: __t.string(),
+  sourceRevisionHash: __t.string(),
+  proposalHash: __t.string(),
+  participantEpochHash: __t.string(),
+  get state() {
+    return DmPromotionState;
+  },
+  revision: __t.u64(),
+  expiresAt: __t.timestamp(),
+  finalizedPostId: __t.option(__t.uuid()),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type DmPromotionProposal = __Infer<typeof DmPromotionProposal>;
+
+export const DmPromotionSource = __t.object("DmPromotionSource", {
+  key: __t.string(),
+  proposalId: __t.uuid(),
+  messageId: __t.uuid(),
+  messageRevision: __t.u64(),
+  ordinal: __t.u32(),
+});
+export type DmPromotionSource = __Infer<typeof DmPromotionSource>;
+
+// The tagged union or sum type for the algebraic type `DmPromotionState`.
+export const DmPromotionState = __t.enum("DmPromotionState", {
+  Pending: __t.unit(),
+  Rejected: __t.unit(),
+  Canceled: __t.unit(),
+  Expired: __t.unit(),
+  Finalized: __t.unit(),
+});
+export type DmPromotionState = __Infer<typeof DmPromotionState>;
 
 export const EffectLedger = __t.object("EffectLedger", {
   effectKey: __t.string(),
@@ -561,9 +711,22 @@ export const OutboxJob = __t.object("OutboxJob", {
   resourceType: __t.string(),
   resourceId: __t.uuid(),
   resourceRevision: __t.u64(),
+  aclRevision: __t.option(__t.u64()),
+  intentId: __t.option(__t.uuid()),
+  recipientId: __t.option(__t.identity()),
+  channel: __t.string(),
+  authorizationEpoch: __t.option(__t.u64()),
+  minimalMessage: __t.string(),
+  payloadResourceId: __t.option(__t.uuid()),
+  rebuildId: __t.option(__t.uuid()),
+  generation: __t.option(__t.u64()),
+  fileId: __t.option(__t.uuid()),
+  version: __t.option(__t.u64()),
+  runId: __t.option(__t.uuid()),
   expiresAt: __t.timestamp(),
   attempt: __t.u32(),
   leaseOwner: __t.option(__t.identity()),
+  workerSlotId: __t.string(),
   leaseUntil: __t.option(__t.timestamp()),
   leaseGeneration: __t.u64(),
   nextAttemptAt: __t.timestamp(),
@@ -572,6 +735,40 @@ export const OutboxJob = __t.object("OutboxJob", {
   updatedAt: __t.timestamp(),
 });
 export type OutboxJob = __Infer<typeof OutboxJob>;
+
+export const OutboxJobEnvelopeView = __t.object("OutboxJobEnvelopeView", {
+  id: __t.uuid(),
+  workspaceId: __t.uuid(),
+  kind: __t.string(),
+  effectKey: __t.string(),
+  resourceType: __t.string(),
+  resourceId: __t.uuid(),
+  resourceRevision: __t.u64(),
+  aclRevision: __t.option(__t.u64()),
+  intentId: __t.option(__t.uuid()),
+  recipientId: __t.option(__t.identity()),
+  channel: __t.string(),
+  authorizationEpoch: __t.option(__t.u64()),
+  minimalMessage: __t.string(),
+  payloadResourceId: __t.option(__t.uuid()),
+  rebuildId: __t.option(__t.uuid()),
+  generation: __t.option(__t.u64()),
+  fileId: __t.option(__t.uuid()),
+  version: __t.option(__t.u64()),
+  runId: __t.option(__t.uuid()),
+  createdAt: __t.timestamp(),
+  nextAttemptAt: __t.timestamp(),
+  attempt: __t.u32(),
+  get state() {
+    return OutboxState;
+  },
+  leaseOwner: __t.option(__t.identity()),
+  workerSlotId: __t.string(),
+  leaseUntil: __t.option(__t.timestamp()),
+  leaseGeneration: __t.u64(),
+  lastError: __t.string(),
+});
+export type OutboxJobEnvelopeView = __Infer<typeof OutboxJobEnvelopeView>;
 
 // The tagged union or sum type for the algebraic type `OutboxState`.
 export const OutboxState = __t.enum("OutboxState", {
@@ -628,19 +825,152 @@ export const PlatformCommandReceipt = __t.object("PlatformCommandReceipt", {
 });
 export type PlatformCommandReceipt = __Infer<typeof PlatformCommandReceipt>;
 
+export const Poll = __t.object("Poll", {
+  postId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  spaceId: __t.uuid(),
+  allowsMultiple: __t.bool(),
+  closed: __t.bool(),
+  revision: __t.u64(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type Poll = __Infer<typeof Poll>;
+
+export const PollOption = __t.object("PollOption", {
+  id: __t.uuid(),
+  postId: __t.uuid(),
+  label: __t.string(),
+  position: __t.u32(),
+});
+export type PollOption = __Infer<typeof PollOption>;
+
+export const PollVote = __t.object("PollVote", {
+  key: __t.string(),
+  postId: __t.uuid(),
+  optionId: __t.uuid(),
+  identity: __t.identity(),
+  createdAt: __t.timestamp(),
+});
+export type PollVote = __Infer<typeof PollVote>;
+
 export const Post = __t.object("Post", {
   id: __t.uuid(),
   workspaceId: __t.uuid(),
   spaceId: __t.uuid(),
   authorIdentity: __t.identity(),
+  ownerIdentity: __t.identity(),
+  assigneeIdentity: __t.option(__t.identity()),
+  get kind() {
+    return PostKind;
+  },
+  get state() {
+    return PostState;
+  },
+  locked: __t.bool(),
   title: __t.string(),
   body: __t.string(),
   revision: __t.u64(),
+  activitySequence: __t.u64(),
+  lastActivityAt: __t.timestamp(),
   deleted: __t.bool(),
   createdAt: __t.timestamp(),
   updatedAt: __t.timestamp(),
 });
 export type Post = __Infer<typeof Post>;
+
+export const PostActivity = __t.object("PostActivity", {
+  key: __t.string(),
+  postId: __t.uuid(),
+  sequence: __t.u64(),
+  actorIdentity: __t.identity(),
+  kind: __t.string(),
+  summary: __t.string(),
+  createdAt: __t.timestamp(),
+});
+export type PostActivity = __Infer<typeof PostActivity>;
+
+// The tagged union or sum type for the algebraic type `PostKind`.
+export const PostKind = __t.enum("PostKind", {
+  Discussion: __t.unit(),
+  Question: __t.unit(),
+  Announcement: __t.unit(),
+  Decision: __t.unit(),
+  Task: __t.unit(),
+  Poll: __t.unit(),
+  Incident: __t.unit(),
+  MediaDrop: __t.unit(),
+});
+export type PostKind = __Infer<typeof PostKind>;
+
+export const PostMention = __t.object("PostMention", {
+  key: __t.string(),
+  postId: __t.uuid(),
+  identity: __t.identity(),
+  workspaceId: __t.uuid(),
+  spaceId: __t.uuid(),
+  createdAt: __t.timestamp(),
+});
+export type PostMention = __Infer<typeof PostMention>;
+
+export const PostPin = __t.object("PostPin", {
+  postId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  spaceId: __t.uuid(),
+  pinnedBy: __t.identity(),
+  pinnedAt: __t.timestamp(),
+});
+export type PostPin = __Infer<typeof PostPin>;
+
+export const PostReaction = __t.object("PostReaction", {
+  key: __t.string(),
+  postId: __t.uuid(),
+  identity: __t.identity(),
+  emoji: __t.string(),
+  createdAt: __t.timestamp(),
+});
+export type PostReaction = __Infer<typeof PostReaction>;
+
+// The tagged union or sum type for the algebraic type `PostState`.
+export const PostState = __t.enum("PostState", {
+  Active: __t.unit(),
+  Resolved: __t.unit(),
+  Archived: __t.unit(),
+});
+export type PostState = __Infer<typeof PostState>;
+
+export const PostTag = __t.object("PostTag", {
+  key: __t.string(),
+  postId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  spaceId: __t.uuid(),
+  tag: __t.string(),
+  createdAt: __t.timestamp(),
+});
+export type PostTag = __Infer<typeof PostTag>;
+
+export const PostUserState = __t.object("PostUserState", {
+  key: __t.string(),
+  postId: __t.uuid(),
+  identity: __t.identity(),
+  following: __t.bool(),
+  bookmarked: __t.bool(),
+  lastReadSequence: __t.u64(),
+  readAt: __t.option(__t.timestamp()),
+  updatedAt: __t.timestamp(),
+});
+export type PostUserState = __Infer<typeof PostUserState>;
+
+export const ProposeDmPromotionInput = __t.object("ProposeDmPromotionInput", {
+  conversationId: __t.uuid(),
+  destinationSpaceId: __t.uuid(),
+  title: __t.string(),
+  body: __t.string(),
+  sourceMessageIds: __t.array(__t.uuid()),
+  expiresInSeconds: __t.u32(),
+  clientRequestId: __t.uuid(),
+});
+export type ProposeDmPromotionInput = __Infer<typeof ProposeDmPromotionInput>;
 
 export const ReplyAncestry = __t.object("ReplyAncestry", {
   key: __t.string(),
@@ -821,6 +1151,19 @@ export const TrustedTool = __t.object("TrustedTool", {
 });
 export type TrustedTool = __Infer<typeof TrustedTool>;
 
+export const UpdatePostLifecycleInput = __t.object("UpdatePostLifecycleInput", {
+  postId: __t.uuid(),
+  get state() {
+    return PostState;
+  },
+  locked: __t.bool(),
+  ownerIdentity: __t.identity(),
+  assigneeIdentity: __t.option(__t.identity()),
+  expectedRevision: __t.u64(),
+  clientRequestId: __t.uuid(),
+});
+export type UpdatePostLifecycleInput = __Infer<typeof UpdatePostLifecycleInput>;
+
 export const User = __t.object("User", {
   identity: __t.identity(),
   displayName: __t.string(),
@@ -954,6 +1297,26 @@ export const VisibleFile = __t.object("VisibleFile", {
   updatedAt: __t.timestamp(),
 });
 export type VisibleFile = __Infer<typeof VisibleFile>;
+
+export const VisiblePollOption = __t.object("VisiblePollOption", {
+  id: __t.uuid(),
+  postId: __t.uuid(),
+  label: __t.string(),
+  position: __t.u32(),
+  voteCount: __t.u64(),
+  viewerSelected: __t.bool(),
+});
+export type VisiblePollOption = __Infer<typeof VisiblePollOption>;
+
+export const VisiblePostUserState = __t.object("VisiblePostUserState", {
+  postId: __t.uuid(),
+  following: __t.bool(),
+  bookmarked: __t.bool(),
+  unread: __t.bool(),
+  lastReadSequence: __t.u64(),
+  readAt: __t.option(__t.timestamp()),
+});
+export type VisiblePostUserState = __Infer<typeof VisiblePostUserState>;
 
 export const VisibleUser = __t.object("VisibleUser", {
   identity: __t.identity(),

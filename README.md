@@ -14,9 +14,10 @@ Spaces show substantial posts rather than an endless stream of every message. A 
 ## Current status
 
 The repository is in active development. Source research, product options, architecture ADRs, and
-the provider-neutral database, gateway, worker, authentication-integration, and guarded operations
-foundations are implemented and tested. Durable provider adapters and the selected frontend
-direction remain before a release candidate exists.
+the provider-neutral database, gateway, worker host, authentication/invitation/session boundaries,
+post/social domain, private direct messages, typed client contracts, and guarded operations
+foundations are implemented and tested. Durable provider adapters, approved deployment inputs, and
+integration with the user-owned frontend remain before a release candidate exists.
 
 Do not use this repository as a production service yet.
 
@@ -30,7 +31,10 @@ Do not use this repository as a production service yet.
 - `services/gateway/` — browser-facing security, file, search, and agent gateway.
 - `services/worker/` — outbox-driven external effect workers.
 - `packages/db-bindings/` — generated, caller-safe TypeScript bindings for the Rust module.
-- `apps/web/` — selected Next.js application direction; intentionally not scaffolded until the visual decision is made.
+- `packages/client-sdk/` — framework-neutral, hardened browser client for gateway capabilities.
+- `docs/project/frontend-integration-contract.md` — stable integration boundary for the user-owned UI.
+
+The user is building the product UI; this backend work intentionally does not scaffold or modify it.
 
 ## Prerequisites
 

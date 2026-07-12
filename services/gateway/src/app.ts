@@ -16,8 +16,10 @@ import type {
 import { GatewayError, forbidden, invalidInput, notFound, unavailable } from "./errors.js";
 import { FileCapabilityService } from "./files/service.js";
 import type { WorkspaceBudget } from "./files/service.js";
+import { InvitationService } from "./invitations/service.js";
 import { safeErrorFields } from "./observability.js";
 import { PermissionSafeSearchService } from "./search/service.js";
+import { SessionAdministrationService } from "./sessions/service.js";
 import {
   enforceBrowserBoundary,
   equalSecret,
@@ -54,6 +56,16 @@ const searchInput = z
   .strict();
 const agentInput = z.object({ workspaceId: id }).strict();
 const toolInput = z.object({ workspaceId: id, arguments: z.unknown() }).strict();
+const createInvitationInput = z
+  .object({
+    workspaceId: id,
+    role: z.enum(["admin", "member", "guest"]),
+    spaceIds: z.array(id).max(50).default([]),
+    email: z.string().min(3).max(254).optional(),
+    expiresInSeconds: z.number().int().min(300).max(2_592_000).default(604_800),
+    useLimit: z.number().int().min(1).max(100).default(1),
+  })
+  .strict();
 
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const result = schema.safeParse(value);
@@ -133,6 +145,9 @@ function dependencyProbes(deps: GatewayDependencies): ReadinessProbe[] {
     dependencyProbe("webhook-receipts", deps.webhookReceipts),
     dependencyProbe("agent-streams", deps.agentStreams),
     dependencyProbe("agent-tools", deps.agentTools),
+    dependencyProbe("invitation-tokens", deps.invitationTokens),
+    dependencyProbe("invitations", deps.invitations),
+    dependencyProbe("sessions", deps.sessions),
     ...(deps.readiness ?? []),
   ];
 }
@@ -155,10 +170,25 @@ function assertProductionAdapters(config: GatewayConfig, deps: GatewayDependenci
     deps.webhookReceipts,
     deps.agentStreams,
     deps.agentTools,
+    deps.invitationTokens,
+    deps.invitations,
+    deps.sessions,
   ];
   const invalid = adapters
-    .filter((adapter) => adapter.adapterKind !== "durable")
-    .map((adapter) => adapter.adapterName);
+    .filter((adapter) => adapter?.adapterKind !== "durable")
+    .map((adapter) => adapter?.adapterName ?? "missing");
+  for (const [adapter, methods] of [
+    [deps.invitationTokens, ["ready", "hashForStorage", "verificationHashes", "verify"]],
+    [deps.invitations, ["ready", "createAtomic", "redeemAtomic"]],
+    [deps.sessions, ["ready", "listOwned", "revokeOwnedAtomic", "revokeOthersAtomic"]],
+  ] as const) {
+    if (!adapter) continue;
+    for (const method of methods) {
+      if (typeof (adapter as unknown as Readonly<Record<string, unknown>>)[method] !== "function") {
+        invalid.push(`${adapter.adapterName}:missing_method:${method}`);
+      }
+    }
+  }
   if (invalid.length > 0) {
     throw new Error(`Production requires durable gateway adapters: ${invalid.join(", ")}`);
   }
@@ -213,6 +243,9 @@ export async function buildGateway(config: GatewayConfig, deps: GatewayDependenc
           "res.headers.set-cookie",
           "body",
           "token",
+          "invitationToken",
+          "invitation.token",
+          "req.body.token",
           "capability.url",
         ],
       },
@@ -227,7 +260,7 @@ export async function buildGateway(config: GatewayConfig, deps: GatewayDependenc
   await app.register(cors, {
     credentials: true,
     strictPreflight: true,
-    methods: ["GET", "HEAD", "POST", "OPTIONS"],
+    methods: ["GET", "HEAD", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: [
       "authorization",
       "content-type",
@@ -257,6 +290,7 @@ export async function buildGateway(config: GatewayConfig, deps: GatewayDependenc
   });
   app.addHook("onSend", async (request, reply, payload) => {
     reply.header("cache-control", "no-store");
+    reply.header("referrer-policy", "no-referrer");
     reply.header("x-request-id", request.id);
     return payload;
   });
@@ -351,6 +385,11 @@ export async function buildGateway(config: GatewayConfig, deps: GatewayDependenc
     workspaceBudget,
     config.search,
   );
+  const invitations = new InvitationService(deps.invitationTokens, deps.invitations);
+  const sessions = new SessionAdministrationService(
+    deps.sessions,
+    config.sessions.freshAuthMaxAgeSeconds,
+  );
   const probes = dependencyProbes(deps);
   let readinessInFlight: Promise<{ name: string; ready: boolean }[]> | undefined;
   const checkReadiness = () => {
@@ -428,6 +467,83 @@ export async function buildGateway(config: GatewayConfig, deps: GatewayDependenc
       limit: body.limit,
       ...(body.cursor === undefined ? {} : { cursor: body.cursor }),
     });
+  });
+
+  app.post("/v1/invitations", async (request, reply) => {
+    const principal = await authenticate(request);
+    await consumePrincipal(principal, "invitation-create");
+    const body = parse(createInvitationInput, request.body);
+    if (
+      !(await deps.authorization.authorize({
+        principal,
+        action: "invitation:create",
+        resource: { workspaceId: body.workspaceId, kind: "workspace", id: body.workspaceId },
+      }))
+    )
+      throw forbidden();
+    await workspaceBudget.consume(principal, body.workspaceId, "invitation-create");
+    const result = await invitations.create(
+      principal,
+      {
+        workspaceId: body.workspaceId,
+        role: body.role,
+        spaceIds: body.spaceIds,
+        ...(body.email === undefined ? {} : { email: body.email }),
+        expiresInSeconds: body.expiresInSeconds,
+        useLimit: body.useLimit,
+      },
+      request.id,
+    );
+    reply.header("referrer-policy", "no-referrer");
+    return reply.status(201).send(result);
+  });
+
+  app.post("/v1/invitations/redeem", async (request, reply) => {
+    const principal = await authenticate(request);
+    await consumePrincipal(principal, "invitation-redeem");
+    enforceRateLimit(
+      await deps.rateLimits.consumeIp({ ip: request.ip, scope: "invitation-redeem", cost: 1 }),
+    );
+    const body = request.body;
+    const token =
+      typeof body === "object" && body !== null && !Array.isArray(body) && "token" in body
+        ? (body as { token?: unknown }).token
+        : undefined;
+    const result = await invitations.redeem(
+      principal,
+      typeof token === "string" && token.length <= 512 ? token : "",
+      request.id,
+    );
+    reply.header("referrer-policy", "no-referrer");
+    return result;
+  });
+
+  app.get("/v1/sessions", async (request) => {
+    const principal = await authenticate(request);
+    await consumePrincipal(principal, "session-list");
+    return sessions.list(principal);
+  });
+
+  app.delete<{ Params: { sessionId: string } }>("/v1/sessions/:sessionId", async (request) => {
+    const principal = await authenticate(request);
+    await consumePrincipal(principal, "session-revoke");
+    enforceRateLimit(
+      await deps.rateLimits.consumeIp({ ip: request.ip, scope: "session-revoke", cost: 1 }),
+    );
+    return sessions.revoke(principal, request.params.sessionId, request.id);
+  });
+
+  app.post("/v1/sessions/revoke-others", async (request) => {
+    const principal = await authenticate(request);
+    await consumePrincipal(principal, "session-revoke-others");
+    enforceRateLimit(
+      await deps.rateLimits.consumeIp({
+        ip: request.ip,
+        scope: "session-revoke-others",
+        cost: 1,
+      }),
+    );
+    return sessions.revokeOthers(principal, request.id);
   });
 
   app.post<{ Params: { provider: string } }>(

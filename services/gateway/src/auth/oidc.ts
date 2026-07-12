@@ -86,6 +86,16 @@ export class OidcJwtVerifier implements TokenVerifier {
       if (payload.exp - payload.iat > this.options.maxTokenAgeSeconds)
         throw unauthorized("The access token lifetime is too long");
       const sid = payload.sid;
+      const authenticatedAt = payload.auth_time;
+      if (
+        authenticatedAt !== undefined &&
+        (typeof authenticatedAt !== "number" ||
+          !Number.isSafeInteger(authenticatedAt) ||
+          authenticatedAt < 0 ||
+          authenticatedAt > payload.iat + 5)
+      ) {
+        throw unauthorized("The authentication-time claim is invalid");
+      }
       return {
         issuer: payload.iss,
         subject: payload.sub,
@@ -93,6 +103,7 @@ export class OidcJwtVerifier implements TokenVerifier {
         expiresAt: payload.exp,
         tokenType: "access",
         ...(typeof sid === "string" ? { sessionId: sid } : {}),
+        ...(typeof authenticatedAt === "number" ? { authenticatedAt } : {}),
       };
     } catch (error) {
       if (error instanceof Error && error.name === "GatewayError") throw error;

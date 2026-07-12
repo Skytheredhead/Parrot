@@ -29,6 +29,24 @@ test("environment validation rejects unsafe lease and heartbeat settings", () =>
   );
 });
 
+test("process configuration rejects relative adapter modules and unbounded claims", () => {
+  assert.throws(
+    () =>
+      loadWorkerConfig({
+        WORKER_ENVIRONMENT: "production",
+        WORKER_ID: "worker-1",
+        WORKER_ADAPTER_MODULE: "./adapter.js",
+        WORKER_LEASE_MS: "1000",
+        WORKER_HEARTBEAT_MS: "100",
+        WORKER_CLAIM_TIMEOUT_MS: "1000",
+      }),
+    (error: unknown) =>
+      error instanceof EnvValidationError &&
+      error.issues.some((issue) => issue.includes("WORKER_ADAPTER_MODULE")) &&
+      error.issues.some((issue) => issue.includes("WORKER_CLAIM_TIMEOUT_MS")),
+  );
+});
+
 test("search index ignores stale versions and applies tombstones monotonically", async () => {
   const backend = new InMemorySearchBackend();
   const handler = new SearchIndexHandler(backend, backend);
@@ -40,7 +58,8 @@ test("search index ignores stale versions and applies tombstones monotonically",
       effectKey: "search:resource-1:2",
       payload: {
         resourceId: "resource-1",
-        version: 2,
+        resourceRevision: 2,
+        aclRevision: 1,
         body: "new text",
         visibilityIds: ["space-1"],
       },
@@ -51,7 +70,8 @@ test("search index ignores stale versions and applies tombstones monotonically",
   await backend.apply({
     workspaceId: "workspace-1",
     resourceId: "resource-1",
-    version: 1,
+    resourceRevision: 1,
+    aclRevision: 1,
     body: "stale text",
     visibilityIds: ["space-1"],
     tombstone: false,
@@ -64,13 +84,18 @@ test("search index ignores stale versions and applies tombstones monotonically",
       workspaceId: "workspace-1",
       kind: "search.tombstone",
       effectKey: "search:resource-1:3",
-      payload: { resourceId: "resource-1", version: 3, visibilityIds: [] },
+      payload: {
+        resourceId: "resource-1",
+        resourceRevision: 3,
+        aclRevision: 1,
+        visibilityIds: [],
+      },
     },
     0,
   );
   await handler.execute(tombstone, tombstone.effectKey, new AbortController().signal);
   assert.equal(backend.index.get("workspace-1:resource-1")?.tombstone, true);
-  assert.equal(backend.index.get("workspace-1:resource-1")?.version, 3);
+  assert.equal(backend.index.get("workspace-1:resource-1")?.resourceRevision, 3);
 });
 
 test("search rebuild remains shadowed after a crash and activates atomically with concurrent deltas", async () => {
@@ -78,7 +103,8 @@ test("search rebuild remains shadowed after a crash and activates atomically wit
   await backend.apply({
     workspaceId: "workspace-1",
     resourceId: "old",
-    version: 1,
+    resourceRevision: 1,
+    aclRevision: 1,
     body: "still queryable",
     visibilityIds: [],
     tombstone: false,
@@ -90,7 +116,8 @@ test("search rebuild remains shadowed after a crash and activates atomically wit
       yield {
         workspaceId: "workspace-1",
         resourceId: "new",
-        version: 1,
+        resourceRevision: 1,
+        aclRevision: 1,
         body: "shadow only",
         visibilityIds: [],
         tombstone: false,
@@ -119,7 +146,8 @@ test("search rebuild remains shadowed after a crash and activates atomically wit
   await backend.apply({
     workspaceId: "workspace-1",
     resourceId: "delta",
-    version: 2,
+    resourceRevision: 2,
+    aclRevision: 1,
     body: "arrived during rebuild",
     visibilityIds: [],
     tombstone: false,
@@ -136,7 +164,8 @@ test("an older concurrent search rebuild generation can never replace a newer on
   await backend.applyRebuild("workspace-1", "older", 1, {
     workspaceId: "workspace-1",
     resourceId: "result",
-    version: 1,
+    resourceRevision: 1,
+    aclRevision: 1,
     body: "old generation",
     visibilityIds: [],
     tombstone: false,
@@ -145,7 +174,8 @@ test("an older concurrent search rebuild generation can never replace a newer on
   await backend.applyRebuild("workspace-1", "newer", 2, {
     workspaceId: "workspace-1",
     resourceId: "result",
-    version: 1,
+    resourceRevision: 1,
+    aclRevision: 1,
     body: "new generation",
     visibilityIds: [],
     tombstone: false,
@@ -161,7 +191,8 @@ test("search equal-version conflicts cannot resurrect tombstones or alter conten
   await backend.apply({
     workspaceId: "workspace-1",
     resourceId: "resource-1",
-    version: 4,
+    resourceRevision: 4,
+    aclRevision: 1,
     body: "live",
     visibilityIds: [],
     tombstone: false,
@@ -169,7 +200,8 @@ test("search equal-version conflicts cannot resurrect tombstones or alter conten
   await backend.apply({
     workspaceId: "workspace-1",
     resourceId: "resource-1",
-    version: 4,
+    resourceRevision: 4,
+    aclRevision: 1,
     body: "",
     visibilityIds: [],
     tombstone: true,
@@ -177,7 +209,8 @@ test("search equal-version conflicts cannot resurrect tombstones or alter conten
   await backend.apply({
     workspaceId: "workspace-1",
     resourceId: "resource-1",
-    version: 4,
+    resourceRevision: 4,
+    aclRevision: 1,
     body: "resurrected",
     visibilityIds: [],
     tombstone: false,
@@ -187,7 +220,8 @@ test("search equal-version conflicts cannot resurrect tombstones or alter conten
   await backend.apply({
     workspaceId: "workspace-1",
     resourceId: "resource-2",
-    version: 1,
+    resourceRevision: 1,
+    aclRevision: 1,
     body: "one",
     visibilityIds: [],
     tombstone: false,
@@ -196,13 +230,96 @@ test("search equal-version conflicts cannot resurrect tombstones or alter conten
     backend.apply({
       workspaceId: "workspace-1",
       resourceId: "resource-2",
-      version: 1,
+      resourceRevision: 1,
+      aclRevision: 1,
       body: "two",
       visibilityIds: [],
       tombstone: false,
     }),
     /search_version_conflict/,
   );
+});
+
+test("ACL generation orders before content revision under adversarial delivery", async () => {
+  const backend = new InMemorySearchBackend();
+  await backend.apply({
+    workspaceId: "workspace-1",
+    resourceId: "restricted-live",
+    resourceRevision: 2,
+    aclRevision: 10,
+    body: "current restricted body",
+    visibilityIds: ["remaining-user"],
+    tombstone: false,
+  });
+  await backend.apply({
+    workspaceId: "workspace-1",
+    resourceId: "restricted-live",
+    resourceRevision: 9_999,
+    aclRevision: 9,
+    body: "stale broadly visible body",
+    visibilityIds: ["remaining-user", "revoked-user"],
+    tombstone: false,
+  });
+  await backend.apply({
+    workspaceId: "workspace-1",
+    resourceId: "restricted-live",
+    resourceRevision: 10_000,
+    aclRevision: 9,
+    body: "",
+    visibilityIds: [],
+    tombstone: true,
+  });
+  assert.deepEqual(backend.index.get("workspace-1:restricted-live")?.visibilityIds, [
+    "remaining-user",
+  ]);
+  assert.equal(backend.index.get("workspace-1:restricted-live")?.tombstone, false);
+
+  await backend.apply({
+    workspaceId: "workspace-1",
+    resourceId: "restricted-deleted",
+    resourceRevision: 1,
+    aclRevision: 20,
+    body: "",
+    visibilityIds: [],
+    tombstone: true,
+  });
+  await backend.apply({
+    workspaceId: "workspace-1",
+    resourceId: "restricted-deleted",
+    resourceRevision: 50_000,
+    aclRevision: 19,
+    body: "must not resurrect",
+    visibilityIds: ["revoked-user"],
+    tombstone: false,
+  });
+  assert.equal(backend.index.get("workspace-1:restricted-deleted")?.tombstone, true);
+});
+
+test("a newer ACL delta dominates stale rebuild content with a higher resource revision", async () => {
+  const backend = new InMemorySearchBackend();
+  assert.equal(await backend.beginRebuild("workspace-1", "rebuild-acl", 1), "started");
+  await backend.applyRebuild("workspace-1", "rebuild-acl", 1, {
+    workspaceId: "workspace-1",
+    resourceId: "document-1",
+    resourceRevision: 1_000,
+    aclRevision: 4,
+    body: "stale rebuild body",
+    visibilityIds: ["revoked-user"],
+    tombstone: false,
+  });
+  await backend.apply({
+    workspaceId: "workspace-1",
+    resourceId: "document-1",
+    resourceRevision: 1,
+    aclRevision: 5,
+    body: "current restricted body",
+    visibilityIds: ["remaining-user"],
+    tombstone: false,
+  });
+  assert.equal(await backend.activateRebuild("workspace-1", "rebuild-acl", 1), "activated");
+  assert.deepEqual(backend.index.get("workspace-1:document-1")?.visibilityIds, ["remaining-user"]);
+  assert.equal(backend.index.get("workspace-1:document-1")?.aclRevision, 5);
+  assert.equal(backend.index.get("workspace-1:document-1")?.resourceRevision, 1);
 });
 
 const filePlan: FileProcessingPlan = {

@@ -13,6 +13,8 @@ export interface VerifiedIdentity {
   expiresAt: number;
   tokenType: "access" | "session";
   sessionId?: string;
+  /** OIDC auth_time or equivalent provider assertion; token issuance time is not a substitute. */
+  authenticatedAt?: number;
 }
 
 export interface Principal {
@@ -22,6 +24,10 @@ export interface Principal {
   kind: PrincipalKind;
   authzEpoch: number;
   sessionId?: string;
+  authenticatedAt?: number;
+  /** Current authoritative profile email; never used as the principal authorization key. */
+  email?: string;
+  emailVerified?: boolean;
 }
 
 export interface TokenVerifier extends ReadyDependency {
@@ -286,6 +292,100 @@ export interface AgentToolGateway extends ReadyDependency {
   }): Promise<{ invocationId: string; status: "accepted" | "completed"; output?: unknown }>;
 }
 
+export type InvitationRole = "admin" | "member" | "guest";
+
+export interface InvitationTokenHash {
+  keyId: string;
+  digest: string;
+}
+
+export interface InvitationTokenHasher extends ReadyDependency {
+  /** Hashes with the active key. Raw bearer material must never leave this boundary. */
+  hashForStorage(token: string): Promise<InvitationTokenHash>;
+  /** Returns fixed-length hashes for active and retained verification keys. */
+  verificationHashes(token: string): Promise<readonly InvitationTokenHash[]>;
+  /** Constant-time reference verification for adapter conformance tests. */
+  verify(token: string, expected: InvitationTokenHash): Promise<boolean>;
+}
+
+export interface InvitationCreateRecord {
+  invitationId: string;
+  workspaceId: string;
+  role: InvitationRole;
+  spaceIds: readonly string[];
+  normalizedEmail?: string;
+  creator: Principal;
+  createdAt: string;
+  expiresAt: string;
+  useLimit: number;
+  tokenHash: InvitationTokenHash;
+  requestId: string;
+}
+
+export type InvitationRedemptionResult =
+  | {
+      status: "accepted";
+      workspaceId: string;
+      membershipId: string;
+      role: InvitationRole;
+      useCount: number;
+      useLimit: number;
+    }
+  | { status: "unavailable" };
+
+export interface InvitationStore extends ReadyDependency {
+  /** Atomically reauthorizes the creator and creates the hash-only invitation plus audit record. */
+  createAtomic(input: InvitationCreateRecord): Promise<void>;
+  /**
+   * Atomically verifies a fixed-length candidate digest in constant time, then rechecks expiry,
+   * revocation, verified-email binding, use limits, membership policy, and writes membership/audit.
+   */
+  redeemAtomic(input: {
+    invitationId: string;
+    verificationHashes: readonly InvitationTokenHash[];
+    principal: Principal;
+    normalizedVerifiedEmail: string;
+    now: string;
+    requestId: string;
+  }): Promise<InvitationRedemptionResult>;
+}
+
+export interface UserSessionMetadata {
+  sessionId: string;
+  current: boolean;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+  kind: "browser" | "api";
+}
+
+export interface SessionAdministration extends ReadyDependency {
+  /** Returns only sessions currently owned by the authoritative human principal. */
+  listOwned(input: {
+    principal: Principal;
+    currentSessionId?: string;
+    limit: number;
+  }): Promise<readonly UserSessionMetadata[]>;
+  /** Atomically rechecks ownership/current epoch, revokes, and appends the audit record. */
+  revokeOwnedAtomic(input: {
+    principal: Principal;
+    targetSessionId: string;
+    currentSessionId?: string;
+    now: string;
+    requestId: string;
+    reason: "user_requested";
+  }): Promise<"revoked" | "unavailable">;
+  /** Atomically retains the bound current session and revokes/audits every other owned session. */
+  revokeOthersAtomic(input: {
+    principal: Principal;
+    currentSessionId: string;
+    authenticatedAt: number;
+    now: string;
+    requestId: string;
+    reason: "user_requested_revoke_others";
+  }): Promise<{ status: "revoked"; revokedCount: number } | { status: "unavailable" }>;
+}
+
 export interface ReadinessProbe {
   name: string;
   check(signal: AbortSignal): Promise<boolean>;
@@ -307,5 +407,8 @@ export interface GatewayDependencies {
   webhookReceipts: WebhookReceiptStore;
   agentStreams: AgentStreamBroker;
   agentTools: AgentToolGateway;
+  invitationTokens: InvitationTokenHasher;
+  invitations: InvitationStore;
+  sessions: SessionAdministration;
   readiness?: readonly ReadinessProbe[];
 }

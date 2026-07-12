@@ -9,15 +9,31 @@ import {
   type AlgebraicTypeType as __AlgebraicTypeType,
   type Infer as __Infer,
 } from "spacetimedb";
+import {
+  PostKind,
+  PostState,
+} from "./types";
+
 
 export default __t.row({
   id: __t.uuid(),
   workspaceId: __t.uuid().name("workspace_id"),
   spaceId: __t.uuid().name("space_id"),
   authorIdentity: __t.identity().name("author_identity"),
+  ownerIdentity: __t.identity().name("owner_identity"),
+  assigneeIdentity: __t.option(__t.identity()).name("assignee_identity"),
+  get kind() {
+    return PostKind;
+  },
+  get state() {
+    return PostState;
+  },
+  locked: __t.bool(),
   title: __t.string(),
   body: __t.string(),
   revision: __t.u64(),
+  activitySequence: __t.u64().name("activity_sequence"),
+  lastActivityAt: __t.timestamp().name("last_activity_at"),
   deleted: __t.bool(),
   createdAt: __t.timestamp().name("created_at"),
   updatedAt: __t.timestamp().name("updated_at"),

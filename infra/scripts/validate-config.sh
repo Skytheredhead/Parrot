@@ -11,14 +11,14 @@ while (($#)); do
     --runtime) mode=runtime; shift ;;
     --profile) [[ $# -ge 2 ]] || die "--profile requires a name"; profiles+=("$2"); shift 2 ;;
     -h|--help)
-      printf 'Usage: %s [--env-file PATH] [--runtime] [--profile gateway|telemetry]\n' "$0"
+      printf 'Usage: %s [--env-file PATH] [--runtime] [--profile gateway|worker|telemetry]\n' "$0"
       exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
 
 for profile in ${profiles[@]+"${profiles[@]}"}; do
-  [[ "$profile" == gateway || "$profile" == telemetry ]] || die "profile is not deployable: $profile"
+  [[ "$profile" == gateway || "$profile" == worker || "$profile" == telemetry ]] || die "profile is not deployable: $profile"
 done
 
 if [[ "$mode" == runtime ]]; then load_env_file "$env_file" true; else load_env_file "$env_file" false; fi
@@ -51,6 +51,12 @@ if [[ "$mode" == runtime ]]; then
           && "$AGENT_STREAM_ORIGINS" != *example.invalid* \
           && "$FILE_CAPABILITY_ORIGINS" != *example.invalid* ]] \
           || die "gateway provider/domain configuration still contains placeholders"
+        ;;
+      worker)
+        assert_immutable_image "$WORKER_IMAGE" WORKER_IMAGE
+        [[ "$WORKER_ADAPTER_MODULE" =~ ^/app/[A-Za-z0-9._/-]{1,900}\.(js|mjs)$ \
+          && "$WORKER_ADAPTER_MODULE" != /app/adapter/index.js ]] \
+          || die "worker adapter module remains missing or uses the unimplemented placeholder"
         ;;
       telemetry)
         [[ "$OTEL_EXPORTER_OTLP_ENDPOINT" != *example.invalid* ]] || die "telemetry destination still contains a placeholder"

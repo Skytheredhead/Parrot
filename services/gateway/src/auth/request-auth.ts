@@ -19,9 +19,17 @@ function assertResolvedIdentity(identity: VerifiedIdentity, principal: Principal
   ) {
     throw unauthorized("Authoritative identity resolution failed");
   }
+  const {
+    sessionId: _untrustedResolvedSession,
+    authenticatedAt: _untrustedResolvedAuthenticationTime,
+    ...authoritativePrincipal
+  } = principal;
   return {
-    ...principal,
+    ...authoritativePrincipal,
     ...(identity.sessionId === undefined ? {} : { sessionId: identity.sessionId }),
+    ...(identity.authenticatedAt === undefined
+      ? {}
+      : { authenticatedAt: identity.authenticatedAt }),
   };
 }
 

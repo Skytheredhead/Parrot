@@ -34,6 +34,7 @@ const rawConfigSchema = z.object({
   WEBHOOK_MAX_SKEW_SECONDS: z.coerce.number().int().min(30).max(900).default(300),
   SESSION_COOKIE_NAME: z.string().min(1).default("__Host-session"),
   CSRF_COOKIE_NAME: z.string().min(1).default("__Host-csrf"),
+  SESSION_FRESH_AUTH_MAX_AGE_SECONDS: z.coerce.number().int().min(60).max(900).default(300),
   READINESS_TOKEN: z.string().min(32).optional(),
   READINESS_TIMEOUT_MS: z.coerce.number().int().min(100).max(10_000).default(2_000),
   OTEL_ENABLED: z.enum(["true", "false"]).default("false"),
@@ -75,6 +76,7 @@ export interface GatewayConfig {
   webhookMaxSkewSeconds: number;
   sessionCookieName: string;
   csrfCookieName: string;
+  sessions: { freshAuthMaxAgeSeconds: number };
   readiness: { token?: string; timeoutMs: number };
   telemetry: { enabled: boolean; serviceName: string; endpoint?: string };
   adapterModule?: string;
@@ -245,6 +247,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
     webhookMaxSkewSeconds: parsed.WEBHOOK_MAX_SKEW_SECONDS,
     sessionCookieName: parsed.SESSION_COOKIE_NAME,
     csrfCookieName: parsed.CSRF_COOKIE_NAME,
+    sessions: { freshAuthMaxAgeSeconds: parsed.SESSION_FRESH_AUTH_MAX_AGE_SECONDS },
     readiness: {
       ...(parsed.READINESS_TOKEN === undefined ? {} : { token: parsed.READINESS_TOKEN }),
       timeoutMs: parsed.READINESS_TIMEOUT_MS,

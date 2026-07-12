@@ -37,6 +37,7 @@ export const TEST_CONFIG: GatewayConfig = {
   webhookMaxSkewSeconds: 300,
   sessionCookieName: "__Host-session",
   csrfCookieName: "__Host-csrf",
+  sessions: { freshAuthMaxAgeSeconds: 300 },
   readiness: { token: "test-readiness-token-that-is-long-enough", timeoutMs: 200 },
   telemetry: { enabled: false, serviceName: "gateway-test" },
 };

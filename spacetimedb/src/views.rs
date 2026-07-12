@@ -243,6 +243,26 @@ pub struct VisibleFile {
     pub updated_at: Timestamp,
 }
 
+#[derive(SpacetimeType)]
+pub struct VisiblePostUserState {
+    pub post_id: Uuid,
+    pub following: bool,
+    pub bookmarked: bool,
+    pub unread: bool,
+    pub last_read_sequence: u64,
+    pub read_at: Option<Timestamp>,
+}
+
+#[derive(SpacetimeType)]
+pub struct VisiblePollOption {
+    pub id: Uuid,
+    pub post_id: Uuid,
+    pub label: String,
+    pub position: u32,
+    pub vote_count: u64,
+    pub viewer_selected: bool,
+}
+
 impl From<FileRecord> for VisibleFile {
     fn from(row: FileRecord) -> Self {
         Self {
@@ -304,6 +324,87 @@ fn accessible_threads(ctx: &ViewContext) -> Vec<NamedThread> {
         .into_iter()
         .flat_map(|space| ctx.db.named_thread().space_id().filter(space.id))
         .collect()
+}
+
+fn accessible_posts(ctx: &ViewContext) -> Vec<Post> {
+    accessible_spaces(ctx)
+        .into_iter()
+        .flat_map(|space| ctx.db.post().space_id().filter(space.id))
+        .collect()
+}
+
+fn direct_conversation_visible(ctx: &ViewContext, conversation: &DirectConversation) -> bool {
+    let user_enabled = ctx
+        .db
+        .user()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|user| !user.disabled);
+    let human = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_none();
+    let workspace_active = can_read_workspace(ctx, conversation.workspace_id, ctx.sender());
+    let participant_active = ctx
+        .db
+        .direct_participant()
+        .key()
+        .find(format!("{}:{}", conversation.id, ctx.sender()))
+        .is_some_and(|participant| participant.left_at.is_none());
+    policy::direct_access_allowed(workspace_active, participant_active, user_enabled && human)
+}
+
+fn accessible_direct_conversations(ctx: &ViewContext) -> Vec<DirectConversation> {
+    ctx.db
+        .direct_participant()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|participant| participant.left_at.is_none())
+        .filter_map(|participant| {
+            ctx.db
+                .direct_conversation()
+                .id()
+                .find(participant.conversation_id)
+        })
+        .filter(|conversation| direct_conversation_visible(ctx, conversation))
+        .collect()
+}
+
+fn direct_resource_visible(ctx: &ViewContext, resource_type: &str, resource_id: Uuid) -> bool {
+    let conversation = match resource_type {
+        "direct_conversation" => ctx.db.direct_conversation().id().find(resource_id),
+        "direct_message" => ctx
+            .db
+            .direct_message()
+            .id()
+            .find(resource_id)
+            .and_then(|message| {
+                ctx.db
+                    .direct_conversation()
+                    .id()
+                    .find(message.conversation_id)
+            }),
+        "dm_promotion" => ctx
+            .db
+            .dm_promotion_proposal()
+            .id()
+            .find(resource_id)
+            .and_then(|proposal| {
+                ctx.db
+                    .direct_conversation()
+                    .id()
+                    .find(proposal.conversation_id)
+            }),
+        _ => {
+            return policy::private_dm_metadata_visible(
+                resource_type.starts_with("direct_") || resource_type.starts_with("dm_"),
+                false,
+            );
+        }
+    };
+    conversation.is_some_and(|row| direct_conversation_visible(ctx, &row))
 }
 
 fn accessible_runs(ctx: &ViewContext) -> Vec<AgentRun> {
@@ -378,9 +479,113 @@ pub fn visible_spaces(ctx: &ViewContext) -> Vec<Space> {
 
 #[spacetimedb::view(accessor = visible_posts, public)]
 pub fn visible_posts(ctx: &ViewContext) -> Vec<Post> {
-    accessible_spaces(ctx)
+    accessible_posts(ctx)
+}
+
+#[spacetimedb::view(accessor = visible_post_tags, public)]
+pub fn visible_post_tags(ctx: &ViewContext) -> Vec<PostTag> {
+    accessible_posts(ctx)
         .into_iter()
-        .flat_map(|space| ctx.db.post().space_id().filter(space.id))
+        .flat_map(|post| ctx.db.post_tag().post_id().filter(post.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_post_mentions, public)]
+pub fn visible_post_mentions(ctx: &ViewContext) -> Vec<PostMention> {
+    accessible_posts(ctx)
+        .into_iter()
+        .flat_map(|post| ctx.db.post_mention().post_id().filter(post.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_post_reactions, public)]
+pub fn visible_post_reactions(ctx: &ViewContext) -> Vec<PostReaction> {
+    accessible_posts(ctx)
+        .into_iter()
+        .flat_map(|post| ctx.db.post_reaction().post_id().filter(post.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_post_pins, public)]
+pub fn visible_post_pins(ctx: &ViewContext) -> Vec<PostPin> {
+    accessible_posts(ctx)
+        .into_iter()
+        .filter_map(|post| ctx.db.post_pin().post_id().find(post.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_post_activity, public)]
+pub fn visible_post_activity(ctx: &ViewContext) -> Vec<PostActivity> {
+    accessible_posts(ctx)
+        .into_iter()
+        .flat_map(|post| ctx.db.post_activity().post_id().filter(post.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_post_states, public)]
+pub fn my_post_states(ctx: &ViewContext) -> Vec<VisiblePostUserState> {
+    accessible_posts(ctx)
+        .into_iter()
+        .map(|post| {
+            let state = ctx
+                .db
+                .post_user_state()
+                .key()
+                .find(crate::authz::post_identity_key(post.id, ctx.sender()));
+            let last_read_sequence = state.as_ref().map_or(0, |row| row.last_read_sequence);
+            VisiblePostUserState {
+                post_id: post.id,
+                following: state.as_ref().is_some_and(|row| row.following),
+                bookmarked: state.as_ref().is_some_and(|row| row.bookmarked),
+                unread: policy::post_is_unread(
+                    post.deleted,
+                    post.activity_sequence,
+                    last_read_sequence,
+                ),
+                last_read_sequence,
+                read_at: state.and_then(|row| row.read_at),
+            }
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_polls, public)]
+pub fn visible_polls(ctx: &ViewContext) -> Vec<Poll> {
+    accessible_posts(ctx)
+        .into_iter()
+        .filter_map(|post| ctx.db.poll().post_id().find(post.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_poll_options, public)]
+pub fn visible_poll_options(ctx: &ViewContext) -> Vec<VisiblePollOption> {
+    accessible_posts(ctx)
+        .into_iter()
+        .flat_map(|post| ctx.db.poll_option().post_id().filter(post.id))
+        .map(|option| VisiblePollOption {
+            vote_count: ctx
+                .db
+                .poll_vote()
+                .option_id()
+                .filter(option.id)
+                .count()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            viewer_selected: ctx
+                .db
+                .poll_vote()
+                .key()
+                .find(crate::authz::poll_vote_key(
+                    option.post_id,
+                    option.id,
+                    ctx.sender(),
+                ))
+                .is_some(),
+            id: option.id,
+            post_id: option.post_id,
+            label: option.label,
+            position: option.position,
+        })
         .collect()
 }
 
@@ -394,6 +599,102 @@ pub fn visible_contributions(ctx: &ViewContext) -> Vec<Contribution> {
     accessible_threads(ctx)
         .into_iter()
         .flat_map(|thread| ctx.db.contribution().thread_id().filter(thread.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_direct_conversations, public)]
+pub fn visible_direct_conversations(ctx: &ViewContext) -> Vec<DirectConversation> {
+    accessible_direct_conversations(ctx)
+}
+
+#[spacetimedb::view(accessor = visible_direct_participants, public)]
+pub fn visible_direct_participants(ctx: &ViewContext) -> Vec<DirectParticipant> {
+    accessible_direct_conversations(ctx)
+        .into_iter()
+        .flat_map(|conversation| {
+            ctx.db
+                .direct_participant()
+                .conversation_id()
+                .filter(conversation.id)
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_direct_messages, public)]
+pub fn visible_direct_messages(ctx: &ViewContext) -> Vec<DirectMessage> {
+    accessible_direct_conversations(ctx)
+        .into_iter()
+        .flat_map(|conversation| {
+            ctx.db
+                .direct_message()
+                .conversation_id()
+                .filter(conversation.id)
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_direct_reply_ancestry, public)]
+pub fn visible_direct_reply_ancestry(ctx: &ViewContext) -> Vec<DirectReplyAncestry> {
+    accessible_direct_conversations(ctx)
+        .into_iter()
+        .flat_map(|conversation| {
+            ctx.db
+                .direct_reply_ancestry()
+                .conversation_id()
+                .filter(conversation.id)
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_direct_read_states, public)]
+pub fn my_direct_read_states(ctx: &ViewContext) -> Vec<DirectReadState> {
+    accessible_direct_conversations(ctx)
+        .into_iter()
+        .filter_map(|conversation| {
+            ctx.db
+                .direct_read_state()
+                .key()
+                .find(format!("{}:{}", conversation.id, ctx.sender()))
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_dm_promotion_proposals, public)]
+pub fn visible_dm_promotion_proposals(ctx: &ViewContext) -> Vec<DmPromotionProposal> {
+    accessible_direct_conversations(ctx)
+        .into_iter()
+        .flat_map(|conversation| {
+            ctx.db
+                .dm_promotion_proposal()
+                .conversation_id()
+                .filter(conversation.id)
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_dm_promotion_sources, public)]
+pub fn visible_dm_promotion_sources(ctx: &ViewContext) -> Vec<DmPromotionSource> {
+    visible_dm_promotion_proposals(ctx)
+        .into_iter()
+        .flat_map(|proposal| {
+            ctx.db
+                .dm_promotion_source()
+                .proposal_id()
+                .filter(proposal.id)
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = visible_dm_promotion_consents, public)]
+pub fn visible_dm_promotion_consents(ctx: &ViewContext) -> Vec<DmPromotionConsent> {
+    visible_dm_promotion_proposals(ctx)
+        .into_iter()
+        .flat_map(|proposal| {
+            ctx.db
+                .dm_promotion_consent()
+                .proposal_id()
+                .filter(proposal.id)
+        })
         .collect()
 }
 
@@ -491,6 +792,17 @@ pub fn my_notifications(ctx: &ViewContext) -> Vec<Notification> {
                                         visible_space(ctx, thread.space_id).is_some()
                                     })
                             })
+                    });
+            }
+            if row.resource_type == "post" {
+                return ctx
+                    .db
+                    .post()
+                    .id()
+                    .find(row.resource_id)
+                    .is_some_and(|post| {
+                        post.workspace_id == row.workspace_id
+                            && visible_space(ctx, post.space_id).is_some()
                     });
             }
             true
@@ -621,6 +933,7 @@ pub fn visible_audit_log(ctx: &ViewContext) -> Vec<AuditLog> {
                 .workspace_id()
                 .filter(member.workspace_id)
         })
+        .filter(|row| direct_resource_visible(ctx, &row.resource_type, row.resource_id))
         .collect()
 }
 
@@ -634,6 +947,19 @@ pub fn my_command_receipts(ctx: &ViewContext) -> Vec<VisibleCommandReceipt> {
             receipt
                 .workspace_id
                 .is_none_or(|workspace_id| can_read_workspace(ctx, workspace_id, ctx.sender()))
+        })
+        .filter(|receipt| {
+            if receipt.result_type == "direct_conversation"
+                || receipt.result_type == "direct_read_state"
+            {
+                direct_resource_visible(ctx, "direct_conversation", receipt.result_id)
+            } else if receipt.result_type == "direct_message" {
+                direct_resource_visible(ctx, "direct_message", receipt.result_id)
+            } else if receipt.result_type == "dm_promotion" {
+                direct_resource_visible(ctx, "dm_promotion", receipt.result_id)
+            } else {
+                true
+            }
         })
         .map(VisibleCommandReceipt::from)
         .collect()
@@ -654,7 +980,7 @@ pub fn agent_work_queue(ctx: &ViewContext) -> Vec<AgentRun> {
         .service_grant()
         .service_identity()
         .filter(ctx.sender())
-        .filter(|grant| grant.enabled && grant.kind == "agent")
+        .filter(|grant| grant.enabled && grant.kind == "agent.run")
         .flat_map(|grant| ctx.db.agent_run().workspace_id().filter(grant.workspace_id))
         .filter(|run| {
             !matches!(
@@ -686,7 +1012,7 @@ pub fn agent_context_candidates(ctx: &ViewContext) -> Vec<AgentContextCandidate>
         .service_grant()
         .service_identity()
         .filter(ctx.sender())
-        .filter(|grant| grant.enabled && grant.kind == "agent")
+        .filter(|grant| grant.enabled && grant.kind == "agent.run")
     {
         for run in ctx
             .db
@@ -758,7 +1084,7 @@ pub fn agent_context_candidates(ctx: &ViewContext) -> Vec<AgentContextCandidate>
 }
 
 #[spacetimedb::view(accessor = pending_outbox_work, public)]
-pub fn pending_outbox_work(ctx: &ViewContext) -> Vec<OutboxJob> {
+pub fn pending_outbox_work(ctx: &ViewContext) -> Vec<OutboxJobEnvelopeView> {
     let allowed = ctx
         .db
         .service_principal()
@@ -789,6 +1115,36 @@ pub fn pending_outbox_work(ctx: &ViewContext) -> Vec<OutboxJob> {
                     | OutboxState::Leased
             )
         })
+        .map(|job| OutboxJobEnvelopeView {
+            id: job.id,
+            workspace_id: job.workspace_id,
+            kind: job.kind,
+            effect_key: job.effect_key,
+            resource_type: job.resource_type,
+            resource_id: job.resource_id,
+            resource_revision: job.resource_revision,
+            acl_revision: job.acl_revision,
+            intent_id: job.intent_id,
+            recipient_id: job.recipient_id,
+            channel: job.channel,
+            authorization_epoch: job.authorization_epoch,
+            minimal_message: job.minimal_message,
+            payload_resource_id: job.payload_resource_id,
+            rebuild_id: job.rebuild_id,
+            generation: job.generation,
+            file_id: job.file_id,
+            version: job.version,
+            run_id: job.run_id,
+            created_at: job.created_at,
+            next_attempt_at: job.next_attempt_at,
+            attempt: job.attempt,
+            state: job.state,
+            lease_owner: job.lease_owner,
+            worker_slot_id: job.worker_slot_id,
+            lease_until: job.lease_until,
+            lease_generation: job.lease_generation,
+            last_error: job.last_error,
+        })
         .collect()
 }
 
@@ -808,7 +1164,7 @@ pub fn pending_post_search_documents(ctx: &ViewContext) -> Vec<SearchWorkItem> {
         .service_identity()
         .filter(ctx.sender())
         .filter(|grant| {
-            grant.enabled && matches!(grant.kind.as_str(), "search_upsert" | "search_tombstone")
+            grant.enabled && matches!(grant.kind.as_str(), "search.upsert" | "search.tombstone")
         })
         .flat_map(|grant| {
             ctx.db
@@ -833,6 +1189,7 @@ pub fn pending_post_search_documents(ctx: &ViewContext) -> Vec<SearchWorkItem> {
                         snapshot.workspace_id == job.workspace_id,
                         snapshot.effect_key == job.effect_key,
                         snapshot.resource_revision == job.resource_revision,
+                        job.acl_revision == Some(snapshot.acl_revision),
                     )
                 })
                 .map(|snapshot| SearchWorkItem {
@@ -874,7 +1231,7 @@ pub fn file_processing_plans(ctx: &ViewContext) -> Vec<FileProcessingPlanView> {
             grant.enabled
                 && matches!(
                     grant.kind.as_str(),
-                    "file_scan" | "file_extract" | "file_cleanup"
+                    "file.scan" | "file.extract" | "file.cleanup"
                 )
         })
         .flat_map(|grant| {

@@ -121,6 +121,77 @@ pub(crate) fn command_replay_matches(same_workspace: bool, same_input_hash: bool
     same_workspace && same_input_hash
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrivateReplayDisposition {
+    NoReceipt,
+    Exact,
+    Conflict,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrivateDirectMessageOperation {
+    Edit,
+    Delete,
+}
+
+impl PrivateDirectMessageOperation {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Edit => "edit_direct_message",
+            Self::Delete => "delete_direct_message",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrivateDirectMessageTarget {
+    Nonexistent,
+    OtherAuthor,
+    AccessRevoked,
+}
+
+pub(crate) const fn direct_message_denial(
+    operation: PrivateDirectMessageOperation,
+) -> &'static str {
+    match operation {
+        PrivateDirectMessageOperation::Edit => "edit direct message unavailable",
+        PrivateDirectMessageOperation::Delete => "delete direct message unavailable",
+    }
+}
+
+pub(crate) fn direct_message_replay_gate(
+    operation: PrivateDirectMessageOperation,
+    replay: PrivateReplayDisposition,
+) -> Result<bool, &'static str> {
+    match replay {
+        PrivateReplayDisposition::NoReceipt => Ok(false),
+        PrivateReplayDisposition::Exact => Ok(true),
+        PrivateReplayDisposition::Conflict => Err(direct_message_denial(operation)),
+    }
+}
+
+pub(crate) fn direct_message_target_gate(
+    operation: PrivateDirectMessageOperation,
+    target: PrivateDirectMessageTarget,
+) -> Result<(), &'static str> {
+    match target {
+        PrivateDirectMessageTarget::Nonexistent
+        | PrivateDirectMessageTarget::OtherAuthor
+        | PrivateDirectMessageTarget::AccessRevoked => Err(direct_message_denial(operation)),
+    }
+}
+
+pub(crate) fn private_replay_disposition(
+    stored_input_hash: Option<&str>,
+    requested_input_hash: &str,
+) -> PrivateReplayDisposition {
+    match stored_input_hash {
+        None => PrivateReplayDisposition::NoReceipt,
+        Some(stored) if stored == requested_input_hash => PrivateReplayDisposition::Exact,
+        Some(_) => PrivateReplayDisposition::Conflict,
+    }
+}
+
 pub(crate) fn bootstrap_configuration_valid(
     issuer: Option<&str>,
     audience: Option<&str>,
@@ -348,8 +419,16 @@ pub(crate) fn search_snapshot_matches_job(
     same_workspace: bool,
     same_effect_key: bool,
     same_resource_revision: bool,
+    same_acl_revision: bool,
 ) -> bool {
-    same_workspace && same_effect_key && same_resource_revision
+    same_workspace && same_effect_key && same_resource_revision && same_acl_revision
+}
+
+pub(crate) const fn search_snapshot_order_key(
+    acl_revision: u64,
+    resource_revision: u64,
+) -> (u64, u64) {
+    (acl_revision, resource_revision)
 }
 
 pub(crate) fn trusted_tool_binding_valid(effect_is_read: bool, capability_is_read: bool) -> bool {
@@ -406,6 +485,191 @@ pub(crate) fn effect_commit_allowed(
 
 pub(crate) fn private_task_assignment_allowed(assignee_can_read_thread_space: bool) -> bool {
     assignee_can_read_thread_space
+}
+
+pub(crate) fn post_lifecycle_change_allowed(
+    is_author_or_owner: bool,
+    is_admin: bool,
+    current_locked: bool,
+    target_archived: bool,
+    lock_changes: bool,
+    ownership_changes: bool,
+) -> bool {
+    if current_locked || target_archived || lock_changes || ownership_changes {
+        is_admin
+    } else {
+        is_author_or_owner || is_admin
+    }
+}
+
+pub(crate) fn post_is_unread(
+    deleted: bool,
+    activity_sequence: u64,
+    last_read_sequence: u64,
+) -> bool {
+    !deleted && last_read_sequence < activity_sequence
+}
+
+pub(crate) fn poll_selection_valid(
+    poll_open: bool,
+    allows_multiple: bool,
+    selected_count: usize,
+    all_options_valid: bool,
+) -> bool {
+    poll_open && selected_count > 0 && (allows_multiple || selected_count == 1) && all_options_valid
+}
+
+pub(crate) fn revoke_outbox_job(currently_terminal: bool, matches_agent_run: bool) -> bool {
+    !currently_terminal && matches_agent_run
+}
+
+pub(crate) fn agent_run_job_contract_valid(
+    kind: &str,
+    resource_matches_run: bool,
+    payload_matches_run: bool,
+) -> bool {
+    kind == CanonicalJobKind::AgentRun.as_str() && resource_matches_run && payload_matches_run
+}
+
+pub(crate) fn outbox_recovery_allowed(
+    leased: bool,
+    owner_matches_sender: bool,
+    worker_slot_matches: bool,
+    generation_matches: bool,
+    unexpired: bool,
+) -> bool {
+    leased && owner_matches_sender && worker_slot_matches && generation_matches && unexpired
+}
+
+pub(crate) fn worker_slot_id_valid(worker_slot_id: &str) -> bool {
+    !worker_slot_id.is_empty()
+        && worker_slot_id.len() <= 128
+        && worker_slot_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+pub(crate) const fn recovered_outbox_generation(current_generation: u64) -> Option<u64> {
+    current_generation.checked_add(1)
+}
+
+pub(crate) fn direct_participant_set_valid(
+    participant_count: usize,
+    unique: bool,
+    includes_caller: bool,
+    every_participant_is_active_human_member: bool,
+) -> bool {
+    (2..=8).contains(&participant_count)
+        && unique
+        && includes_caller
+        && every_participant_is_active_human_member
+}
+
+pub(crate) fn direct_access_allowed(
+    active_workspace_member: bool,
+    active_participant: bool,
+    user_enabled: bool,
+) -> bool {
+    active_workspace_member && active_participant && user_enabled
+}
+
+pub(crate) fn direct_write_allowed(access_allowed: bool, conversation_deactivated: bool) -> bool {
+    access_allowed && !conversation_deactivated
+}
+
+pub(crate) fn direct_read_advance_allowed(
+    current_sequence: u64,
+    requested_sequence: u64,
+    maximum_sequence: u64,
+) -> bool {
+    requested_sequence >= current_sequence && requested_sequence <= maximum_sequence
+}
+
+pub(crate) fn direct_message_mutation_allowed(
+    access_allowed: bool,
+    is_author: bool,
+    revision_matches: bool,
+    deleted: bool,
+) -> bool {
+    access_allowed && is_author && revision_matches && !deleted
+}
+
+pub(crate) const fn direct_resource_lookup_allowed(
+    resource_exists: bool,
+    actor_binding_matches: bool,
+) -> bool {
+    resource_exists && actor_binding_matches
+}
+
+pub(crate) fn direct_promotion_finalize_allowed(
+    pending: bool,
+    unexpired: bool,
+    participant_epoch_matches: bool,
+    unanimous_approval: bool,
+    sources_match: bool,
+    destination_authorized: bool,
+    not_already_finalized: bool,
+) -> bool {
+    pending
+        && unexpired
+        && participant_epoch_matches
+        && unanimous_approval
+        && sources_match
+        && destination_authorized
+        && not_already_finalized
+}
+
+pub(crate) const fn direct_messages_are_searchable() -> bool {
+    false
+}
+
+pub(crate) const fn private_dm_metadata_visible(
+    is_private_dm_resource: bool,
+    active_participant: bool,
+) -> bool {
+    !is_private_dm_resource || active_participant
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CanonicalJobKind {
+    NotificationDeliver,
+    SearchUpsert,
+    SearchTombstone,
+    SearchRebuild,
+    FileScan,
+    FileExtract,
+    FileCleanup,
+    AgentRun,
+}
+
+impl CanonicalJobKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotificationDeliver => "notification.deliver",
+            Self::SearchUpsert => "search.upsert",
+            Self::SearchTombstone => "search.tombstone",
+            Self::SearchRebuild => "search.rebuild",
+            Self::FileScan => "file.scan",
+            Self::FileExtract => "file.extract",
+            Self::FileCleanup => "file.cleanup",
+            Self::AgentRun => "agent.run",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        [
+            Self::NotificationDeliver,
+            Self::SearchUpsert,
+            Self::SearchTombstone,
+            Self::SearchRebuild,
+            Self::FileScan,
+            Self::FileExtract,
+            Self::FileCleanup,
+            Self::AgentRun,
+        ]
+        .into_iter()
+        .find(|kind| kind.as_str() == value)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -564,6 +828,144 @@ mod tests {
     }
 
     #[test]
+    fn post_lifecycle_and_poll_rules_fail_closed() {
+        assert!(post_lifecycle_change_allowed(
+            true, false, false, false, false, false
+        ));
+        assert!(!post_lifecycle_change_allowed(
+            true, false, false, true, false, false
+        ));
+        assert!(!post_lifecycle_change_allowed(
+            true, false, true, false, false, false
+        ));
+        assert!(post_lifecycle_change_allowed(
+            false, true, true, true, true, true
+        ));
+        assert!(poll_selection_valid(true, false, 1, true));
+        assert!(!poll_selection_valid(true, false, 2, true));
+        assert!(poll_selection_valid(true, true, 2, true));
+        assert!(!poll_selection_valid(false, true, 1, true));
+        assert!(!poll_selection_valid(true, true, 1, false));
+    }
+
+    #[test]
+    fn unread_state_uses_monotonic_post_activity() {
+        assert!(post_is_unread(false, 4, 3));
+        assert!(!post_is_unread(false, 4, 4));
+        assert!(!post_is_unread(true, 4, 0));
+    }
+
+    #[test]
+    fn canonical_job_kind_mapping_is_exact_complete_and_unique() {
+        let expected = [
+            "notification.deliver",
+            "search.upsert",
+            "search.tombstone",
+            "search.rebuild",
+            "file.scan",
+            "file.extract",
+            "file.cleanup",
+            "agent.run",
+        ];
+        for (index, value) in expected.into_iter().enumerate() {
+            let parsed = CanonicalJobKind::parse(value).expect("canonical job kind must parse");
+            assert_eq!(parsed.as_str(), value);
+            assert!(!expected[..index].contains(&value));
+        }
+        for rejected in [
+            "file_scan",
+            "search_upsert",
+            "deliver_notification",
+            "agent",
+            "",
+        ] {
+            assert!(CanonicalJobKind::parse(rejected).is_none());
+        }
+    }
+
+    #[test]
+    fn agent_job_revocation_fences_pending_and_leased_work_only() {
+        assert!(revoke_outbox_job(false, true));
+        assert!(!revoke_outbox_job(true, true));
+        assert!(!revoke_outbox_job(false, false));
+    }
+
+    #[test]
+    fn agent_run_job_creation_requires_exact_resource_and_payload_binding() {
+        assert!(agent_run_job_contract_valid("agent.run", true, true));
+        assert!(!agent_run_job_contract_valid("agent", true, true));
+        assert!(!agent_run_job_contract_valid("agent.run", false, true));
+        assert!(!agent_run_job_contract_valid("agent.run", true, false));
+    }
+
+    #[test]
+    fn outbox_recovery_never_changes_owner_or_resurrects_stale_leases() {
+        assert!(outbox_recovery_allowed(true, true, true, true, true));
+        assert!(!outbox_recovery_allowed(false, true, true, true, true));
+        assert!(!outbox_recovery_allowed(true, false, true, true, true));
+        assert!(!outbox_recovery_allowed(true, true, false, true, true));
+        assert!(!outbox_recovery_allowed(true, true, true, false, true));
+        assert!(!outbox_recovery_allowed(true, true, true, true, false));
+        assert!(worker_slot_id_valid("worker-a:slot-01"));
+        assert!(!worker_slot_id_valid(""));
+        assert!(!worker_slot_id_valid("worker slot"));
+        assert_eq!(recovered_outbox_generation(7), Some(8));
+        assert_eq!(recovered_outbox_generation(u64::MAX), None);
+    }
+
+    #[test]
+    fn direct_messages_require_exact_active_human_participation_without_admin_bypass() {
+        assert!(direct_participant_set_valid(2, true, true, true));
+        assert!(direct_participant_set_valid(8, true, true, true));
+        assert!(!direct_participant_set_valid(1, true, true, true));
+        assert!(!direct_participant_set_valid(9, true, true, true));
+        assert!(!direct_participant_set_valid(2, false, true, true));
+        assert!(!direct_participant_set_valid(2, true, false, true));
+        assert!(!direct_participant_set_valid(2, true, true, false));
+        assert!(direct_access_allowed(true, true, true));
+        assert!(!direct_access_allowed(true, false, true));
+        assert!(!direct_access_allowed(false, true, true));
+        assert!(!direct_access_allowed(true, true, false));
+        assert!(!direct_write_allowed(true, true));
+        assert!(!direct_messages_are_searchable());
+        assert!(!private_dm_metadata_visible(true, false));
+        assert!(private_dm_metadata_visible(true, true));
+        assert!(private_dm_metadata_visible(false, false));
+    }
+
+    #[test]
+    fn direct_message_revisions_sequences_and_irreversible_leave_fail_closed() {
+        assert!(direct_read_advance_allowed(3, 3, 8));
+        assert!(direct_read_advance_allowed(3, 8, 8));
+        assert!(!direct_read_advance_allowed(3, 2, 8));
+        assert!(!direct_read_advance_allowed(3, 9, 8));
+        assert!(direct_message_mutation_allowed(true, true, true, false));
+        assert!(!direct_message_mutation_allowed(true, false, true, false));
+        assert!(!direct_message_mutation_allowed(true, true, false, false));
+        assert!(!direct_message_mutation_allowed(true, true, true, true));
+        // A workspace re-add can restore workspace access, but never the immutable DM participant.
+        assert!(!direct_access_allowed(true, false, true));
+        assert!(!private_dm_metadata_visible(true, false));
+        assert!(!direct_resource_lookup_allowed(false, false));
+        assert!(!direct_resource_lookup_allowed(true, false));
+        assert!(direct_resource_lookup_allowed(true, true));
+    }
+
+    #[test]
+    fn dm_promotion_requires_one_current_unanimously_approved_snapshot() {
+        assert!(direct_promotion_finalize_allowed(
+            true, true, true, true, true, true, true
+        ));
+        for denied in 0..7 {
+            let mut gates = [true; 7];
+            gates[denied] = false;
+            assert!(!direct_promotion_finalize_allowed(
+                gates[0], gates[1], gates[2], gates[3], gates[4], gates[5], gates[6]
+            ));
+        }
+    }
+
+    #[test]
     fn external_tool_policy_cannot_disable_approval() {
         assert!(!tool_policy_valid(true, false));
         assert!(tool_policy_valid(true, true));
@@ -675,6 +1077,46 @@ mod tests {
         assert!(command_replay_matches(true, true));
         assert!(!command_replay_matches(false, true));
         assert!(!command_replay_matches(true, false));
+    }
+
+    #[test]
+    fn direct_mutation_lost_response_replay_is_exact_and_changed_input_fails_closed() {
+        assert!(is_duplicate_receipt(
+            7_u64,
+            7_u64,
+            "edit_direct_message",
+            "edit_direct_message",
+            44_u64,
+            44_u64,
+        ));
+        assert!(command_replay_matches(true, true));
+        assert!(!command_replay_matches(true, false));
+        assert!(!is_duplicate_receipt(
+            7_u64,
+            7_u64,
+            "edit_direct_message",
+            "delete_direct_message",
+            44_u64,
+            44_u64,
+        ));
+        assert_eq!(
+            private_replay_disposition(Some("same-input"), "same-input"),
+            PrivateReplayDisposition::Exact
+        );
+        assert_eq!(
+            private_replay_disposition(None, "new-input"),
+            PrivateReplayDisposition::NoReceipt
+        );
+        let existence_independent = [false, true].map(|_target_exists_but_is_unauthorized| {
+            private_replay_disposition(Some("first-input"), "changed-input")
+        });
+        assert_eq!(
+            existence_independent,
+            [
+                PrivateReplayDisposition::Conflict,
+                PrivateReplayDisposition::Conflict,
+            ]
+        );
     }
 
     #[test]
@@ -872,9 +1314,22 @@ mod tests {
 
     #[test]
     fn search_snapshot_must_match_job_revision_and_tenant() {
-        assert!(search_snapshot_matches_job(true, true, true));
-        assert!(!search_snapshot_matches_job(false, true, true));
-        assert!(!search_snapshot_matches_job(true, true, false));
+        assert!(search_snapshot_matches_job(true, true, true, true));
+        assert!(!search_snapshot_matches_job(false, true, true, true));
+        assert!(!search_snapshot_matches_job(true, true, false, true));
+        assert!(!search_snapshot_matches_job(true, true, true, false));
+    }
+
+    #[test]
+    fn search_acl_revision_orders_before_content_revision() {
+        assert_eq!(search_snapshot_order_key(7, 3), (7, 3));
+        assert!(search_snapshot_order_key(8, 1) > search_snapshot_order_key(7, 99));
+        assert!(search_snapshot_order_key(7, 99) < search_snapshot_order_key(8, 1));
+        assert!(search_snapshot_order_key(8, 2) > search_snapshot_order_key(8, 1));
+        assert_eq!(
+            search_snapshot_order_key(8, 2),
+            search_snapshot_order_key(8, 2)
+        );
     }
 
     #[test]

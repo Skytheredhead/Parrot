@@ -6,6 +6,15 @@ const POLICY_VERSION: u32 = 1;
 const OUTBOX_MAX_ATTEMPTS: u32 = 12;
 const OUTBOX_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const MAX_REPLY_DEPTH: u32 = 32;
+const JOB_NOTIFICATION_DELIVER: &str =
+    crate::policy::CanonicalJobKind::NotificationDeliver.as_str();
+const JOB_SEARCH_UPSERT: &str = crate::policy::CanonicalJobKind::SearchUpsert.as_str();
+const JOB_SEARCH_TOMBSTONE: &str = crate::policy::CanonicalJobKind::SearchTombstone.as_str();
+const JOB_SEARCH_REBUILD: &str = crate::policy::CanonicalJobKind::SearchRebuild.as_str();
+const JOB_FILE_SCAN: &str = crate::policy::CanonicalJobKind::FileScan.as_str();
+const JOB_FILE_EXTRACT: &str = crate::policy::CanonicalJobKind::FileExtract.as_str();
+const JOB_FILE_CLEANUP: &str = crate::policy::CanonicalJobKind::FileCleanup.as_str();
+const JOB_AGENT_RUN: &str = crate::policy::CanonicalJobKind::AgentRun.as_str();
 const BOOTSTRAP_OIDC_ISSUER: Option<&str> =
     option_env!("PROJECT_CONVERSATION_BOOTSTRAP_OIDC_ISSUER");
 const BOOTSTRAP_OIDC_AUDIENCE: Option<&str> =
@@ -191,9 +200,26 @@ fn has_application_state(ctx: &ReducerContext) -> bool {
         || ctx.db.space().count() != 0
         || ctx.db.space_member().count() != 0
         || ctx.db.post().count() != 0
+        || ctx.db.post_tag().count() != 0
+        || ctx.db.post_mention().count() != 0
+        || ctx.db.post_reaction().count() != 0
+        || ctx.db.post_user_state().count() != 0
+        || ctx.db.post_pin().count() != 0
+        || ctx.db.post_activity().count() != 0
+        || ctx.db.poll().count() != 0
+        || ctx.db.poll_option().count() != 0
+        || ctx.db.poll_vote().count() != 0
         || ctx.db.named_thread().count() != 0
         || ctx.db.contribution().count() != 0
         || ctx.db.reply_ancestry().count() != 0
+        || ctx.db.direct_conversation().count() != 0
+        || ctx.db.direct_participant().count() != 0
+        || ctx.db.direct_message().count() != 0
+        || ctx.db.direct_reply_ancestry().count() != 0
+        || ctx.db.direct_read_state().count() != 0
+        || ctx.db.dm_promotion_proposal().count() != 0
+        || ctx.db.dm_promotion_source().count() != 0
+        || ctx.db.dm_promotion_consent().count() != 0
         || ctx.db.decision_record().count() != 0
         || ctx.db.task_item().count() != 0
         || ctx.db.notification().count() != 0
@@ -245,6 +271,51 @@ fn existing_receipt(
     Ok(existing)
 }
 
+fn private_receipt_disposition(
+    ctx: &ReducerContext,
+    operation: &str,
+    request_id: Uuid,
+    input_hash: &str,
+) -> Result<crate::policy::PrivateReplayDisposition, String> {
+    require_registered_user(ctx)?;
+    let receipt =
+        ctx.db
+            .command_receipt()
+            .key()
+            .find(receipt_key(ctx.sender(), None, operation, request_id));
+    Ok(crate::policy::private_replay_disposition(
+        receipt.as_ref().map(|row| row.input_hash.as_str()),
+        input_hash,
+    ))
+}
+
+fn existing_private_receipt(
+    ctx: &ReducerContext,
+    operation: &str,
+    request_id: Uuid,
+    input_hash: &str,
+    unavailable_error: &str,
+) -> Result<bool, String> {
+    match private_receipt_disposition(ctx, operation, request_id, input_hash)? {
+        crate::policy::PrivateReplayDisposition::NoReceipt => Ok(false),
+        crate::policy::PrivateReplayDisposition::Exact => Ok(true),
+        crate::policy::PrivateReplayDisposition::Conflict => Err(unavailable_error.into()),
+    }
+}
+
+fn existing_direct_message_receipt(
+    ctx: &ReducerContext,
+    operation: crate::policy::PrivateDirectMessageOperation,
+    request_id: Uuid,
+    input_hash: &str,
+) -> Result<bool, String> {
+    crate::policy::direct_message_replay_gate(
+        operation,
+        private_receipt_disposition(ctx, operation.as_str(), request_id, input_hash)?,
+    )
+    .map_err(str::to_string)
+}
+
 fn insert_receipt(
     ctx: &ReducerContext,
     workspace_id: Option<Uuid>,
@@ -258,6 +329,28 @@ fn insert_receipt(
         key: receipt_key(ctx.sender(), workspace_id, operation, request_id),
         actor_identity: derived_actor(ctx.sender(), ctx.sender()),
         workspace_id,
+        operation: operation.into(),
+        client_request_id: request_id,
+        input_hash,
+        result_type: result_type.into(),
+        result_id,
+        committed_at: ctx.timestamp,
+    });
+}
+
+fn insert_private_receipt(
+    ctx: &ReducerContext,
+    workspace_id: Uuid,
+    operation: &str,
+    request_id: Uuid,
+    input_hash: String,
+    result_type: &str,
+    result_id: Uuid,
+) {
+    ctx.db.command_receipt().insert(CommandReceipt {
+        key: receipt_key(ctx.sender(), None, operation, request_id),
+        actor_identity: derived_actor(ctx.sender(), ctx.sender()),
+        workspace_id: Some(workspace_id),
         operation: operation.into(),
         client_request_id: request_id,
         input_hash,
@@ -294,15 +387,93 @@ fn audit(ctx: &ReducerContext, input: AuditInput<'_>) -> Result<(), String> {
     Ok(())
 }
 
-fn enqueue_outbox(
-    ctx: &ReducerContext,
+#[derive(Default)]
+struct OutboxSemanticPayload {
+    intent_id: Option<Uuid>,
+    recipient_id: Option<Identity>,
+    channel: String,
+    authorization_epoch: Option<u64>,
+    minimal_message: String,
+    payload_resource_id: Option<Uuid>,
+    rebuild_id: Option<Uuid>,
+    generation: Option<u64>,
+    file_id: Option<Uuid>,
+    version: Option<u64>,
+    acl_revision: Option<u64>,
+    run_id: Option<Uuid>,
+}
+
+impl OutboxSemanticPayload {
+    fn valid_for(&self, kind: &str) -> bool {
+        if crate::policy::CanonicalJobKind::parse(kind).is_none() {
+            return false;
+        }
+        match kind {
+            JOB_NOTIFICATION_DELIVER => {
+                self.intent_id.is_some()
+                    && self.recipient_id.is_some()
+                    && matches!(self.channel.as_str(), "email" | "push")
+                    && self.authorization_epoch.is_some()
+                    && !self.minimal_message.is_empty()
+                    && self.payload_resource_id.is_some()
+            }
+            JOB_SEARCH_UPSERT | JOB_SEARCH_TOMBSTONE => {
+                self.payload_resource_id.is_some()
+                    && self.version.is_some()
+                    && self.acl_revision.is_some()
+            }
+            JOB_SEARCH_REBUILD => self.rebuild_id.is_some() && self.generation.is_some(),
+            JOB_FILE_SCAN | JOB_FILE_EXTRACT | JOB_FILE_CLEANUP => {
+                self.file_id.is_some() && self.version.is_some()
+            }
+            JOB_AGENT_RUN => self.run_id.is_some(),
+            _ => false,
+        }
+    }
+}
+
+struct OutboxInsert<'a> {
     workspace_id: Uuid,
-    kind: &str,
-    resource_type: &str,
+    kind: &'a str,
+    resource_type: &'a str,
     resource_id: Uuid,
     resource_revision: u64,
     effect_key: String,
-) -> Result<(), String> {
+    payload: OutboxSemanticPayload,
+}
+
+fn enqueue_outbox(ctx: &ReducerContext, input: OutboxInsert<'_>) -> Result<(), String> {
+    let OutboxInsert {
+        workspace_id,
+        kind,
+        resource_type,
+        resource_id,
+        resource_revision,
+        effect_key,
+        payload,
+    } = input;
+    let common_fields_match = match kind {
+        JOB_NOTIFICATION_DELIVER => payload.intent_id == Some(resource_id),
+        JOB_SEARCH_UPSERT | JOB_SEARCH_TOMBSTONE => {
+            payload.payload_resource_id == Some(resource_id)
+                && payload.version == Some(resource_revision)
+        }
+        JOB_SEARCH_REBUILD => {
+            payload.rebuild_id == Some(resource_id) && payload.generation == Some(resource_revision)
+        }
+        JOB_FILE_SCAN | JOB_FILE_EXTRACT | JOB_FILE_CLEANUP => {
+            payload.file_id == Some(resource_id) && payload.version == Some(resource_revision)
+        }
+        JOB_AGENT_RUN => crate::policy::agent_run_job_contract_valid(
+            kind,
+            resource_type == "agent_run",
+            payload.run_id == Some(resource_id),
+        ),
+        _ => false,
+    };
+    if !payload.valid_for(kind) || !common_fields_match {
+        return Err("outbox job kind or semantic payload is invalid".into());
+    }
     ctx.db.outbox_job().insert(OutboxJob {
         id: new_id(ctx)?,
         workspace_id,
@@ -312,9 +483,22 @@ fn enqueue_outbox(
         resource_type: resource_type.into(),
         resource_id,
         resource_revision,
+        acl_revision: payload.acl_revision,
+        intent_id: payload.intent_id,
+        recipient_id: payload.recipient_id,
+        channel: payload.channel,
+        authorization_epoch: payload.authorization_epoch,
+        minimal_message: payload.minimal_message,
+        payload_resource_id: payload.payload_resource_id,
+        rebuild_id: payload.rebuild_id,
+        generation: payload.generation,
+        file_id: payload.file_id,
+        version: payload.version,
+        run_id: payload.run_id,
         expires_at: ctx.timestamp + TimeDuration::from_micros(OUTBOX_MAX_AGE_SECONDS * 1_000_000),
         attempt: 0,
         lease_owner: None,
+        worker_slot_id: String::new(),
         lease_until: None,
         lease_generation: 0,
         next_attempt_at: ctx.timestamp,
@@ -374,12 +558,14 @@ fn enqueue_search_snapshot(
     if space.workspace_id != input.workspace_id {
         return Err("search snapshot workspace mismatch".into());
     }
+    let (acl_revision, resource_revision) =
+        crate::policy::search_snapshot_order_key(space.revision, input.resource_revision);
     let effect_key = format!(
-        "search:{}:{}:revision:{}:acl:{}:{}",
+        "search:{}:{}:acl:{}:revision:{}:{}",
         input.resource_type,
         input.resource_id,
-        input.resource_revision,
-        space.revision,
+        acl_revision,
+        resource_revision,
         if input.tombstone { "delete" } else { "upsert" },
     );
     ctx.db
@@ -390,8 +576,8 @@ fn enqueue_search_snapshot(
             space_id: input.space_id,
             resource_type: input.resource_type.into(),
             resource_id: input.resource_id,
-            resource_revision: input.resource_revision,
-            acl_revision: space.revision,
+            resource_revision,
+            acl_revision,
             title: input.title.into(),
             body: input.body.into(),
             tombstone: input.tombstone,
@@ -400,16 +586,24 @@ fn enqueue_search_snapshot(
         });
     enqueue_outbox(
         ctx,
-        input.workspace_id,
-        if input.tombstone {
-            "search_tombstone"
-        } else {
-            "search_upsert"
+        OutboxInsert {
+            workspace_id: input.workspace_id,
+            kind: if input.tombstone {
+                JOB_SEARCH_TOMBSTONE
+            } else {
+                JOB_SEARCH_UPSERT
+            },
+            resource_type: input.resource_type,
+            resource_id: input.resource_id,
+            resource_revision,
+            effect_key,
+            payload: OutboxSemanticPayload {
+                payload_resource_id: Some(input.resource_id),
+                version: Some(resource_revision),
+                acl_revision: Some(acl_revision),
+                ..Default::default()
+            },
         },
-        input.resource_type,
-        input.resource_id,
-        input.resource_revision,
-        effect_key,
     )
 }
 
@@ -503,6 +697,35 @@ fn cancel_open_agent_work(ctx: &ReducerContext, run_id: Uuid) {
             }
             ctx.db.agent_tool_call().id().update(tool);
         }
+    }
+    revoke_agent_outbox(ctx, run_id, "agent_run_revoked");
+}
+
+fn revoke_agent_outbox(ctx: &ReducerContext, run_id: Uuid, reason: &str) {
+    let job_ids: Vec<_> = ctx
+        .db
+        .outbox_job()
+        .iter()
+        .filter(|job| job.kind == JOB_AGENT_RUN && job.resource_id == run_id)
+        .filter(|job| {
+            crate::policy::revoke_outbox_job(
+                matches!(job.state, OutboxState::Succeeded | OutboxState::DeadLetter),
+                job.run_id == Some(run_id),
+            )
+        })
+        .map(|job| job.id)
+        .collect();
+    for job_id in job_ids {
+        let Some(mut job) = ctx.db.outbox_job().id().find(job_id) else {
+            continue;
+        };
+        job.state = OutboxState::DeadLetter;
+        job.last_error = reason.into();
+        job.lease_owner = None;
+        job.worker_slot_id.clear();
+        job.lease_until = None;
+        job.updated_at = ctx.timestamp;
+        ctx.db.outbox_job().id().update(job);
     }
 }
 
@@ -1262,6 +1485,58 @@ pub fn create_workspace(
 }
 
 #[spacetimedb::reducer]
+pub fn request_search_rebuild(
+    ctx: &ReducerContext,
+    workspace_id: Uuid,
+    generation: u64,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    require_workspace_action(ctx, workspace_id, Action::ManageWorkspace)?;
+    if generation == 0 {
+        return Err("search rebuild generation must be positive".into());
+    }
+    let input_hash = normalized_input_hash(&format!("{workspace_id}\0{generation}"));
+    if existing_receipt(
+        ctx,
+        Some(workspace_id),
+        "request_search_rebuild",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    let rebuild_id = new_id(ctx)?;
+    enqueue_outbox(
+        ctx,
+        OutboxInsert {
+            workspace_id,
+            kind: JOB_SEARCH_REBUILD,
+            resource_type: "search_rebuild",
+            resource_id: rebuild_id,
+            resource_revision: generation,
+            effect_key: format!("search-rebuild:{workspace_id}:{generation}:{rebuild_id}"),
+            payload: OutboxSemanticPayload {
+                rebuild_id: Some(rebuild_id),
+                generation: Some(generation),
+                ..Default::default()
+            },
+        },
+    )?;
+    insert_receipt(
+        ctx,
+        Some(workspace_id),
+        "request_search_rebuild",
+        client_request_id,
+        input_hash,
+        "search_rebuild",
+        rebuild_id,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
 pub fn set_workspace_member(
     ctx: &ReducerContext,
     workspace_id: Uuid,
@@ -1342,6 +1617,9 @@ pub fn set_workspace_member(
             run.updated_at = ctx.timestamp;
             ctx.db.agent_run().id().update(run);
         }
+    }
+    if !active {
+        deactivate_direct_participation(ctx, workspace_id, identity);
     }
     insert_receipt(
         ctx,
@@ -1527,22 +1805,218 @@ pub fn set_space_member(
     )
 }
 
-#[spacetimedb::reducer]
-pub fn create_post(
+fn normalized_post_tags(tags: Vec<String>) -> Result<Vec<String>, String> {
+    if tags.len() > 10 {
+        return Err("posts are limited to 10 tags".into());
+    }
+    let mut normalized = Vec::with_capacity(tags.len());
+    for tag in tags {
+        let tag = tag.trim().to_ascii_lowercase();
+        if tag.is_empty()
+            || tag.len() > 40
+            || !tag.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+        {
+            return Err(
+                "post tags must be 1-40 ASCII letters, numbers, hyphens, or underscores".into(),
+            );
+        }
+        if !normalized.contains(&tag) {
+            normalized.push(tag);
+        }
+    }
+    normalized.sort();
+    Ok(normalized)
+}
+
+fn validated_post_mentions(
     ctx: &ReducerContext,
-    space_id: Uuid,
-    title: String,
-    body: String,
-    client_request_id: Uuid,
+    space: &Space,
+    mentions: Vec<Identity>,
+) -> Result<Vec<Identity>, String> {
+    if mentions.len() > 50 {
+        return Err("posts are limited to 50 mentions".into());
+    }
+    let mut unique = Vec::with_capacity(mentions.len());
+    for identity in mentions {
+        let active = find_membership(ctx, space.workspace_id, identity)
+            .is_some_and(|member| member.active)
+            && can_read_space(ctx, space, identity);
+        if !active {
+            return Err("mentioned identity cannot read this post's space".into());
+        }
+        if !unique.contains(&identity) {
+            unique.push(identity);
+        }
+    }
+    unique.sort_by_key(ToString::to_string);
+    Ok(unique)
+}
+
+fn require_post_identity(
+    ctx: &ReducerContext,
+    post: &Post,
+    identity: Identity,
 ) -> Result<(), String> {
+    let space = ctx
+        .db
+        .space()
+        .id()
+        .find(post.space_id)
+        .ok_or_else(|| "post space not found".to_string())?;
+    if !find_membership(ctx, post.workspace_id, identity).is_some_and(|member| member.active)
+        || !can_read_space(ctx, &space, identity)
+    {
+        return Err("post owner or assignee must be able to read the post space".into());
+    }
+    Ok(())
+}
+
+fn replace_post_metadata(
+    ctx: &ReducerContext,
+    post: &Post,
+    tags: Vec<String>,
+    mentions: Vec<Identity>,
+) -> Result<(), String> {
+    let existing_mentions: Vec<_> = ctx
+        .db
+        .post_mention()
+        .post_id()
+        .filter(post.id)
+        .map(|row| row.identity)
+        .collect();
+    let tag_keys: Vec<_> = ctx
+        .db
+        .post_tag()
+        .post_id()
+        .filter(post.id)
+        .map(|row| row.key)
+        .collect();
+    for key in tag_keys {
+        ctx.db.post_tag().key().delete(key);
+    }
+    let mention_keys: Vec<_> = ctx
+        .db
+        .post_mention()
+        .post_id()
+        .filter(post.id)
+        .map(|row| row.key)
+        .collect();
+    for key in mention_keys {
+        ctx.db.post_mention().key().delete(key);
+    }
+    for tag in tags {
+        ctx.db.post_tag().insert(PostTag {
+            key: post_tag_key(post.id, &tag),
+            post_id: post.id,
+            workspace_id: post.workspace_id,
+            space_id: post.space_id,
+            tag,
+            created_at: ctx.timestamp,
+        });
+    }
+    for identity in mentions {
+        ctx.db.post_mention().insert(PostMention {
+            key: post_identity_key(post.id, identity),
+            post_id: post.id,
+            identity,
+            workspace_id: post.workspace_id,
+            space_id: post.space_id,
+            created_at: ctx.timestamp,
+        });
+        if identity != ctx.sender() && !existing_mentions.contains(&identity) {
+            ctx.db.notification().insert(Notification {
+                id: new_id(ctx)?,
+                workspace_id: post.workspace_id,
+                recipient_identity: identity,
+                kind: NotificationKind::Mention,
+                resource_type: "post".into(),
+                resource_id: post.id,
+                summary: "You were mentioned in a post".into(),
+                read_at: None,
+                created_at: ctx.timestamp,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn append_post_activity(
+    ctx: &ReducerContext,
+    post: &mut Post,
+    kind: &str,
+    summary: &str,
+) -> Result<(), String> {
+    post.activity_sequence = post
+        .activity_sequence
+        .checked_add(1)
+        .ok_or_else(|| "post activity sequence exhausted".to_string())?;
+    post.last_activity_at = ctx.timestamp;
+    ctx.db.post_activity().insert(PostActivity {
+        key: post_activity_key(post.id, post.activity_sequence),
+        post_id: post.id,
+        sequence: post.activity_sequence,
+        actor_identity: ctx.sender(),
+        kind: kind.into(),
+        summary: summary.into(),
+        created_at: ctx.timestamp,
+    });
+    Ok(())
+}
+
+fn create_post_record(
+    ctx: &ReducerContext,
+    input: CreateTypedPostInput,
+    operation: &str,
+) -> Result<(), String> {
+    let CreateTypedPostInput {
+        space_id,
+        title,
+        body,
+        kind,
+        owner_identity,
+        assignee_identity,
+        tags,
+        mentions,
+        client_request_id,
+    } = input;
     let (space, _) = require_space_action(ctx, space_id, Action::Write)?;
     validate_text(&title, "post title", 200)?;
     validate_text(&body, "post body", 50_000)?;
-    let input_hash = normalized_input_hash(&format!("{space_id}\0{}\0{body}", title.trim()));
+    let tags = normalized_post_tags(tags)?;
+    let mentions = validated_post_mentions(ctx, &space, mentions)?;
+    let provisional = Post {
+        id: Uuid::from_u128(0),
+        workspace_id: space.workspace_id,
+        space_id,
+        author_identity: ctx.sender(),
+        owner_identity,
+        assignee_identity,
+        kind,
+        state: PostState::Active,
+        locked: false,
+        title: String::new(),
+        body: String::new(),
+        revision: 0,
+        activity_sequence: 0,
+        last_activity_at: ctx.timestamp,
+        deleted: false,
+        created_at: ctx.timestamp,
+        updated_at: ctx.timestamp,
+    };
+    require_post_identity(ctx, &provisional, owner_identity)?;
+    if let Some(identity) = assignee_identity {
+        require_post_identity(ctx, &provisional, identity)?;
+    }
+    let input_hash = normalized_input_hash(&format!(
+        "{space_id}\0{}\0{body}\0{kind:?}\0{owner_identity}\0{assignee_identity:?}\0{tags:?}\0{mentions:?}",
+        title.trim()
+    ));
     if existing_receipt(
         ctx,
         Some(space.workspace_id),
-        "create_post",
+        operation,
         client_request_id,
         &input_hash,
     )?
@@ -1552,18 +2026,46 @@ pub fn create_post(
     }
     let id = new_id(ctx)?;
     let title = title.trim().to_string();
-    ctx.db.post().insert(Post {
+    let post = Post {
         id,
         workspace_id: space.workspace_id,
         space_id,
         author_identity: ctx.sender(),
+        owner_identity,
+        assignee_identity,
+        kind,
+        state: PostState::Active,
+        locked: false,
         title: title.clone(),
         body: body.clone(),
         revision: 1,
+        activity_sequence: 1,
+        last_activity_at: ctx.timestamp,
         deleted: false,
         created_at: ctx.timestamp,
         updated_at: ctx.timestamp,
+    };
+    ctx.db.post().insert(post.clone());
+    ctx.db.post_activity().insert(PostActivity {
+        key: post_activity_key(id, 1),
+        post_id: id,
+        sequence: 1,
+        actor_identity: ctx.sender(),
+        kind: "created".into(),
+        summary: "Post created".into(),
+        created_at: ctx.timestamp,
     });
+    ctx.db.post_user_state().insert(PostUserState {
+        key: post_identity_key(id, ctx.sender()),
+        post_id: id,
+        identity: ctx.sender(),
+        following: true,
+        bookmarked: false,
+        last_read_sequence: 1,
+        read_at: Some(ctx.timestamp),
+        updated_at: ctx.timestamp,
+    });
+    replace_post_metadata(ctx, &post, tags, mentions)?;
     enqueue_search_snapshot(
         ctx,
         SearchSnapshotInput {
@@ -1580,7 +2082,7 @@ pub fn create_post(
     insert_receipt(
         ctx,
         Some(space.workspace_id),
-        "create_post",
+        operation,
         client_request_id,
         input_hash,
         "post",
@@ -1598,6 +2100,36 @@ pub fn create_post(
             summary: &format!("post created: {title}"),
         },
     )
+}
+
+#[spacetimedb::reducer]
+pub fn create_post(
+    ctx: &ReducerContext,
+    space_id: Uuid,
+    title: String,
+    body: String,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    create_post_record(
+        ctx,
+        CreateTypedPostInput {
+            space_id,
+            title,
+            body,
+            kind: PostKind::Discussion,
+            owner_identity: ctx.sender(),
+            assignee_identity: None,
+            tags: Vec::new(),
+            mentions: Vec::new(),
+            client_request_id,
+        },
+        "create_post",
+    )
+}
+
+#[spacetimedb::reducer]
+pub fn create_typed_post(ctx: &ReducerContext, input: CreateTypedPostInput) -> Result<(), String> {
+    create_post_record(ctx, input, "create_typed_post")
 }
 
 #[spacetimedb::reducer]
@@ -1624,6 +2156,9 @@ pub fn edit_post(
     if post.deleted {
         return Err("deleted post cannot be edited".into());
     }
+    if post.locked || post.state == PostState::Archived {
+        return Err("locked or archived posts cannot be edited".into());
+    }
     let input_hash = normalized_input_hash(&format!(
         "{post_id}\0{}\0{body}\0{expected_revision}",
         title.trim()
@@ -1644,6 +2179,7 @@ pub fn edit_post(
     post.body = body;
     post.revision = post.revision.saturating_add(1);
     post.updated_at = ctx.timestamp;
+    append_post_activity(ctx, &mut post, "edited", "Post content edited")?;
     ctx.db.post().id().update(post.clone());
     enqueue_search_snapshot(
         ctx,
@@ -1695,8 +2231,12 @@ pub fn delete_post(
         .find(post_id)
         .ok_or_else(|| "post not found".to_string())?;
     let (_, member) = require_space_action(ctx, post.space_id, Action::Write)?;
-    if post.author_identity != ctx.sender() && !role_allows(member.role, Action::ManageWorkspace) {
+    let is_admin = role_allows(member.role, Action::ManageWorkspace);
+    if post.author_identity != ctx.sender() && !is_admin {
         return Err("only the author or an administrator may delete this post".into());
+    }
+    if post.locked && !is_admin {
+        return Err("locked posts can only be deleted by an administrator".into());
     }
     let input_hash = normalized_input_hash(&format!("{post_id}\0{expected_revision}"));
     if existing_receipt(
@@ -1719,7 +2259,70 @@ pub fn delete_post(
     post.body.clear();
     post.revision = post.revision.saturating_add(1);
     post.updated_at = ctx.timestamp;
+    append_post_activity(ctx, &mut post, "deleted", "Post deleted")?;
     ctx.db.post().id().update(post.clone());
+    let tag_keys: Vec<_> = ctx
+        .db
+        .post_tag()
+        .post_id()
+        .filter(post.id)
+        .map(|row| row.key)
+        .collect();
+    for key in tag_keys {
+        ctx.db.post_tag().key().delete(key);
+    }
+    let mention_keys: Vec<_> = ctx
+        .db
+        .post_mention()
+        .post_id()
+        .filter(post.id)
+        .map(|row| row.key)
+        .collect();
+    for key in mention_keys {
+        ctx.db.post_mention().key().delete(key);
+    }
+    let reaction_keys: Vec<_> = ctx
+        .db
+        .post_reaction()
+        .post_id()
+        .filter(post.id)
+        .map(|row| row.key)
+        .collect();
+    for key in reaction_keys {
+        ctx.db.post_reaction().key().delete(key);
+    }
+    ctx.db.post_pin().post_id().delete(post.id);
+    let state_keys: Vec<_> = ctx
+        .db
+        .post_user_state()
+        .post_id()
+        .filter(post.id)
+        .map(|row| row.key)
+        .collect();
+    for key in state_keys {
+        ctx.db.post_user_state().key().delete(key);
+    }
+    let vote_keys: Vec<_> = ctx
+        .db
+        .poll_vote()
+        .post_id()
+        .filter(post.id)
+        .map(|row| row.key)
+        .collect();
+    for key in vote_keys {
+        ctx.db.poll_vote().key().delete(key);
+    }
+    let option_ids: Vec<_> = ctx
+        .db
+        .poll_option()
+        .post_id()
+        .filter(post.id)
+        .map(|row| row.id)
+        .collect();
+    for option_id in option_ids {
+        ctx.db.poll_option().id().delete(option_id);
+    }
+    ctx.db.poll().post_id().delete(post.id);
     enqueue_search_snapshot(
         ctx,
         SearchSnapshotInput {
@@ -1757,6 +2360,609 @@ pub fn delete_post(
 }
 
 #[spacetimedb::reducer]
+pub fn set_post_metadata(
+    ctx: &ReducerContext,
+    post_id: Uuid,
+    tags: Vec<String>,
+    mentions: Vec<Identity>,
+    expected_revision: u64,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let mut post = ctx
+        .db
+        .post()
+        .id()
+        .find(post_id)
+        .ok_or_else(|| "post not found".to_string())?;
+    let (space, member) = require_space_action(ctx, post.space_id, Action::Write)?;
+    let is_admin = role_allows(member.role, Action::ManageWorkspace);
+    if post.author_identity != ctx.sender() && post.owner_identity != ctx.sender() && !is_admin {
+        return Err("post metadata update denied".into());
+    }
+    if post.deleted || post.locked || post.state == PostState::Archived {
+        return Err("post metadata cannot be changed in its current state".into());
+    }
+    let tags = normalized_post_tags(tags)?;
+    let mentions = validated_post_mentions(ctx, &space, mentions)?;
+    let input_hash = normalized_input_hash(&format!(
+        "{post_id}\0{tags:?}\0{mentions:?}\0{expected_revision}"
+    ));
+    if existing_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "set_post_metadata",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    revision_matches(post.revision, expected_revision)?;
+    replace_post_metadata(ctx, &post, tags, mentions)?;
+    post.revision = post.revision.saturating_add(1);
+    post.updated_at = ctx.timestamp;
+    append_post_activity(
+        ctx,
+        &mut post,
+        "metadata_updated",
+        "Post tags or mentions updated",
+    )?;
+    ctx.db.post().id().update(post.clone());
+    insert_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "set_post_metadata",
+        client_request_id,
+        input_hash,
+        "post",
+        post.id,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn update_post_lifecycle(
+    ctx: &ReducerContext,
+    input: UpdatePostLifecycleInput,
+) -> Result<(), String> {
+    let UpdatePostLifecycleInput {
+        post_id,
+        state,
+        locked,
+        owner_identity,
+        assignee_identity,
+        expected_revision,
+        client_request_id,
+    } = input;
+    let mut post = ctx
+        .db
+        .post()
+        .id()
+        .find(post_id)
+        .ok_or_else(|| "post not found".to_string())?;
+    let (_, member) = require_space_action(ctx, post.space_id, Action::Write)?;
+    if post.deleted {
+        return Err("deleted post lifecycle cannot change".into());
+    }
+    let is_admin = role_allows(member.role, Action::ManageWorkspace);
+    let ownership_changes =
+        post.owner_identity != owner_identity || post.assignee_identity != assignee_identity;
+    if !crate::policy::post_lifecycle_change_allowed(
+        post.author_identity == ctx.sender() || post.owner_identity == ctx.sender(),
+        is_admin,
+        post.locked,
+        state == PostState::Archived,
+        post.locked != locked,
+        ownership_changes,
+    ) {
+        return Err("post lifecycle update denied".into());
+    }
+    require_post_identity(ctx, &post, owner_identity)?;
+    if let Some(identity) = assignee_identity {
+        require_post_identity(ctx, &post, identity)?;
+    }
+    let input_hash = normalized_input_hash(&format!(
+        "{post_id}\0{state:?}\0{locked}\0{owner_identity}\0{assignee_identity:?}\0{expected_revision}"
+    ));
+    if existing_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "update_post_lifecycle",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    revision_matches(post.revision, expected_revision)?;
+    let previous_assignee = post.assignee_identity;
+    post.state = state;
+    post.locked = locked;
+    post.owner_identity = owner_identity;
+    post.assignee_identity = assignee_identity;
+    post.revision = post.revision.saturating_add(1);
+    post.updated_at = ctx.timestamp;
+    append_post_activity(
+        ctx,
+        &mut post,
+        "lifecycle_updated",
+        "Post lifecycle updated",
+    )?;
+    ctx.db.post().id().update(post.clone());
+    if let Some(identity) = assignee_identity
+        && Some(identity) != previous_assignee
+        && identity != ctx.sender()
+    {
+        ctx.db.notification().insert(Notification {
+            id: new_id(ctx)?,
+            workspace_id: post.workspace_id,
+            recipient_identity: identity,
+            kind: NotificationKind::Assignment,
+            resource_type: "post".into(),
+            resource_id: post.id,
+            summary: "A post was assigned to you".into(),
+            read_at: None,
+            created_at: ctx.timestamp,
+        });
+    }
+    insert_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "update_post_lifecycle",
+        client_request_id,
+        input_hash,
+        "post",
+        post.id,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn set_post_reaction(
+    ctx: &ReducerContext,
+    post_id: Uuid,
+    emoji: String,
+    active: bool,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    validate_text(&emoji, "reaction", 32)?;
+    let post = ctx
+        .db
+        .post()
+        .id()
+        .find(post_id)
+        .ok_or_else(|| "post not found".to_string())?;
+    require_space_action(ctx, post.space_id, Action::Read)?;
+    if post.deleted || post.locked || post.state == PostState::Archived {
+        return Err("post reactions are closed".into());
+    }
+    let emoji = emoji.trim().to_string();
+    let input_hash = normalized_input_hash(&format!("{post_id}\0{emoji}\0{active}"));
+    if existing_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "set_post_reaction",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    let key = post_reaction_key(post_id, ctx.sender(), &emoji);
+    if active {
+        if ctx.db.post_reaction().key().find(key.clone()).is_none() {
+            ctx.db.post_reaction().insert(PostReaction {
+                key,
+                post_id,
+                identity: ctx.sender(),
+                emoji,
+                created_at: ctx.timestamp,
+            });
+        }
+    } else {
+        ctx.db.post_reaction().key().delete(key);
+    }
+    insert_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "set_post_reaction",
+        client_request_id,
+        input_hash,
+        "post",
+        post.id,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn set_post_personal_state(
+    ctx: &ReducerContext,
+    post_id: Uuid,
+    following: bool,
+    bookmarked: bool,
+    mark_read: bool,
+) -> Result<(), String> {
+    let post = ctx
+        .db
+        .post()
+        .id()
+        .find(post_id)
+        .ok_or_else(|| "post not found".to_string())?;
+    require_space_action(ctx, post.space_id, Action::Read)?;
+    if post.deleted {
+        return Err("deleted posts cannot be followed or bookmarked".into());
+    }
+    let key = post_identity_key(post_id, ctx.sender());
+    let existing = ctx.db.post_user_state().key().find(key.clone());
+    let last_read_sequence = if mark_read {
+        post.activity_sequence
+    } else {
+        existing.as_ref().map_or(0, |row| row.last_read_sequence)
+    };
+    let row = PostUserState {
+        key: key.clone(),
+        post_id,
+        identity: ctx.sender(),
+        following,
+        bookmarked,
+        last_read_sequence,
+        read_at: if mark_read {
+            Some(ctx.timestamp)
+        } else {
+            existing.as_ref().and_then(|row| row.read_at)
+        },
+        updated_at: ctx.timestamp,
+    };
+    if existing.is_some() {
+        ctx.db.post_user_state().key().update(row);
+    } else {
+        ctx.db.post_user_state().insert(row);
+    }
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn set_post_pin(
+    ctx: &ReducerContext,
+    post_id: Uuid,
+    pinned: bool,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let post = ctx
+        .db
+        .post()
+        .id()
+        .find(post_id)
+        .ok_or_else(|| "post not found".to_string())?;
+    let (_, member) = require_space_action(ctx, post.space_id, Action::ManageWorkspace)?;
+    if !role_allows(member.role, Action::ManageWorkspace) || post.deleted {
+        return Err("post pin update denied".into());
+    }
+    let input_hash = normalized_input_hash(&format!("{post_id}\0{pinned}"));
+    if existing_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "set_post_pin",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    if pinned {
+        let row = PostPin {
+            post_id,
+            workspace_id: post.workspace_id,
+            space_id: post.space_id,
+            pinned_by: ctx.sender(),
+            pinned_at: ctx.timestamp,
+        };
+        if ctx.db.post_pin().post_id().find(post_id).is_some() {
+            ctx.db.post_pin().post_id().update(row);
+        } else {
+            ctx.db.post_pin().insert(row);
+        }
+    } else {
+        ctx.db.post_pin().post_id().delete(post_id);
+    }
+    insert_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "set_post_pin",
+        client_request_id,
+        input_hash,
+        "post",
+        post.id,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn configure_poll(ctx: &ReducerContext, input: ConfigurePollInput) -> Result<(), String> {
+    let ConfigurePollInput {
+        post_id,
+        options,
+        allows_multiple,
+        expected_post_revision,
+        client_request_id,
+    } = input;
+    if !(2..=20).contains(&options.len()) {
+        return Err("polls require 2-20 options".into());
+    }
+    let mut labels = Vec::with_capacity(options.len());
+    for option in options {
+        validate_text(&option, "poll option", 200)?;
+        let label = option.trim().to_string();
+        if labels.contains(&label) {
+            return Err("poll option labels must be unique".into());
+        }
+        labels.push(label);
+    }
+    let mut post = ctx
+        .db
+        .post()
+        .id()
+        .find(post_id)
+        .ok_or_else(|| "post not found".to_string())?;
+    let (_, member) = require_space_action(ctx, post.space_id, Action::Write)?;
+    let is_admin = role_allows(member.role, Action::ManageWorkspace);
+    if post.kind != PostKind::Poll
+        || post.deleted
+        || post.locked
+        || post.state == PostState::Archived
+        || (post.author_identity != ctx.sender()
+            && post.owner_identity != ctx.sender()
+            && !is_admin)
+    {
+        return Err("poll configuration denied".into());
+    }
+    let input_hash = normalized_input_hash(&format!(
+        "{post_id}\0{labels:?}\0{allows_multiple}\0{expected_post_revision}"
+    ));
+    if existing_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "configure_poll",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    revision_matches(post.revision, expected_post_revision)?;
+    if ctx
+        .db
+        .poll_vote()
+        .post_id()
+        .filter(post_id)
+        .next()
+        .is_some()
+    {
+        return Err("poll options cannot change after voting begins".into());
+    }
+    let option_ids: Vec<_> = ctx
+        .db
+        .poll_option()
+        .post_id()
+        .filter(post_id)
+        .map(|row| row.id)
+        .collect();
+    for option_id in option_ids {
+        ctx.db.poll_option().id().delete(option_id);
+    }
+    let existing = ctx.db.poll().post_id().find(post_id);
+    let poll = Poll {
+        post_id,
+        workspace_id: post.workspace_id,
+        space_id: post.space_id,
+        allows_multiple,
+        closed: false,
+        revision: existing
+            .as_ref()
+            .map_or(1, |row| row.revision.saturating_add(1)),
+        created_at: existing
+            .as_ref()
+            .map_or(ctx.timestamp, |row| row.created_at),
+        updated_at: ctx.timestamp,
+    };
+    if existing.is_some() {
+        ctx.db.poll().post_id().update(poll);
+    } else {
+        ctx.db.poll().insert(poll);
+    }
+    for (position, label) in labels.into_iter().enumerate() {
+        ctx.db.poll_option().insert(PollOption {
+            id: new_id(ctx)?,
+            post_id,
+            label,
+            position: u32::try_from(position).map_err(|_| "poll option position overflow")?,
+        });
+    }
+    post.revision = post.revision.saturating_add(1);
+    post.updated_at = ctx.timestamp;
+    append_post_activity(ctx, &mut post, "poll_configured", "Poll configured")?;
+    ctx.db.post().id().update(post.clone());
+    insert_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "configure_poll",
+        client_request_id,
+        input_hash,
+        "post",
+        post.id,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn cast_poll_vote(
+    ctx: &ReducerContext,
+    post_id: Uuid,
+    option_ids: Vec<Uuid>,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let post = ctx
+        .db
+        .post()
+        .id()
+        .find(post_id)
+        .ok_or_else(|| "post not found".to_string())?;
+    require_space_action(ctx, post.space_id, Action::Read)?;
+    let poll = ctx
+        .db
+        .poll()
+        .post_id()
+        .find(post_id)
+        .ok_or_else(|| "poll is not configured".to_string())?;
+    let mut selected = Vec::with_capacity(option_ids.len());
+    for option_id in option_ids {
+        if !selected.contains(&option_id) {
+            selected.push(option_id);
+        }
+    }
+    let all_options_valid = selected.iter().all(|option_id| {
+        ctx.db
+            .poll_option()
+            .id()
+            .find(*option_id)
+            .is_some_and(|option| option.post_id == post_id)
+    });
+    if post.deleted
+        || post.locked
+        || post.state == PostState::Archived
+        || !crate::policy::poll_selection_valid(
+            !poll.closed,
+            poll.allows_multiple,
+            selected.len(),
+            all_options_valid,
+        )
+    {
+        return Err("poll vote is invalid or closed".into());
+    }
+    selected.sort_by_key(ToString::to_string);
+    let input_hash = normalized_input_hash(&format!("{post_id}\0{selected:?}"));
+    if existing_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "cast_poll_vote",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    let prior_keys: Vec<_> = ctx
+        .db
+        .poll_vote()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|vote| vote.post_id == post_id)
+        .map(|vote| vote.key)
+        .collect();
+    for key in prior_keys {
+        ctx.db.poll_vote().key().delete(key);
+    }
+    for option_id in selected {
+        ctx.db.poll_vote().insert(PollVote {
+            key: poll_vote_key(post_id, option_id, ctx.sender()),
+            post_id,
+            option_id,
+            identity: ctx.sender(),
+            created_at: ctx.timestamp,
+        });
+    }
+    insert_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "cast_poll_vote",
+        client_request_id,
+        input_hash,
+        "post",
+        post.id,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn set_poll_closed(
+    ctx: &ReducerContext,
+    post_id: Uuid,
+    closed: bool,
+    expected_poll_revision: u64,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let mut post = ctx
+        .db
+        .post()
+        .id()
+        .find(post_id)
+        .ok_or_else(|| "post not found".to_string())?;
+    let (_, member) = require_space_action(ctx, post.space_id, Action::Write)?;
+    let is_admin = role_allows(member.role, Action::ManageWorkspace);
+    if post.author_identity != ctx.sender() && post.owner_identity != ctx.sender() && !is_admin {
+        return Err("poll close update denied".into());
+    }
+    if post.deleted || ((post.locked || post.state == PostState::Archived) && !is_admin) {
+        return Err("poll close update denied in the current post state".into());
+    }
+    let mut poll = ctx
+        .db
+        .poll()
+        .post_id()
+        .find(post_id)
+        .ok_or_else(|| "poll is not configured".to_string())?;
+    revision_matches(poll.revision, expected_poll_revision)?;
+    let input_hash =
+        normalized_input_hash(&format!("{post_id}\0{closed}\0{expected_poll_revision}"));
+    if existing_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "set_poll_closed",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    poll.closed = closed;
+    poll.revision = poll.revision.saturating_add(1);
+    poll.updated_at = ctx.timestamp;
+    ctx.db.poll().post_id().update(poll);
+    append_post_activity(
+        ctx,
+        &mut post,
+        if closed {
+            "poll_closed"
+        } else {
+            "poll_reopened"
+        },
+        if closed {
+            "Poll closed"
+        } else {
+            "Poll reopened"
+        },
+    )?;
+    ctx.db.post().id().update(post.clone());
+    insert_receipt(
+        ctx,
+        Some(post.workspace_id),
+        "set_poll_closed",
+        client_request_id,
+        input_hash,
+        "post",
+        post.id,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
 pub fn create_named_thread(
     ctx: &ReducerContext,
     root_post_id: Uuid,
@@ -1771,8 +2977,8 @@ pub fn create_named_thread(
         .find(root_post_id)
         .ok_or_else(|| "root post not found".to_string())?;
     require_space_action(ctx, post.space_id, Action::Write)?;
-    if post.deleted {
-        return Err("deleted posts cannot receive new threads".into());
+    if post.deleted || post.locked || post.state == PostState::Archived {
+        return Err("deleted, locked, or archived posts cannot receive new threads".into());
     }
     let input_hash = normalized_input_hash(&format!("{root_post_id}\0{}", title.trim()));
     if existing_receipt(
@@ -1799,6 +3005,9 @@ pub fn create_named_thread(
         created_at: ctx.timestamp,
         updated_at: ctx.timestamp,
     });
+    let mut post = post;
+    append_post_activity(ctx, &mut post, "thread_created", "Thread created")?;
+    ctx.db.post().id().update(post.clone());
     insert_receipt(
         ctx,
         Some(post.workspace_id),
@@ -1839,6 +3048,15 @@ pub fn update_named_thread(
         .find(thread_id)
         .ok_or_else(|| "thread not found".to_string())?;
     let (_, member) = require_space_action(ctx, thread.space_id, Action::Write)?;
+    let mut post = ctx
+        .db
+        .post()
+        .id()
+        .find(thread.root_post_id)
+        .ok_or_else(|| "root post not found".to_string())?;
+    if post.deleted || post.locked || post.state == PostState::Archived {
+        return Err("root post is unavailable for thread updates".into());
+    }
     if thread.created_by != ctx.sender() && !role_allows(member.role, Action::ManageWorkspace) {
         return Err("thread update denied".into());
     }
@@ -1863,6 +3081,8 @@ pub fn update_named_thread(
     thread.revision = thread.revision.saturating_add(1);
     thread.updated_at = ctx.timestamp;
     ctx.db.named_thread().id().update(thread.clone());
+    append_post_activity(ctx, &mut post, "thread_updated", "Thread updated")?;
+    ctx.db.post().id().update(post);
     refresh_space_search_acl(ctx, thread.space_id)?;
     insert_receipt(
         ctx,
@@ -1947,6 +3167,15 @@ pub fn add_contribution(
     if thread.archived {
         return Err("thread is archived".into());
     }
+    let mut root_post = ctx
+        .db
+        .post()
+        .id()
+        .find(thread.root_post_id)
+        .ok_or_else(|| "root post not found".to_string())?;
+    if root_post.deleted || root_post.locked || root_post.state == PostState::Archived {
+        return Err("root post is not accepting contributions".into());
+    }
     require_space_action(ctx, thread.space_id, Action::Write)?;
     let input_hash = normalized_input_hash(&format!(
         "{thread_id}\0{parent_contribution_id:?}\0{kind:?}\0{body}"
@@ -1979,6 +3208,13 @@ pub fn add_contribution(
         created_at: ctx.timestamp,
         updated_at: ctx.timestamp,
     });
+    append_post_activity(
+        ctx,
+        &mut root_post,
+        "contribution_added",
+        "Thread contribution added",
+    )?;
+    ctx.db.post().id().update(root_post);
     enqueue_search_snapshot(
         ctx,
         SearchSnapshotInput {
@@ -2026,6 +3262,15 @@ fn contribution_write_authorized(
         .find(contribution.thread_id)
         .ok_or_else(|| "thread not found".to_string())?;
     let (_, member) = require_space_action(ctx, thread.space_id, Action::Write)?;
+    let post = ctx
+        .db
+        .post()
+        .id()
+        .find(thread.root_post_id)
+        .ok_or_else(|| "root post not found".to_string())?;
+    if post.deleted || post.locked || post.state == PostState::Archived {
+        return Err("root post is not accepting contribution changes".into());
+    }
     if contribution.author_identity != ctx.sender()
         && !role_allows(member.role, Action::ManageWorkspace)
     {
@@ -2081,6 +3326,19 @@ pub fn edit_contribution(
     contribution.revision = contribution.revision.saturating_add(1);
     contribution.updated_at = ctx.timestamp;
     ctx.db.contribution().id().update(contribution.clone());
+    let mut post = ctx
+        .db
+        .post()
+        .id()
+        .find(thread.root_post_id)
+        .ok_or_else(|| "root post not found".to_string())?;
+    append_post_activity(
+        ctx,
+        &mut post,
+        "contribution_edited",
+        "Thread contribution edited",
+    )?;
+    ctx.db.post().id().update(post);
     enqueue_search_snapshot(
         ctx,
         SearchSnapshotInput {
@@ -2138,6 +3396,19 @@ pub fn delete_contribution(
     contribution.revision = contribution.revision.saturating_add(1);
     contribution.updated_at = ctx.timestamp;
     ctx.db.contribution().id().update(contribution.clone());
+    let mut post = ctx
+        .db
+        .post()
+        .id()
+        .find(thread.root_post_id)
+        .ok_or_else(|| "root post not found".to_string())?;
+    append_post_activity(
+        ctx,
+        &mut post,
+        "contribution_deleted",
+        "Thread contribution deleted",
+    )?;
+    ctx.db.post().id().update(post);
     enqueue_search_snapshot(
         ctx,
         SearchSnapshotInput {
@@ -2161,6 +3432,1156 @@ pub fn delete_contribution(
         contribution.id,
     );
     Ok(())
+}
+
+fn direct_participant_key(conversation_id: Uuid, identity: Identity) -> String {
+    format!("{conversation_id}:{identity}")
+}
+
+fn direct_sequence_key(conversation_id: Uuid, sequence: u64) -> String {
+    format!("{conversation_id}:{sequence:020}")
+}
+
+fn direct_ancestry_key(ancestor_id: Uuid, descendant_id: Uuid) -> String {
+    format!("{ancestor_id}:{descendant_id}")
+}
+
+fn direct_read_key(conversation_id: Uuid, identity: Identity) -> String {
+    format!("{conversation_id}:{identity}")
+}
+
+fn dm_promotion_source_key(proposal_id: Uuid, ordinal: u32) -> String {
+    format!("{proposal_id}:{ordinal:03}")
+}
+
+fn dm_promotion_consent_key(proposal_id: Uuid, identity: Identity) -> String {
+    format!("{proposal_id}:{identity}")
+}
+
+fn identity_is_active_human_member(
+    ctx: &ReducerContext,
+    workspace_id: Uuid,
+    identity: Identity,
+) -> bool {
+    ctx.db
+        .user()
+        .identity()
+        .find(identity)
+        .is_some_and(|user| !user.disabled)
+        && ctx
+            .db
+            .service_principal()
+            .identity()
+            .find(identity)
+            .is_none()
+        && find_membership(ctx, workspace_id, identity).is_some_and(|member| member.active)
+}
+
+fn direct_participant_is_active(
+    ctx: &ReducerContext,
+    conversation: &DirectConversation,
+    identity: Identity,
+) -> bool {
+    ctx.db
+        .direct_participant()
+        .key()
+        .find(direct_participant_key(conversation.id, identity))
+        .is_some_and(|participant| participant.left_at.is_none())
+        && identity_is_active_human_member(ctx, conversation.workspace_id, identity)
+}
+
+fn require_direct_access(
+    ctx: &ReducerContext,
+    conversation_id: Uuid,
+) -> Result<DirectConversation, String> {
+    require_registered_user(ctx)?;
+    let conversation = ctx
+        .db
+        .direct_conversation()
+        .id()
+        .find(conversation_id)
+        .ok_or_else(|| "direct conversation unavailable".to_string())?;
+    let workspace_active = can_read_workspace(ctx, conversation.workspace_id, ctx.sender());
+    let participant_active = ctx
+        .db
+        .direct_participant()
+        .key()
+        .find(direct_participant_key(conversation.id, ctx.sender()))
+        .is_some_and(|participant| participant.left_at.is_none());
+    let user_enabled = ctx
+        .db
+        .user()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|user| !user.disabled)
+        && ctx
+            .db
+            .service_principal()
+            .identity()
+            .find(ctx.sender())
+            .is_none();
+    if !crate::policy::direct_access_allowed(workspace_active, participant_active, user_enabled) {
+        return Err("direct conversation unavailable".into());
+    }
+    Ok(conversation)
+}
+
+fn require_direct_write(
+    ctx: &ReducerContext,
+    conversation_id: Uuid,
+) -> Result<DirectConversation, String> {
+    let conversation = require_direct_access(ctx, conversation_id)?;
+    if !crate::policy::direct_write_allowed(true, conversation.deactivated_at.is_some()) {
+        return Err("direct conversation is deactivated".into());
+    }
+    Ok(conversation)
+}
+
+fn active_direct_participants(
+    ctx: &ReducerContext,
+    conversation: &DirectConversation,
+) -> Vec<DirectParticipant> {
+    ctx.db
+        .direct_participant()
+        .conversation_id()
+        .filter(conversation.id)
+        .filter(|participant| {
+            participant.left_at.is_none()
+                && identity_is_active_human_member(
+                    ctx,
+                    conversation.workspace_id,
+                    participant.identity,
+                )
+        })
+        .collect()
+}
+
+fn direct_participant_epoch_hash(participants: &[DirectParticipant]) -> String {
+    let mut bindings = participants
+        .iter()
+        .map(|participant| format!("{}:{}", participant.identity, participant.participant_epoch))
+        .collect::<Vec<_>>();
+    bindings.sort();
+    normalized_input_hash(&bindings.join("\0"))
+}
+
+fn dm_source_revision_hash(sources: &[(Uuid, u64)]) -> String {
+    normalized_input_hash(
+        &sources
+            .iter()
+            .enumerate()
+            .map(|(ordinal, (message_id, revision))| format!("{ordinal}:{message_id}:{revision}"))
+            .collect::<Vec<_>>()
+            .join("\0"),
+    )
+}
+
+fn identity_can_write_space(ctx: &ReducerContext, space: &Space, identity: Identity) -> bool {
+    !space.archived
+        && identity_is_active_human_member(ctx, space.workspace_id, identity)
+        && find_membership(ctx, space.workspace_id, identity)
+            .is_some_and(|member| role_allows(member.role, Action::Write))
+        && can_read_space(ctx, space, identity)
+}
+
+fn cancel_pending_dm_promotions(ctx: &ReducerContext, conversation_id: Uuid) {
+    for mut proposal in ctx
+        .db
+        .dm_promotion_proposal()
+        .conversation_id()
+        .filter(conversation_id)
+        .filter(|proposal| proposal.state == DmPromotionState::Pending)
+    {
+        proposal.state = DmPromotionState::Canceled;
+        proposal.revision = proposal.revision.saturating_add(1);
+        proposal.updated_at = ctx.timestamp;
+        ctx.db.dm_promotion_proposal().id().update(proposal);
+    }
+}
+
+fn deactivate_direct_participant(ctx: &ReducerContext, conversation_id: Uuid, identity: Identity) {
+    let key = direct_participant_key(conversation_id, identity);
+    if let Some(mut participant) = ctx.db.direct_participant().key().find(key)
+        && participant.left_at.is_none()
+    {
+        participant.left_at = Some(ctx.timestamp);
+        participant.participant_epoch = participant.participant_epoch.saturating_add(1);
+        ctx.db.direct_participant().key().update(participant);
+    }
+    if let Some(mut conversation) = ctx.db.direct_conversation().id().find(conversation_id) {
+        if active_direct_participants(ctx, &conversation).len() < 2 {
+            conversation.deactivated_at.get_or_insert(ctx.timestamp);
+        }
+        conversation.revision = conversation.revision.saturating_add(1);
+        conversation.updated_at = ctx.timestamp;
+        ctx.db.direct_conversation().id().update(conversation);
+    }
+    cancel_pending_dm_promotions(ctx, conversation_id);
+}
+
+fn deactivate_direct_participation(ctx: &ReducerContext, workspace_id: Uuid, identity: Identity) {
+    let conversation_ids: Vec<_> = ctx
+        .db
+        .direct_participant()
+        .identity()
+        .filter(identity)
+        .filter(|participant| {
+            participant.workspace_id == workspace_id && participant.left_at.is_none()
+        })
+        .map(|participant| participant.conversation_id)
+        .collect();
+    for conversation_id in conversation_ids {
+        deactivate_direct_participant(ctx, conversation_id, identity);
+    }
+}
+
+fn insert_direct_ancestry(
+    ctx: &ReducerContext,
+    conversation_id: Uuid,
+    message_id: Uuid,
+    parent_message_id: Option<Uuid>,
+) -> Result<(), String> {
+    ctx.db.direct_reply_ancestry().insert(DirectReplyAncestry {
+        key: direct_ancestry_key(message_id, message_id),
+        ancestor_message_id: message_id,
+        descendant_message_id: message_id,
+        conversation_id,
+        depth: 0,
+    });
+    if let Some(parent_id) = parent_message_id {
+        let parent = ctx
+            .db
+            .direct_message()
+            .id()
+            .find(parent_id)
+            .filter(|message| message.conversation_id == conversation_id && !message.deleted)
+            .ok_or_else(|| "direct reply parent unavailable".to_string())?;
+        let ancestors: Vec<_> = ctx
+            .db
+            .direct_reply_ancestry()
+            .descendant_message_id()
+            .filter(parent.id)
+            .collect();
+        let parent_depth = ancestors.iter().map(|row| row.depth).max().unwrap_or(0);
+        if !crate::policy::reply_depth_allowed(parent_depth, MAX_REPLY_DEPTH) {
+            return Err("maximum direct reply depth exceeded".into());
+        }
+        for ancestor in ancestors {
+            ctx.db.direct_reply_ancestry().insert(DirectReplyAncestry {
+                key: direct_ancestry_key(ancestor.ancestor_message_id, message_id),
+                ancestor_message_id: ancestor.ancestor_message_id,
+                descendant_message_id: message_id,
+                conversation_id,
+                depth: ancestor.depth.saturating_add(1),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn advance_direct_read_state(
+    ctx: &ReducerContext,
+    conversation_id: Uuid,
+    identity: Identity,
+    sequence: u64,
+) {
+    let key = direct_read_key(conversation_id, identity);
+    if let Some(mut row) = ctx.db.direct_read_state().key().find(key.clone()) {
+        row.last_read_sequence = sequence;
+        row.updated_at = ctx.timestamp;
+        ctx.db.direct_read_state().key().update(row);
+    } else {
+        ctx.db.direct_read_state().insert(DirectReadState {
+            key,
+            conversation_id,
+            identity,
+            last_read_sequence: sequence,
+            updated_at: ctx.timestamp,
+        });
+    }
+}
+
+#[spacetimedb::reducer]
+pub fn create_direct_conversation(
+    ctx: &ReducerContext,
+    input: CreateDirectConversationInput,
+) -> Result<(), String> {
+    require_registered_user(ctx)?;
+    let mut participants = input.participants;
+    participants.sort_by_key(ToString::to_string);
+    let participant_hash_input = participants
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\0");
+    let input_hash =
+        normalized_input_hash(&format!("{}\0{participant_hash_input}", input.workspace_id));
+    if existing_receipt(
+        ctx,
+        Some(input.workspace_id),
+        "create_direct_conversation",
+        input.client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    require_workspace_action(ctx, input.workspace_id, Action::Write)?;
+    let unique = participants.windows(2).all(|window| window[0] != window[1]);
+    let includes_caller = participants.contains(&ctx.sender());
+    let every_active_human = participants
+        .iter()
+        .all(|identity| identity_is_active_human_member(ctx, input.workspace_id, *identity));
+    if !crate::policy::direct_participant_set_valid(
+        participants.len(),
+        unique,
+        includes_caller,
+        every_active_human,
+    ) {
+        return Err("direct conversations require 2 to 8 unique active human participants including the caller".into());
+    }
+    let conversation_id = new_id(ctx)?;
+    ctx.db.direct_conversation().insert(DirectConversation {
+        id: conversation_id,
+        workspace_id: input.workspace_id,
+        created_by: ctx.sender(),
+        next_sequence: 1,
+        revision: 1,
+        deactivated_at: None,
+        created_at: ctx.timestamp,
+        updated_at: ctx.timestamp,
+    });
+    for identity in participants {
+        ctx.db.direct_participant().insert(DirectParticipant {
+            key: direct_participant_key(conversation_id, identity),
+            conversation_id,
+            identity,
+            workspace_id: input.workspace_id,
+            joined_at: ctx.timestamp,
+            left_at: None,
+            participant_epoch: 1,
+        });
+        ctx.db.direct_read_state().insert(DirectReadState {
+            key: direct_read_key(conversation_id, identity),
+            conversation_id,
+            identity,
+            last_read_sequence: 0,
+            updated_at: ctx.timestamp,
+        });
+    }
+    insert_receipt(
+        ctx,
+        Some(input.workspace_id),
+        "create_direct_conversation",
+        input.client_request_id,
+        input_hash,
+        "direct_conversation",
+        conversation_id,
+    );
+    audit(
+        ctx,
+        AuditInput {
+            workspace_id: input.workspace_id,
+            action: "create_direct_conversation",
+            resource_type: "direct_conversation",
+            resource_id: conversation_id,
+            request_id: input.client_request_id,
+            effective_principal: "human",
+            summary: "private conversation created",
+        },
+    )
+}
+
+#[spacetimedb::reducer]
+pub fn send_direct_message(
+    ctx: &ReducerContext,
+    conversation_id: Uuid,
+    parent_message_id: Option<Uuid>,
+    body: String,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let input_hash =
+        normalized_input_hash(&format!("{conversation_id}\0{parent_message_id:?}\0{body}"));
+    if existing_private_receipt(
+        ctx,
+        "send_direct_message",
+        client_request_id,
+        &input_hash,
+        "direct conversation unavailable",
+    )? {
+        return Ok(());
+    }
+    if crate::policy::direct_messages_are_searchable() {
+        return Err("direct messages must remain outside search".into());
+    }
+    validate_text(&body, "direct message body", 50_000)?;
+    let mut conversation = require_direct_write(ctx, conversation_id)?;
+    let message_id = new_id(ctx)?;
+    let sequence = conversation.next_sequence;
+    insert_direct_ancestry(ctx, conversation_id, message_id, parent_message_id)?;
+    ctx.db.direct_message().insert(DirectMessage {
+        id: message_id,
+        sequence_key: direct_sequence_key(conversation_id, sequence),
+        conversation_id,
+        author_identity: ctx.sender(),
+        workspace_id: conversation.workspace_id,
+        sequence,
+        parent_message_id,
+        body,
+        revision: 1,
+        deleted: false,
+        created_at: ctx.timestamp,
+        edited_at: None,
+        deleted_at: None,
+    });
+    conversation.next_sequence = conversation.next_sequence.saturating_add(1);
+    conversation.revision = conversation.revision.saturating_add(1);
+    conversation.updated_at = ctx.timestamp;
+    ctx.db
+        .direct_conversation()
+        .id()
+        .update(conversation.clone());
+    advance_direct_read_state(ctx, conversation_id, ctx.sender(), sequence);
+    insert_private_receipt(
+        ctx,
+        conversation.workspace_id,
+        "send_direct_message",
+        client_request_id,
+        input_hash,
+        "direct_message",
+        message_id,
+    );
+    audit(
+        ctx,
+        AuditInput {
+            workspace_id: conversation.workspace_id,
+            action: "send_direct_message",
+            resource_type: "direct_message",
+            resource_id: message_id,
+            request_id: client_request_id,
+            effective_principal: "human",
+            summary: "private message created",
+        },
+    )
+}
+
+fn load_direct_message_author(
+    ctx: &ReducerContext,
+    message_id: Uuid,
+    operation: crate::policy::PrivateDirectMessageOperation,
+) -> Result<(DirectConversation, DirectMessage), String> {
+    let message = ctx
+        .db
+        .direct_message()
+        .id()
+        .find(message_id)
+        .ok_or_else(|| {
+            direct_message_target_error(
+                operation,
+                crate::policy::PrivateDirectMessageTarget::Nonexistent,
+            )
+        })?;
+    if !crate::policy::direct_resource_lookup_allowed(true, message.author_identity == ctx.sender())
+    {
+        return Err(direct_message_target_error(
+            operation,
+            crate::policy::PrivateDirectMessageTarget::OtherAuthor,
+        ));
+    }
+    let conversation = ctx
+        .db
+        .direct_conversation()
+        .id()
+        .find(message.conversation_id)
+        .ok_or_else(|| {
+            direct_message_target_error(
+                operation,
+                crate::policy::PrivateDirectMessageTarget::Nonexistent,
+            )
+        })?;
+    Ok((conversation, message))
+}
+
+fn direct_message_target_error(
+    operation: crate::policy::PrivateDirectMessageOperation,
+    target: crate::policy::PrivateDirectMessageTarget,
+) -> String {
+    crate::policy::direct_message_target_gate(operation, target)
+        .expect_err("only unavailable direct-message targets produce an error")
+        .to_string()
+}
+
+#[spacetimedb::reducer]
+pub fn edit_direct_message(
+    ctx: &ReducerContext,
+    message_id: Uuid,
+    body: String,
+    expected_revision: u64,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let input_hash = normalized_input_hash(&format!("{message_id}\0{body}\0{expected_revision}"));
+    let operation = crate::policy::PrivateDirectMessageOperation::Edit;
+    if existing_direct_message_receipt(ctx, operation, client_request_id, &input_hash)? {
+        return Ok(());
+    }
+    validate_text(&body, "direct message body", 50_000)?;
+    let (conversation, mut message) = load_direct_message_author(ctx, message_id, operation)?;
+    require_direct_write(ctx, conversation.id).map_err(|_| {
+        direct_message_target_error(
+            operation,
+            crate::policy::PrivateDirectMessageTarget::AccessRevoked,
+        )
+    })?;
+    if !crate::policy::direct_message_mutation_allowed(
+        true,
+        true,
+        message.revision == expected_revision,
+        message.deleted,
+    ) {
+        return Err("direct message mutation denied or stale".into());
+    }
+    message.body = body;
+    message.revision = message.revision.saturating_add(1);
+    message.edited_at = Some(ctx.timestamp);
+    ctx.db.direct_message().id().update(message);
+    insert_private_receipt(
+        ctx,
+        conversation.workspace_id,
+        "edit_direct_message",
+        client_request_id,
+        input_hash,
+        "direct_message",
+        message_id,
+    );
+    audit(
+        ctx,
+        AuditInput {
+            workspace_id: conversation.workspace_id,
+            action: "edit_direct_message",
+            resource_type: "direct_message",
+            resource_id: message_id,
+            request_id: client_request_id,
+            effective_principal: "human",
+            summary: "private message edited",
+        },
+    )
+}
+
+#[spacetimedb::reducer]
+pub fn delete_direct_message(
+    ctx: &ReducerContext,
+    message_id: Uuid,
+    expected_revision: u64,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let input_hash = normalized_input_hash(&format!("{message_id}\0{expected_revision}"));
+    let operation = crate::policy::PrivateDirectMessageOperation::Delete;
+    if existing_direct_message_receipt(ctx, operation, client_request_id, &input_hash)? {
+        return Ok(());
+    }
+    let (conversation, mut message) = load_direct_message_author(ctx, message_id, operation)?;
+    require_direct_write(ctx, conversation.id).map_err(|_| {
+        direct_message_target_error(
+            operation,
+            crate::policy::PrivateDirectMessageTarget::AccessRevoked,
+        )
+    })?;
+    if !crate::policy::direct_message_mutation_allowed(
+        true,
+        true,
+        message.revision == expected_revision,
+        message.deleted,
+    ) {
+        return Err("direct message mutation denied or stale".into());
+    }
+    message.body.clear();
+    message.deleted = true;
+    message.revision = message.revision.saturating_add(1);
+    message.deleted_at = Some(ctx.timestamp);
+    ctx.db.direct_message().id().update(message);
+    insert_private_receipt(
+        ctx,
+        conversation.workspace_id,
+        "delete_direct_message",
+        client_request_id,
+        input_hash,
+        "direct_message",
+        message_id,
+    );
+    audit(
+        ctx,
+        AuditInput {
+            workspace_id: conversation.workspace_id,
+            action: "delete_direct_message",
+            resource_type: "direct_message",
+            resource_id: message_id,
+            request_id: client_request_id,
+            effective_principal: "human",
+            summary: "private message deleted",
+        },
+    )
+}
+
+#[spacetimedb::reducer]
+pub fn mark_direct_read(
+    ctx: &ReducerContext,
+    conversation_id: Uuid,
+    last_read_sequence: u64,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let input_hash = normalized_input_hash(&format!("{conversation_id}\0{last_read_sequence}"));
+    if existing_private_receipt(
+        ctx,
+        "mark_direct_read",
+        client_request_id,
+        &input_hash,
+        "direct conversation unavailable",
+    )? {
+        return Ok(());
+    }
+    let conversation = require_direct_access(ctx, conversation_id)?;
+    let current = ctx
+        .db
+        .direct_read_state()
+        .key()
+        .find(direct_read_key(conversation_id, ctx.sender()))
+        .map_or(0, |row| row.last_read_sequence);
+    let maximum = conversation.next_sequence.saturating_sub(1);
+    if !crate::policy::direct_read_advance_allowed(current, last_read_sequence, maximum) {
+        return Err("direct read cursor cannot regress or exceed the append sequence".into());
+    }
+    advance_direct_read_state(ctx, conversation_id, ctx.sender(), last_read_sequence);
+    insert_private_receipt(
+        ctx,
+        conversation.workspace_id,
+        "mark_direct_read",
+        client_request_id,
+        input_hash,
+        "direct_read_state",
+        conversation_id,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn leave_direct_conversation(
+    ctx: &ReducerContext,
+    conversation_id: Uuid,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let input_hash = normalized_input_hash(&conversation_id.to_string());
+    if existing_private_receipt(
+        ctx,
+        "leave_direct_conversation",
+        client_request_id,
+        &input_hash,
+        "direct conversation unavailable",
+    )? {
+        return Ok(());
+    }
+    let conversation = ctx
+        .db
+        .direct_conversation()
+        .id()
+        .find(conversation_id)
+        .ok_or_else(|| "direct conversation unavailable".to_string())?;
+    if !direct_participant_is_active(ctx, &conversation, ctx.sender()) {
+        return Err("direct conversation unavailable".into());
+    }
+    deactivate_direct_participant(ctx, conversation_id, ctx.sender());
+    insert_private_receipt(
+        ctx,
+        conversation.workspace_id,
+        "leave_direct_conversation",
+        client_request_id,
+        input_hash,
+        "direct_conversation",
+        conversation_id,
+    );
+    audit(
+        ctx,
+        AuditInput {
+            workspace_id: conversation.workspace_id,
+            action: "leave_direct_conversation",
+            resource_type: "direct_conversation",
+            resource_id: conversation_id,
+            request_id: client_request_id,
+            effective_principal: "human",
+            summary: "private conversation access ended",
+        },
+    )
+}
+
+#[spacetimedb::reducer]
+pub fn propose_dm_promotion(
+    ctx: &ReducerContext,
+    input: ProposeDmPromotionInput,
+) -> Result<(), String> {
+    let input_hash = normalized_input_hash(&format!(
+        "{}\0{}\0{}\0{}\0{:?}\0{}",
+        input.conversation_id,
+        input.destination_space_id,
+        input.title.trim(),
+        input.body,
+        input.source_message_ids,
+        input.expires_in_seconds,
+    ));
+    if existing_private_receipt(
+        ctx,
+        "propose_dm_promotion",
+        input.client_request_id,
+        &input_hash,
+        "promotion unavailable",
+    )? {
+        return Ok(());
+    }
+    validate_text(&input.title, "promotion title", 200)?;
+    validate_text(&input.body, "promotion body", 50_000)?;
+    if !(60..=604_800).contains(&input.expires_in_seconds) {
+        return Err("promotion expiry must be between 60 seconds and 7 days".into());
+    }
+    if input.source_message_ids.is_empty() || input.source_message_ids.len() > 100 {
+        return Err("promotion requires between 1 and 100 source messages".into());
+    }
+    let conversation = require_direct_write(ctx, input.conversation_id)
+        .map_err(|_| "promotion unavailable".to_string())?;
+    let destination = ctx
+        .db
+        .space()
+        .id()
+        .find(input.destination_space_id)
+        .filter(|space| space.workspace_id == conversation.workspace_id)
+        .ok_or_else(|| "promotion destination unavailable".to_string())?;
+    let participants = active_direct_participants(ctx, &conversation);
+    if participants.len() < 2
+        || !identity_can_write_space(ctx, &destination, ctx.sender())
+        || participants
+            .iter()
+            .any(|participant| !can_read_space(ctx, &destination, participant.identity))
+    {
+        return Err("promotion destination is not authorized for every active participant".into());
+    }
+    let mut seen_sources = Vec::new();
+    let mut source_revisions = Vec::new();
+    for message_id in &input.source_message_ids {
+        if seen_sources.contains(message_id) {
+            return Err("promotion source messages must be unique".into());
+        }
+        seen_sources.push(*message_id);
+        let message = ctx
+            .db
+            .direct_message()
+            .id()
+            .find(*message_id)
+            .filter(|message| message.conversation_id == conversation.id && !message.deleted)
+            .ok_or_else(|| "promotion source unavailable".to_string())?;
+        if !participants
+            .iter()
+            .any(|participant| participant.identity == message.author_identity)
+        {
+            return Err("promotion source author is no longer an active participant".into());
+        }
+        source_revisions.push((message.id, message.revision));
+    }
+    let title = input.title.trim().to_string();
+    let draft_hash = normalized_input_hash(&format!("{title}\0{}", input.body));
+    let source_revision_hash = dm_source_revision_hash(&source_revisions);
+    let participant_epoch_hash = direct_participant_epoch_hash(&participants);
+    let proposal_hash = normalized_input_hash(&format!(
+        "{}\0{}\0{draft_hash}\0{source_revision_hash}\0{participant_epoch_hash}",
+        conversation.id, destination.id
+    ));
+    let proposal_id = new_id(ctx)?;
+    ctx.db.dm_promotion_proposal().insert(DmPromotionProposal {
+        id: proposal_id,
+        conversation_id: conversation.id,
+        workspace_id: conversation.workspace_id,
+        destination_space_id: destination.id,
+        proposer_identity: ctx.sender(),
+        title,
+        body: input.body,
+        draft_hash,
+        source_revision_hash,
+        proposal_hash,
+        participant_epoch_hash,
+        state: DmPromotionState::Pending,
+        revision: 1,
+        expires_at: ctx.timestamp
+            + TimeDuration::from_micros(i64::from(input.expires_in_seconds) * 1_000_000),
+        finalized_post_id: None,
+        created_at: ctx.timestamp,
+        updated_at: ctx.timestamp,
+    });
+    for (ordinal, (message_id, message_revision)) in source_revisions.into_iter().enumerate() {
+        let ordinal = u32::try_from(ordinal).map_err(|_| "too many promotion sources")?;
+        ctx.db.dm_promotion_source().insert(DmPromotionSource {
+            key: dm_promotion_source_key(proposal_id, ordinal),
+            proposal_id,
+            message_id,
+            message_revision,
+            ordinal,
+        });
+    }
+    insert_private_receipt(
+        ctx,
+        conversation.workspace_id,
+        "propose_dm_promotion",
+        input.client_request_id,
+        input_hash,
+        "dm_promotion",
+        proposal_id,
+    );
+    audit(
+        ctx,
+        AuditInput {
+            workspace_id: conversation.workspace_id,
+            action: "propose_dm_promotion",
+            resource_type: "dm_promotion",
+            resource_id: proposal_id,
+            request_id: input.client_request_id,
+            effective_principal: "human",
+            summary: "private promotion proposed",
+        },
+    )
+}
+
+#[spacetimedb::reducer]
+pub fn decide_dm_promotion(
+    ctx: &ReducerContext,
+    proposal_id: Uuid,
+    approve: bool,
+    expected_proposal_hash: String,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let input_hash = normalized_input_hash(&format!(
+        "{proposal_id}\0{approve}\0{expected_proposal_hash}"
+    ));
+    if existing_private_receipt(
+        ctx,
+        "decide_dm_promotion",
+        client_request_id,
+        &input_hash,
+        "promotion unavailable",
+    )? {
+        return Ok(());
+    }
+    let mut proposal = ctx
+        .db
+        .dm_promotion_proposal()
+        .id()
+        .find(proposal_id)
+        .ok_or_else(|| "promotion unavailable".to_string())?;
+    require_direct_access(ctx, proposal.conversation_id)
+        .map_err(|_| "promotion unavailable".to_string())?;
+    if proposal.state != DmPromotionState::Pending
+        || proposal.expires_at <= ctx.timestamp
+        || proposal.proposal_hash != expected_proposal_hash
+    {
+        return Err("promotion decision is stale or unavailable".into());
+    }
+    let key = dm_promotion_consent_key(proposal_id, ctx.sender());
+    if ctx
+        .db
+        .dm_promotion_consent()
+        .key()
+        .find(key.clone())
+        .is_some()
+    {
+        return Err("promotion consent is immutable".into());
+    }
+    let decision = if approve {
+        DmPromotionDecision::Approve
+    } else {
+        DmPromotionDecision::Reject
+    };
+    ctx.db.dm_promotion_consent().insert(DmPromotionConsent {
+        key,
+        proposal_id,
+        identity: ctx.sender(),
+        decision,
+        proposal_hash: proposal.proposal_hash.clone(),
+        decided_at: ctx.timestamp,
+    });
+    if !approve {
+        proposal.state = DmPromotionState::Rejected;
+        proposal.revision = proposal.revision.saturating_add(1);
+        proposal.updated_at = ctx.timestamp;
+        ctx.db.dm_promotion_proposal().id().update(proposal.clone());
+    }
+    insert_private_receipt(
+        ctx,
+        proposal.workspace_id,
+        "decide_dm_promotion",
+        client_request_id,
+        input_hash,
+        "dm_promotion",
+        proposal_id,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn cancel_dm_promotion(
+    ctx: &ReducerContext,
+    proposal_id: Uuid,
+    expected_revision: u64,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let input_hash = normalized_input_hash(&format!("{proposal_id}\0{expected_revision}"));
+    if existing_private_receipt(
+        ctx,
+        "cancel_dm_promotion",
+        client_request_id,
+        &input_hash,
+        "promotion unavailable",
+    )? {
+        return Ok(());
+    }
+    let mut proposal = ctx
+        .db
+        .dm_promotion_proposal()
+        .id()
+        .find(proposal_id)
+        .ok_or_else(|| "promotion unavailable".to_string())?;
+    require_direct_access(ctx, proposal.conversation_id)
+        .map_err(|_| "promotion unavailable".to_string())?;
+    if proposal.proposer_identity != ctx.sender() || proposal.state != DmPromotionState::Pending {
+        return Err("promotion cancellation denied".into());
+    }
+    revision_matches(proposal.revision, expected_revision)?;
+    proposal.state = DmPromotionState::Canceled;
+    proposal.revision = proposal.revision.saturating_add(1);
+    proposal.updated_at = ctx.timestamp;
+    ctx.db.dm_promotion_proposal().id().update(proposal.clone());
+    insert_private_receipt(
+        ctx,
+        proposal.workspace_id,
+        "cancel_dm_promotion",
+        client_request_id,
+        input_hash,
+        "dm_promotion",
+        proposal_id,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn expire_dm_promotion(
+    ctx: &ReducerContext,
+    proposal_id: Uuid,
+    expected_revision: u64,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let input_hash = normalized_input_hash(&format!("{proposal_id}\0{expected_revision}"));
+    if existing_private_receipt(
+        ctx,
+        "expire_dm_promotion",
+        client_request_id,
+        &input_hash,
+        "promotion unavailable",
+    )? {
+        return Ok(());
+    }
+    let mut proposal = ctx
+        .db
+        .dm_promotion_proposal()
+        .id()
+        .find(proposal_id)
+        .ok_or_else(|| "promotion unavailable".to_string())?;
+    require_direct_access(ctx, proposal.conversation_id)
+        .map_err(|_| "promotion unavailable".to_string())?;
+    revision_matches(proposal.revision, expected_revision)?;
+    if proposal.state != DmPromotionState::Pending || proposal.expires_at > ctx.timestamp {
+        return Err("promotion is not eligible for expiry".into());
+    }
+    proposal.state = DmPromotionState::Expired;
+    proposal.revision = proposal.revision.saturating_add(1);
+    proposal.updated_at = ctx.timestamp;
+    ctx.db.dm_promotion_proposal().id().update(proposal.clone());
+    insert_private_receipt(
+        ctx,
+        proposal.workspace_id,
+        "expire_dm_promotion",
+        client_request_id,
+        input_hash,
+        "dm_promotion",
+        proposal_id,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn finalize_dm_promotion(
+    ctx: &ReducerContext,
+    proposal_id: Uuid,
+    expected_revision: u64,
+    client_request_id: Uuid,
+) -> Result<(), String> {
+    let input_hash = normalized_input_hash(&format!("{proposal_id}\0{expected_revision}"));
+    if existing_private_receipt(
+        ctx,
+        "finalize_dm_promotion",
+        client_request_id,
+        &input_hash,
+        "promotion unavailable",
+    )? {
+        return Ok(());
+    }
+    let mut proposal = ctx
+        .db
+        .dm_promotion_proposal()
+        .id()
+        .find(proposal_id)
+        .ok_or_else(|| "promotion unavailable".to_string())?;
+    let conversation = require_direct_write(ctx, proposal.conversation_id)
+        .map_err(|_| "promotion unavailable".to_string())?;
+    let participants = active_direct_participants(ctx, &conversation);
+    let participant_epoch_matches =
+        direct_participant_epoch_hash(&participants) == proposal.participant_epoch_hash;
+    let unanimous_approval = !participants.is_empty()
+        && participants.iter().all(|participant| {
+            ctx.db
+                .dm_promotion_consent()
+                .key()
+                .find(dm_promotion_consent_key(proposal.id, participant.identity))
+                .is_some_and(|consent| {
+                    consent.decision == DmPromotionDecision::Approve
+                        && consent.proposal_hash == proposal.proposal_hash
+                })
+        });
+    let mut sources: Vec<_> = ctx
+        .db
+        .dm_promotion_source()
+        .proposal_id()
+        .filter(proposal.id)
+        .collect();
+    sources.sort_by_key(|source| source.ordinal);
+    let source_bindings = sources
+        .iter()
+        .map(|source| (source.message_id, source.message_revision))
+        .collect::<Vec<_>>();
+    let sources_match = !sources.is_empty()
+        && dm_source_revision_hash(&source_bindings) == proposal.source_revision_hash
+        && sources.iter().all(|source| {
+            ctx.db
+                .direct_message()
+                .id()
+                .find(source.message_id)
+                .is_some_and(|message| {
+                    message.conversation_id == proposal.conversation_id
+                        && message.revision == source.message_revision
+                        && !message.deleted
+                        && participants
+                            .iter()
+                            .any(|participant| participant.identity == message.author_identity)
+                })
+        });
+    let destination = ctx
+        .db
+        .space()
+        .id()
+        .find(proposal.destination_space_id)
+        .filter(|space| space.workspace_id == proposal.workspace_id);
+    let destination_authorized = destination.as_ref().is_some_and(|space| {
+        identity_can_write_space(ctx, space, proposal.proposer_identity)
+            && participants
+                .iter()
+                .all(|participant| can_read_space(ctx, space, participant.identity))
+    });
+    if proposal.revision != expected_revision
+        || !crate::policy::direct_promotion_finalize_allowed(
+            proposal.state == DmPromotionState::Pending,
+            proposal.expires_at > ctx.timestamp,
+            participant_epoch_matches,
+            unanimous_approval,
+            sources_match,
+            destination_authorized,
+            proposal.finalized_post_id.is_none(),
+        )
+    {
+        return Err("promotion finalization is stale or unauthorized".into());
+    }
+    let destination = destination.ok_or_else(|| "promotion destination unavailable".to_string())?;
+    let post_id = new_id(ctx)?;
+    let post = Post {
+        id: post_id,
+        workspace_id: proposal.workspace_id,
+        space_id: destination.id,
+        author_identity: proposal.proposer_identity,
+        owner_identity: proposal.proposer_identity,
+        assignee_identity: None,
+        kind: PostKind::Discussion,
+        state: PostState::Active,
+        locked: false,
+        title: proposal.title.clone(),
+        body: proposal.body.clone(),
+        revision: 1,
+        activity_sequence: 1,
+        last_activity_at: ctx.timestamp,
+        deleted: false,
+        created_at: ctx.timestamp,
+        updated_at: ctx.timestamp,
+    };
+    ctx.db.post().insert(post.clone());
+    ctx.db.post_activity().insert(PostActivity {
+        key: post_activity_key(post_id, 1),
+        post_id,
+        sequence: 1,
+        actor_identity: proposal.proposer_identity,
+        kind: "created".into(),
+        summary: "Post created".into(),
+        created_at: ctx.timestamp,
+    });
+    ctx.db.post_user_state().insert(PostUserState {
+        key: post_identity_key(post_id, proposal.proposer_identity),
+        post_id,
+        identity: proposal.proposer_identity,
+        following: true,
+        bookmarked: false,
+        last_read_sequence: 1,
+        read_at: Some(ctx.timestamp),
+        updated_at: ctx.timestamp,
+    });
+    enqueue_search_snapshot(
+        ctx,
+        SearchSnapshotInput {
+            workspace_id: post.workspace_id,
+            space_id: post.space_id,
+            resource_type: "post",
+            resource_id: post.id,
+            resource_revision: post.revision,
+            title: &post.title,
+            body: &post.body,
+            tombstone: false,
+        },
+    )?;
+    proposal.state = DmPromotionState::Finalized;
+    proposal.finalized_post_id = Some(post_id);
+    proposal.revision = proposal.revision.saturating_add(1);
+    proposal.updated_at = ctx.timestamp;
+    ctx.db.dm_promotion_proposal().id().update(proposal.clone());
+    insert_private_receipt(
+        ctx,
+        proposal.workspace_id,
+        "finalize_dm_promotion",
+        client_request_id,
+        input_hash,
+        "post",
+        post_id,
+    );
+    audit(
+        ctx,
+        AuditInput {
+            workspace_id: proposal.workspace_id,
+            action: "finalize_dm_promotion",
+            resource_type: "dm_promotion",
+            resource_id: proposal.id,
+            request_id: client_request_id,
+            effective_principal: "human",
+            summary: "private promotion finalized",
+        },
+    )
 }
 
 #[spacetimedb::reducer]
@@ -2379,12 +4800,23 @@ pub fn create_task(
     });
     enqueue_outbox(
         ctx,
-        workspace_id,
-        "deliver_notification",
-        "notification",
-        notification_id,
-        0,
-        format!("notification:{notification_id}"),
+        OutboxInsert {
+            workspace_id,
+            kind: JOB_NOTIFICATION_DELIVER,
+            resource_type: "notification",
+            resource_id: notification_id,
+            resource_revision: 0,
+            effect_key: format!("notification:{notification_id}"),
+            payload: OutboxSemanticPayload {
+                intent_id: Some(notification_id),
+                recipient_id: Some(assignee.identity),
+                channel: "email".into(),
+                authorization_epoch: Some(assignee.authz_epoch),
+                minimal_message: "You were assigned a task".into(),
+                payload_resource_id: Some(id),
+                ..Default::default()
+            },
+        },
     )?;
     insert_receipt(
         ctx,
@@ -2653,12 +5085,19 @@ pub fn complete_file_upload(
     ctx.db.file_version().key().update(version);
     enqueue_outbox(
         ctx,
-        file.workspace_id,
-        "file_scan",
-        "file",
-        file.id,
-        file.revision,
-        format!("file:{file_id}:scan:{}", file.revision),
+        OutboxInsert {
+            workspace_id: file.workspace_id,
+            kind: JOB_FILE_SCAN,
+            resource_type: "file",
+            resource_id: file.id,
+            resource_revision: file.revision,
+            effect_key: format!("file:{file_id}:scan:{}", file.revision),
+            payload: OutboxSemanticPayload {
+                file_id: Some(file.id),
+                version: Some(file.revision),
+                ..Default::default()
+            },
+        },
     )?;
     insert_receipt(
         ctx,
@@ -2695,7 +5134,7 @@ pub fn record_file_scan_outcome(
         .id()
         .find(file_id)
         .ok_or_else(|| "file not found".to_string())?;
-    validate_file_job_lease(ctx, job_id, lease_generation, &file, "file_scan")?;
+    validate_file_job_lease(ctx, job_id, lease_generation, &file, "file.scan")?;
     revision_matches(file.revision, expected_revision)?;
     if file.state != FileSecurityState::Uploaded && file.state != FileSecurityState::Scanning {
         return Err("file is not scannable".into());
@@ -2738,12 +5177,19 @@ pub fn record_file_scan_outcome(
     if clean {
         enqueue_outbox(
             ctx,
-            file.workspace_id,
-            "file_extract",
-            "file",
-            file.id,
-            file.revision,
-            format!("file:{file_id}:extract:{}", file.revision),
+            OutboxInsert {
+                workspace_id: file.workspace_id,
+                kind: JOB_FILE_EXTRACT,
+                resource_type: "file",
+                resource_id: file.id,
+                resource_revision: file.revision,
+                effect_key: format!("file:{file_id}:extract:{}", file.revision),
+                payload: OutboxSemanticPayload {
+                    file_id: Some(file.id),
+                    version: Some(file.revision),
+                    ..Default::default()
+                },
+            },
         )?;
     }
     Ok(())
@@ -2770,7 +5216,7 @@ pub fn record_file_extraction(
         .id()
         .find(file_id)
         .ok_or_else(|| "file not found".to_string())?;
-    validate_file_job_lease(ctx, job_id, lease_generation, &file, "file_extract")?;
+    validate_file_job_lease(ctx, job_id, lease_generation, &file, "file.extract")?;
     revision_matches(file.revision, expected_revision)?;
     if file.state != FileSecurityState::Clean {
         return Err("only clean files may record extraction".into());
@@ -2839,12 +5285,19 @@ pub fn delete_file(
     ctx.db.file_version().key().update(version);
     enqueue_outbox(
         ctx,
-        file.workspace_id,
-        "file_cleanup",
-        "file",
-        file.id,
-        file.revision,
-        format!("file:{file_id}:cleanup:{}", file.revision),
+        OutboxInsert {
+            workspace_id: file.workspace_id,
+            kind: JOB_FILE_CLEANUP,
+            resource_type: "file",
+            resource_id: file.id,
+            resource_revision: file.revision,
+            effect_key: format!("file:{file_id}:cleanup:{}", file.revision),
+            payload: OutboxSemanticPayload {
+                file_id: Some(file.id),
+                version: Some(file.revision),
+                ..Default::default()
+            },
+        },
     )?;
     insert_receipt(
         ctx,
@@ -2962,6 +5415,10 @@ pub fn set_service_grant(
 ) -> Result<(), String> {
     let caller_subject = verified_oidc_subject(ctx)?;
     validate_text(&kind, "service grant kind", 120)?;
+    let kind = kind.trim().to_string();
+    if crate::policy::CanonicalJobKind::parse(&kind).is_none() {
+        return Err("service grant kind is not a canonical worker job kind".into());
+    }
     let input_hash = normalized_input_hash(&format!(
         "{service_identity}\0{workspace_id}\0{}\0{enabled}",
         kind.trim()
@@ -3597,6 +6054,21 @@ pub fn start_agent_run(
         created_at: ctx.timestamp,
         updated_at: ctx.timestamp,
     });
+    enqueue_outbox(
+        ctx,
+        OutboxInsert {
+            workspace_id: thread.workspace_id,
+            kind: JOB_AGENT_RUN,
+            resource_type: "agent_run",
+            resource_id: id,
+            resource_revision: 1,
+            effect_key: format!("agent-run:{id}"),
+            payload: OutboxSemanticPayload {
+                run_id: Some(id),
+                ..Default::default()
+            },
+        },
+    )?;
     ctx.db.agent_run_event().insert(AgentRunEvent {
         id: new_id(ctx)?,
         run_id: id,
@@ -3645,7 +6117,7 @@ pub fn claim_agent_run(
         .id()
         .find(run_id)
         .ok_or_else(|| "agent run not found".to_string())?;
-    require_service(ctx, run.workspace_id, "agent")?;
+    require_service(ctx, run.workspace_id, "agent.run")?;
     revision_matches(run.version, expected_version)?;
     let installation = ctx
         .db
@@ -3720,7 +6192,7 @@ pub fn heartbeat_agent_run(
         .id()
         .find(run_id)
         .ok_or_else(|| "agent run not found".to_string())?;
-    require_service(ctx, run.workspace_id, "agent")?;
+    require_service(ctx, run.workspace_id, "agent.run")?;
     validate_agent_lease(ctx, &run, lease_generation, false, true)?;
     if is_terminal(run.state) {
         return Err("terminal agent runs cannot be renewed".into());
@@ -3750,7 +6222,7 @@ pub fn append_agent_run_event(
         .id()
         .find(run_id)
         .ok_or_else(|| "agent run not found".to_string())?;
-    require_service(ctx, run.workspace_id, "agent")?;
+    require_service(ctx, run.workspace_id, "agent.run")?;
     revision_matches(run.version, expected_version)?;
     validate_agent_lease(ctx, &run, lease_generation, false, true)?;
     if !agent_event_transition_allowed(run.state, next_state) {
@@ -3799,7 +6271,7 @@ pub fn record_agent_context_post(
         .id()
         .find(run_id)
         .ok_or_else(|| "agent run not found".to_string())?;
-    require_service(ctx, run.workspace_id, "agent")?;
+    require_service(ctx, run.workspace_id, "agent.run")?;
     validate_agent_lease(ctx, &run, lease_generation, false, true)?;
     if run.state != AgentRunState::CollectingContext {
         return Err("context may only be recorded while collecting context".into());
@@ -3888,7 +6360,7 @@ pub fn record_agent_context_contribution(
         .id()
         .find(run_id)
         .ok_or_else(|| "agent run not found".to_string())?;
-    require_service(ctx, run.workspace_id, "agent")?;
+    require_service(ctx, run.workspace_id, "agent.run")?;
     validate_agent_lease(ctx, &run, lease_generation, false, true)?;
     if run.state != AgentRunState::CollectingContext
         || !agent_scope_enabled(
@@ -3985,7 +6457,7 @@ pub fn request_agent_tool_call(
         .id()
         .find(run_id)
         .ok_or_else(|| "agent run not found".to_string())?;
-    require_service(ctx, run.workspace_id, "agent")?;
+    require_service(ctx, run.workspace_id, "agent.run")?;
     revision_matches(run.version, expected_version)?;
     validate_agent_lease(ctx, &run, lease_generation, false, true)?;
     if run.state != AgentRunState::Running {
@@ -4236,7 +6708,7 @@ pub fn expire_tool_approval(ctx: &ReducerContext, approval_id: Uuid) -> Result<(
         .id()
         .find(approval.run_id)
         .ok_or_else(|| "agent run not found".to_string())?;
-    require_service(ctx, run.workspace_id, "agent")?;
+    require_service(ctx, run.workspace_id, "agent.run")?;
     if approval.state != ApprovalState::Pending || approval.expires_at > ctx.timestamp {
         return Err("approval is not expired and pending".into());
     }
@@ -4280,7 +6752,7 @@ pub fn acquire_agent_tool_effect(
         .id()
         .find(tool.run_id)
         .ok_or_else(|| "agent run not found".to_string())?;
-    require_service(ctx, run.workspace_id, "agent")?;
+    require_service(ctx, run.workspace_id, "agent.run")?;
     let mut ledger = ctx
         .db
         .effect_ledger()
@@ -4385,7 +6857,7 @@ pub fn reconcile_agent_tool_effect(
         .id()
         .find(tool.run_id)
         .ok_or_else(|| "agent run not found".to_string())?;
-    require_service(ctx, run.workspace_id, "agent")?;
+    require_service(ctx, run.workspace_id, "agent.run")?;
     validate_agent_lease(ctx, &run, lease_generation, false, true)?;
     let mut ledger = ctx
         .db
@@ -4464,7 +6936,7 @@ pub fn record_tool_outcome(
         .id()
         .find(tool.run_id)
         .ok_or_else(|| "agent run not found".to_string())?;
-    require_service(ctx, run.workspace_id, "agent")?;
+    require_service(ctx, run.workspace_id, "agent.run")?;
     validate_agent_lease(ctx, &run, lease_generation, false, true)?;
     if run.state != AgentRunState::ExecutingTool || tool.state != ToolCallState::Executing {
         return Err("tool call is not executable".into());
@@ -4531,7 +7003,7 @@ pub fn complete_agent_run(
         .id()
         .find(run_id)
         .ok_or_else(|| "agent run not found".to_string())?;
-    require_service(ctx, run.workspace_id, "agent")?;
+    require_service(ctx, run.workspace_id, "agent.run")?;
     revision_matches(run.version, expected_version)?;
     let installation = validate_agent_lease(ctx, &run, lease_generation, false, true)?;
     if used_tokens > installation.max_run_tokens
@@ -4611,6 +7083,21 @@ pub fn complete_agent_run(
         )
         && let Some(thread_id) = run.thread_id
     {
+        let thread = ctx
+            .db
+            .named_thread()
+            .id()
+            .find(thread_id)
+            .ok_or_else(|| "agent output thread not found".to_string())?;
+        let mut post = ctx
+            .db
+            .post()
+            .id()
+            .find(thread.root_post_id)
+            .ok_or_else(|| "agent output root post not found".to_string())?;
+        if thread.archived || post.deleted || post.locked || post.state == PostState::Archived {
+            return Err("agent output destination is closed".into());
+        }
         let contribution_id = new_id(ctx)?;
         insert_contribution_ancestry(ctx, contribution_id, thread_id, None)?;
         ctx.db.contribution().insert(Contribution {
@@ -4629,12 +7116,8 @@ pub fn complete_agent_run(
             updated_at: ctx.timestamp,
         });
         run.final_contribution_id = Some(contribution_id);
-        let thread = ctx
-            .db
-            .named_thread()
-            .id()
-            .find(thread_id)
-            .ok_or_else(|| "agent output thread not found".to_string())?;
+        append_post_activity(ctx, &mut post, "agent_output_added", "Agent output added")?;
+        ctx.db.post().id().update(post);
         enqueue_search_snapshot(
             ctx,
             SearchSnapshotInput {
@@ -4692,8 +7175,12 @@ pub fn claim_outbox_job(
     ctx: &ReducerContext,
     job_id: Uuid,
     expected_generation: u64,
+    worker_slot_id: String,
     lease_seconds: u32,
 ) -> Result<(), String> {
+    if !crate::policy::worker_slot_id_valid(&worker_slot_id) {
+        return Err("worker slot id is invalid".into());
+    }
     if !(1..=300).contains(&lease_seconds) {
         return Err("outbox lease must be between 1 and 300 seconds".into());
     }
@@ -4708,6 +7195,7 @@ pub fn claim_outbox_job(
         job.state = OutboxState::DeadLetter;
         job.last_error = "outbox_limits_exhausted".into();
         job.lease_owner = None;
+        job.worker_slot_id.clear();
         job.lease_until = None;
         job.updated_at = ctx.timestamp;
         ctx.db.outbox_job().id().update(job);
@@ -4729,6 +7217,7 @@ pub fn claim_outbox_job(
     job.state = OutboxState::Leased;
     job.attempt = job.attempt.saturating_add(1);
     job.lease_owner = Some(ctx.sender());
+    job.worker_slot_id = worker_slot_id;
     job.lease_until =
         Some(ctx.timestamp + TimeDuration::from_micros(i64::from(lease_seconds) * 1_000_000));
     job.lease_generation = job.lease_generation.saturating_add(1);
@@ -4742,8 +7231,12 @@ pub fn heartbeat_outbox_job(
     ctx: &ReducerContext,
     job_id: Uuid,
     lease_generation: u64,
+    worker_slot_id: String,
     lease_seconds: u32,
 ) -> Result<(), String> {
+    if !crate::policy::worker_slot_id_valid(&worker_slot_id) {
+        return Err("worker slot id is invalid".into());
+    }
     if !(1..=300).contains(&lease_seconds) {
         return Err("outbox lease must be between 1 and 300 seconds".into());
     }
@@ -4756,6 +7249,7 @@ pub fn heartbeat_outbox_job(
     require_service(ctx, job.workspace_id, &job.kind)?;
     if job.state != OutboxState::Leased
         || job.lease_owner != Some(ctx.sender())
+        || job.worker_slot_id != worker_slot_id
         || job.lease_generation != lease_generation
         || job.lease_until.is_none_or(|expiry| expiry <= ctx.timestamp)
     {
@@ -4769,14 +7263,57 @@ pub fn heartbeat_outbox_job(
 }
 
 #[spacetimedb::reducer]
+pub fn recover_outbox_job(
+    ctx: &ReducerContext,
+    job_id: Uuid,
+    expected_generation: u64,
+    worker_slot_id: String,
+    lease_seconds: u32,
+) -> Result<(), String> {
+    if !crate::policy::worker_slot_id_valid(&worker_slot_id) {
+        return Err("worker slot id is invalid".into());
+    }
+    if !(1..=300).contains(&lease_seconds) {
+        return Err("outbox recovery lease must be between 1 and 300 seconds".into());
+    }
+    let mut job = ctx
+        .db
+        .outbox_job()
+        .id()
+        .find(job_id)
+        .ok_or_else(|| "outbox job not found".to_string())?;
+    require_service(ctx, job.workspace_id, &job.kind)?;
+    if !crate::policy::outbox_recovery_allowed(
+        job.state == OutboxState::Leased,
+        job.lease_owner == Some(ctx.sender()),
+        job.worker_slot_id == worker_slot_id,
+        job.lease_generation == expected_generation,
+        job.lease_until.is_some_and(|expiry| expiry > ctx.timestamp),
+    ) {
+        return Err("owned outbox lease is unavailable for recovery".into());
+    }
+    job.lease_generation = crate::policy::recovered_outbox_generation(job.lease_generation)
+        .ok_or_else(|| "outbox lease generation exhausted".to_string())?;
+    job.lease_until =
+        Some(ctx.timestamp + TimeDuration::from_micros(i64::from(lease_seconds) * 1_000_000));
+    job.updated_at = ctx.timestamp;
+    ctx.db.outbox_job().id().update(job);
+    Ok(())
+}
+
+#[spacetimedb::reducer]
 pub fn complete_outbox_job(
     ctx: &ReducerContext,
     job_id: Uuid,
     lease_generation: u64,
+    worker_slot_id: String,
     outcome: OutboxState,
     last_error: String,
     retry_after_seconds: u32,
 ) -> Result<(), String> {
+    if !crate::policy::worker_slot_id_valid(&worker_slot_id) {
+        return Err("worker slot id is invalid".into());
+    }
     if !matches!(
         outcome,
         OutboxState::Succeeded
@@ -4798,6 +7335,7 @@ pub fn complete_outbox_job(
     require_service(ctx, job.workspace_id, &job.kind)?;
     if job.state != OutboxState::Leased
         || job.lease_owner != Some(ctx.sender())
+        || job.worker_slot_id != worker_slot_id
         || job.lease_generation != lease_generation
         || job.lease_until.is_none_or(|expiry| expiry <= ctx.timestamp)
     {
@@ -4808,6 +7346,7 @@ pub fn complete_outbox_job(
     job.next_attempt_at = ctx.timestamp
         + TimeDuration::from_micros(i64::from(retry_after_seconds.min(86_400)) * 1_000_000);
     job.lease_owner = None;
+    job.worker_slot_id.clear();
     job.lease_until = None;
     job.updated_at = ctx.timestamp;
     ctx.db.outbox_job().id().update(job);

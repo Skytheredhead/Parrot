@@ -20,7 +20,7 @@
   "scripts": {
     "build": "pnpm -r --if-present build",
     "db:build:production": "bash scripts/build-spacetimedb-production.sh",
-    "check": "pnpm verify:names && pnpm verify:secrets && pnpm verify:production-bootstrap-guard && pnpm verify:infra && pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm verify:gateway-package",
+    "check": "pnpm verify:names && pnpm verify:secrets && pnpm verify:production-bootstrap-guard && pnpm verify:infra && pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm test:job-envelope-contract && pnpm build && pnpm verify:gateway-package",
     "db:generate": "bash scripts/generate-db-bindings.sh",
     "format": "biome format --write .",
     "format:check": "biome format .",
@@ -28,6 +28,7 @@
     "test": "pnpm -r --if-present test",
     "test:spacetimedb": "bash scripts/test-spacetime-smoke.sh",
     "test:spacetimedb:oidc": "bash scripts/test-spacetime-oidc.sh",
+    "test:job-envelope-contract": "bash scripts/test-job-envelope-contract.sh",
     "test:coverage": "pnpm -r --if-present test:coverage",
     "typecheck": "pnpm -r --if-present typecheck",
     "verify:toolchain": "bash scripts/verify-toolchain.sh",

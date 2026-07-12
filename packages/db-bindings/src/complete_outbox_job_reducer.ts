@@ -17,6 +17,7 @@ import {
 export default {
   jobId: __t.uuid(),
   leaseGeneration: __t.u64(),
+  workerSlotId: __t.string(),
   get outcome() {
     return OutboxState;
   },

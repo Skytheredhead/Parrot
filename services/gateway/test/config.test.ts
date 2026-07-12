@@ -53,6 +53,16 @@ describe("loadConfig", () => {
     ).toThrow(/__Host-/);
   });
 
+  it("bounds the destructive session fresh-auth window", () => {
+    expect(() => loadConfig({ ...required, SESSION_FRESH_AUTH_MAX_AGE_SECONDS: "59" })).toThrow();
+    expect(() => loadConfig({ ...required, SESSION_FRESH_AUTH_MAX_AGE_SECONDS: "901" })).toThrow();
+    expect(loadConfig({ ...required, SESSION_FRESH_AUTH_MAX_AGE_SECONDS: "300" }).sessions).toEqual(
+      {
+        freshAuthMaxAgeSeconds: 300,
+      },
+    );
+  });
+
   it.each([
     { OIDC_JWKS_URI: "https://other.test/jwks" },
     { OIDC_JWKS_URI: "https://user:password@issuer.test/jwks" },

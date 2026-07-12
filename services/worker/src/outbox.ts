@@ -93,7 +93,7 @@ const semanticResource = (job: Pick<OutboxJob, "kind" | "payload">): string => {
       return `intent:${payloadField(job.payload, "intentId")}`;
     case "search.upsert":
     case "search.tombstone":
-      return `resource:${payloadField(job.payload, "resourceId")}:version:${payloadField(job.payload, "version")}`;
+      return `resource:${payloadField(job.payload, "resourceId")}:acl:${payloadField(job.payload, "aclRevision")}:revision:${payloadField(job.payload, "resourceRevision")}`;
     case "search.rebuild":
       return `rebuild:${payloadField(job.payload, "rebuildId")}:generation:${payloadField(job.payload, "generation")}`;
     case "file.scan":
@@ -138,6 +138,7 @@ const runWithDeadline = async <T>(
   parentSignal: AbortSignal,
   timeoutMs: number,
   operation: (signal: AbortSignal) => Promise<T>,
+  timeoutCode = "handler_timeout",
 ): Promise<T> => {
   const controller = new AbortController();
   let timeout: NodeJS.Timeout | undefined;
@@ -151,17 +152,21 @@ const runWithDeadline = async <T>(
     rejectAbort?.(reason);
   };
   const onParentAbort = (): void => abort(parentSignal.reason ?? new StaleLeaseError("unknown"));
-  parentSignal.addEventListener("abort", onParentAbort, { once: true });
+  if (parentSignal.aborted) onParentAbort();
+  else parentSignal.addEventListener("abort", onParentAbort, { once: true });
   timeout = setTimeout(() => {
-    const error = new Error("Handler exceeded its execution deadline");
-    error.name = "handler_timeout";
+    const error = new Error(timeoutCode);
+    error.name = timeoutCode;
     abort(error);
   }, timeoutMs);
+  timeout.unref?.();
+  const pending = Promise.resolve().then(() => operation(controller.signal));
   try {
-    return await Promise.race([operation(controller.signal), abortPromise]);
+    return await Promise.race([pending, abortPromise]);
   } finally {
     if (timeout) clearTimeout(timeout);
     parentSignal.removeEventListener("abort", onParentAbort);
+    void pending.catch(() => undefined);
   }
 };
 
@@ -180,6 +185,10 @@ export interface RuntimeAdapter {
   readonly adapterName: string;
   /** Side-effect-free executable contract self-test; production composition invokes it. */
   assertProductionReady?(): boolean;
+  /** Bounded live dependency check used by the process readiness endpoint. */
+  ready?(signal: AbortSignal): Promise<boolean>;
+  /** Optional bounded resource cleanup invoked after polling has drained or aborted. */
+  close?(signal: AbortSignal): Promise<void>;
 }
 
 export class RetryPolicy {
@@ -202,9 +211,22 @@ export class RetryPolicy {
 
 export interface OutboxStore extends RuntimeAdapter {
   enqueue(job: OutboxJob): Promise<void>;
-  claim(
-    owner: string,
+  /**
+   * Atomically finds an unexpired lease owned by the authenticated adapter identity and exact
+   * `workerSlotId`, atomically advances the generation, extends the lease to at least
+   * `now + leaseMs`, and returns only that new fence. Implementations must never preserve the old
+   * generation or return expired/foreign-slot leases. This is the response-loss restart takeover
+   * step and must run before `claim`.
+   */
+  recoverOwned(
+    workerSlotId: string,
     leaseMs: number,
+    signal?: AbortSignal,
+  ): Promise<{ readonly job: OutboxJob; readonly lease: LeaseToken } | undefined>;
+  claim(
+    workerSlotId: string,
+    leaseMs: number,
+    signal?: AbortSignal,
   ): Promise<{ readonly job: OutboxJob; readonly lease: LeaseToken } | undefined>;
   heartbeat(lease: LeaseToken, leaseExpiresAt: number): Promise<LeaseToken>;
   complete(lease: LeaseToken, result?: JsonValue): Promise<void>;
@@ -215,7 +237,12 @@ export interface OutboxStore extends RuntimeAdapter {
 }
 
 const withoutLease = (job: OutboxJob): OutboxJob => {
-  const { leaseOwner: _owner, leaseExpiresAt: _expiry, ...rest } = job;
+  const {
+    leaseOwner: _owner,
+    leaseWorkerSlotId: _workerSlotId,
+    leaseExpiresAt: _expiry,
+    ...rest
+  } = job;
   return rest;
 };
 
@@ -231,10 +258,60 @@ export class InMemoryTransactionalOutbox implements OutboxStore {
     if (!this.jobs.has(job.id)) this.jobs.set(job.id, structuredClone(job));
   }
 
-  async claim(
-    owner: string,
+  async recoverOwned(
+    workerSlotId: string,
     leaseMs: number,
+    signal?: AbortSignal,
   ): Promise<{ readonly job: OutboxJob; readonly lease: LeaseToken } | undefined> {
+    if (signal?.aborted)
+      throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
+    const now = this.clock.now();
+    const owned = [...this.jobs.values()]
+      .filter(
+        (job) =>
+          job.state === "leased" &&
+          job.leaseOwner === this.adapterName &&
+          job.leaseWorkerSlotId === workerSlotId &&
+          (job.leaseExpiresAt ?? 0) > now,
+      )
+      .sort(
+        (a, b) =>
+          (a.leaseExpiresAt ?? 0) - (b.leaseExpiresAt ?? 0) ||
+          a.createdAt - b.createdAt ||
+          a.id.localeCompare(b.id),
+      )[0];
+    if (!owned) return undefined;
+
+    if (!Number.isSafeInteger(owned.leaseGeneration + 1)) {
+      throw new StaleLeaseError(owned.id);
+    }
+    const generation = owned.leaseGeneration + 1;
+    const expiresAt = Math.max(owned.leaseExpiresAt ?? 0, now + leaseMs);
+    const recovered: OutboxJob = {
+      ...owned,
+      leaseGeneration: generation,
+      leaseExpiresAt: expiresAt,
+    };
+    this.jobs.set(recovered.id, recovered);
+    return {
+      job: structuredClone(recovered),
+      lease: {
+        jobId: recovered.id,
+        owner: this.adapterName,
+        workerSlotId,
+        generation,
+        expiresAt,
+      },
+    };
+  }
+
+  async claim(
+    workerSlotId: string,
+    leaseMs: number,
+    signal?: AbortSignal,
+  ): Promise<{ readonly job: OutboxJob; readonly lease: LeaseToken } | undefined> {
+    if (signal?.aborted)
+      throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
     const now = this.clock.now();
     const eligible = [...this.jobs.values()]
       .filter(
@@ -257,14 +334,21 @@ export class InMemoryTransactionalOutbox implements OutboxStore {
       ...withoutLease(eligible),
       state: "leased",
       attempt: eligible.attempt + 1,
-      leaseOwner: owner,
+      leaseOwner: this.adapterName,
+      leaseWorkerSlotId: workerSlotId,
       leaseExpiresAt: expiresAt,
       leaseGeneration: generation,
     };
     this.jobs.set(claimed.id, claimed);
     return {
       job: structuredClone(claimed),
-      lease: { jobId: claimed.id, owner, generation, expiresAt },
+      lease: {
+        jobId: claimed.id,
+        owner: this.adapterName,
+        workerSlotId,
+        generation,
+        expiresAt,
+      },
     };
   }
 
@@ -323,6 +407,7 @@ export class InMemoryTransactionalOutbox implements OutboxStore {
     if (
       job?.state !== "leased" ||
       job.leaseOwner !== lease.owner ||
+      job.leaseWorkerSlotId !== lease.workerSlotId ||
       job.leaseGeneration !== lease.generation ||
       (job.leaseExpiresAt ?? 0) <= this.clock.now()
     ) {
@@ -335,6 +420,10 @@ export class InMemoryTransactionalOutbox implements OutboxStore {
 export interface EffectAcquireInput extends EffectClaim {
   readonly payloadFingerprint: string;
   readonly leaseExpiresAt: number;
+  /**
+   * Allows takeover after expiry or immediately when the same durable owner presents a strictly
+   * newer authoritative generation. The latter fences a still-running pre-recovery process.
+   */
   readonly allowTakeover?: boolean;
 }
 
@@ -417,7 +506,9 @@ export class InMemoryEffectLedger implements EffectLedger {
       };
     }
     const expired = existing.leaseExpiresAt <= this.clock.now();
-    if (!input.allowTakeover || !expired) {
+    const newerGenerationForSameOwner =
+      existing.ownerId === input.ownerId && input.ownerGeneration > existing.ownerGeneration;
+    if (!input.allowTakeover || (!expired && !newerGenerationForSameOwner)) {
       return { acquired: false, record: structuredClone(existing) };
     }
     const previousState = existing.state;
@@ -555,6 +646,7 @@ export interface OutboxConsumerOptions {
   readonly heartbeatMs?: number;
   readonly handlerTimeoutMs?: number;
   readonly heartbeatTimeoutMs?: number;
+  readonly claimTimeoutMs?: number;
   readonly shutdownTimeoutMs?: number;
 }
 
@@ -579,6 +671,71 @@ const boundedWait = async <T>(
   }
 };
 
+type ClaimedOutboxJob = {
+  readonly job: OutboxJob;
+  readonly lease: LeaseToken;
+};
+
+interface InFlightAcquisition {
+  readonly controller: AbortController;
+  readonly promise: Promise<ClaimedOutboxJob | undefined>;
+}
+
+const awaitRetainedOperation = async <T>(
+  operation: Promise<T>,
+  parentSignal: AbortSignal,
+  timeoutMs: number,
+  timeoutCode: string,
+  cancel: (reason: unknown) => void,
+): Promise<{
+  readonly operationSettled: boolean;
+  readonly value?: T;
+  readonly error?: unknown;
+}> => {
+  type Winner =
+    | { readonly type: "operation"; readonly value: T }
+    | { readonly type: "operation_error"; readonly error: unknown }
+    | { readonly type: "timeout"; readonly error: Error }
+    | { readonly type: "abort"; readonly error: unknown };
+
+  let timer: NodeJS.Timeout | undefined;
+  let resolveAbort: ((winner: Winner) => void) | undefined;
+  const aborted = new Promise<Winner>((resolve) => {
+    resolveAbort = resolve;
+  });
+  const onAbort = (): void => {
+    const error = parentSignal.reason ?? new StaleLeaseError("unknown");
+    cancel(error);
+    resolveAbort?.({ type: "abort", error });
+  };
+  if (parentSignal.aborted) onAbort();
+  else parentSignal.addEventListener("abort", onAbort, { once: true });
+  const timedOut = new Promise<Winner>((resolve) => {
+    timer = setTimeout(() => {
+      const error = new Error(timeoutCode);
+      error.name = timeoutCode;
+      resolve({ type: "timeout", error });
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  const settled = operation.then<Winner, Winner>(
+    (value) => ({ type: "operation", value }),
+    (error: unknown) => ({ type: "operation_error", error }),
+  );
+
+  try {
+    const winner = await Promise.race([settled, timedOut, aborted]);
+    if (winner.type === "operation") return { operationSettled: true, value: winner.value };
+    if (winner.type === "operation_error") {
+      return { operationSettled: true, error: winner.error };
+    }
+    return { operationSettled: false, error: winner.error };
+  } finally {
+    if (timer) clearTimeout(timer);
+    parentSignal.removeEventListener("abort", onAbort);
+  }
+};
+
 class LeaseController {
   readonly signal: AbortSignal;
   private readonly abortController = new AbortController();
@@ -597,12 +754,21 @@ class LeaseController {
     private readonly clock: Clock,
     private readonly store: OutboxStore,
     private readonly effects: EffectLedger,
+    parentSignal?: AbortSignal,
   ) {
     this.current = lease;
     this.signal = this.abortController.signal;
+    if (parentSignal) {
+      if (parentSignal.aborted) this.abort(parentSignal.reason);
+      else
+        parentSignal.addEventListener("abort", () => this.abort(parentSignal.reason), {
+          once: true,
+        });
+    }
   }
 
   start(): void {
+    if (this.stopped) return;
     this.timer = setInterval(() => void this.queueRenewal(), this.heartbeatMs);
     this.timer.unref?.();
   }
@@ -623,6 +789,12 @@ class LeaseController {
 
   lease(): LeaseToken {
     return this.current;
+  }
+
+  abort(reason: unknown): void {
+    this.stopped = true;
+    if (this.timer) clearInterval(this.timer);
+    if (!this.abortController.signal.aborted) this.abortController.abort(reason);
   }
 
   async stop(): Promise<void> {
@@ -680,6 +852,8 @@ class LeaseController {
 }
 
 export class OutboxConsumer {
+  private acquisitionInFlight: InFlightAcquisition | undefined;
+
   constructor(
     private readonly options: OutboxConsumerOptions,
     private readonly clock: Clock,
@@ -691,11 +865,13 @@ export class OutboxConsumer {
     private readonly telemetry: OpenTelemetry,
   ) {}
 
-  async tick(): Promise<boolean> {
-    const claimed = await this.store.claim(this.options.workerId, this.options.leaseMs);
+  async tick(signal?: AbortSignal): Promise<boolean> {
+    const parentSignal = signal ?? new AbortController().signal;
+    const claimed = await this.acquire(parentSignal);
     if (!claimed) return false;
-    const controller = new LeaseController(
-      claimed.lease,
+    const renewed = await this.extendForProcessing(claimed, parentSignal);
+    const leaseController = new LeaseController(
+      renewed.lease,
       this.options.leaseMs,
       this.options.heartbeatMs ?? Math.max(10, Math.floor(this.options.leaseMs / 3)),
       this.options.heartbeatTimeoutMs ?? Math.max(10, Math.floor(this.options.leaseMs / 4)),
@@ -703,37 +879,122 @@ export class OutboxConsumer {
       this.clock,
       this.store,
       this.ledger,
+      signal,
     );
-    controller.start();
+    leaseController.start();
     try {
       await this.telemetry.span(
         "worker.outbox.process",
         {
-          "job.id": claimed.job.id,
-          "job.kind": claimed.job.kind,
-          "job.attempt": claimed.job.attempt,
+          "job.id": renewed.job.id,
+          "job.kind": renewed.job.kind,
+          "job.attempt": renewed.job.attempt,
         },
         async (span) => {
           this.logger.log("info", "outbox.job.claimed", {
             traceId: span.traceId,
             spanId: span.spanId,
-            workspaceId: claimed.job.workspaceId,
-            jobId: claimed.job.id,
+            workspaceId: renewed.job.workspaceId,
+            jobId: renewed.job.id,
             attributes: {
-              kind: claimed.job.kind,
-              generation: claimed.lease.generation,
-              attempt: claimed.job.attempt,
+              kind: renewed.job.kind,
+              generation: renewed.lease.generation,
+              attempt: renewed.job.attempt,
             },
           });
-          await this.process(claimed.job, controller);
+          await this.process(renewed.job, leaseController);
         },
       );
     } catch (error) {
       if (!(error instanceof StaleLeaseError || error instanceof EffectOwnershipError)) throw error;
     } finally {
-      await controller.stop();
+      await leaseController.stop();
     }
     return true;
+  }
+
+  private async acquire(parentSignal: AbortSignal): Promise<ClaimedOutboxJob | undefined> {
+    const active = this.acquisitionInFlight ?? this.startAcquisition();
+    const waited = await awaitRetainedOperation(
+      active.promise,
+      parentSignal,
+      this.options.claimTimeoutMs ?? Math.max(10, Math.floor(this.options.leaseMs / 4)),
+      "outbox_claim_timeout",
+      (reason) => active.controller.abort(reason),
+    );
+    if (!waited.operationSettled) throw waited.error;
+    if (this.acquisitionInFlight === active) this.acquisitionInFlight = undefined;
+    if (waited.error !== undefined) throw waited.error;
+    const claimed = waited.value;
+    if (claimed) this.assertClaimFence(claimed);
+    return claimed;
+  }
+
+  private assertClaimFence(claimed: ClaimedOutboxJob): void {
+    if (
+      claimed.job.id !== claimed.lease.jobId ||
+      claimed.job.state !== "leased" ||
+      claimed.job.leaseOwner !== claimed.lease.owner ||
+      claimed.job.leaseWorkerSlotId !== claimed.lease.workerSlotId ||
+      claimed.job.leaseGeneration !== claimed.lease.generation ||
+      claimed.job.leaseExpiresAt !== claimed.lease.expiresAt ||
+      claimed.lease.workerSlotId !== this.options.workerId
+    ) {
+      throw new StaleLeaseError(claimed.lease.jobId);
+    }
+  }
+
+  private startAcquisition(): InFlightAcquisition {
+    const controller = new AbortController();
+    const promise = Promise.resolve().then(async () => {
+      const recovered = await this.store.recoverOwned(
+        this.options.workerId,
+        this.options.leaseMs,
+        controller.signal,
+      );
+      if (recovered) return recovered;
+      if (controller.signal.aborted) {
+        throw controller.signal.reason instanceof Error
+          ? controller.signal.reason
+          : new Error("aborted");
+      }
+      return this.store.claim(this.options.workerId, this.options.leaseMs, controller.signal);
+    });
+    const active = { controller, promise };
+    this.acquisitionInFlight = active;
+    return active;
+  }
+
+  private async extendForProcessing(
+    claimed: ClaimedOutboxJob,
+    parentSignal: AbortSignal,
+  ): Promise<ClaimedOutboxJob> {
+    const now = this.clock.now();
+    const minimumHeadroom =
+      this.options.heartbeatMs ?? Math.max(10, Math.floor(this.options.leaseMs / 3));
+    if (claimed.lease.expiresAt <= now) throw new StaleLeaseError(claimed.lease.jobId);
+    if (claimed.lease.expiresAt - now >= minimumHeadroom) return claimed;
+
+    const targetExpiry = now + this.options.leaseMs;
+    const lease = await runWithDeadline(
+      parentSignal,
+      this.options.heartbeatTimeoutMs ?? Math.max(10, Math.floor(this.options.leaseMs / 4)),
+      () => this.store.heartbeat(claimed.lease, targetExpiry),
+      "outbox_claim_heartbeat_timeout",
+    );
+    if (
+      lease.jobId !== claimed.lease.jobId ||
+      lease.owner !== claimed.lease.owner ||
+      lease.workerSlotId !== claimed.lease.workerSlotId ||
+      lease.generation !== claimed.lease.generation ||
+      lease.expiresAt !== targetExpiry
+    ) {
+      throw new StaleLeaseError(claimed.lease.jobId);
+    }
+    return {
+      job: { ...claimed.job, leaseExpiresAt: lease.expiresAt },
+      lease,
+    };
   }
 
   private async process(job: OutboxJob, controller: LeaseController): Promise<void> {

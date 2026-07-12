@@ -37,7 +37,11 @@ The gateway issues short-lived agent stream tickets but does not serve the retur
 route. `AGENT_STREAM_ORIGINS` must name a separately reviewed stream broker; the Nginx template in
 this repository deliberately does not proxy `/v1/agent/runs/<id>/stream`.
 
-The worker is not a deployable service. It remains disabled until a durable queue/outbox adapter composition exists and recovery behavior is proven.
+The worker process host and non-root image candidate exist, but the service is not release-enabled.
+Its Compose profile is opt-in, has no host port, and no guarded deployment command selects it.
+`WORKER_ADAPTER_MODULE` must supply the complete reviewed durable graph; runtime validation rejects
+the placeholder module/image. Enablement remains blocked until the authority job protocol, provider
+credentials, adapter conformance/readiness, and staging crash-recovery behavior are proven.
 
 ## One-time target preparation
 
