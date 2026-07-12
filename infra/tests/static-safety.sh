@@ -50,9 +50,51 @@ validate_backup_bundle "$archive" project-conversation-staging staging
 [[ "$BACKUP_BUNDLE_CHECKSUM" == "$archive_checksum" ]]
 [[ "$BACKUP_BUNDLE_IMAGE" == "$image" ]]
 
+export SPACETIMEDB_DATABASE_IDENTITY=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+export RESTORE_EXPECTED_INITIAL_PROGRAM_HASH=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+export RESTORE_EXPECTED_MODULE_SCHEMA_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+verification="$tmp/restored-state.verification"
+cat > "$verification" <<EOF
+format=project-conversation-restored-state-verification-v1
+database_identity=$SPACETIMEDB_DATABASE_IDENTITY
+initial_program_hash=$RESTORE_EXPECTED_INITIAL_PROGRAM_HASH
+current_module_code=NotVerified
+module_schema_sha256=$RESTORE_EXPECTED_MODULE_SCHEMA_SHA256
+required_private_tables=Pass
+required_private_table_count=61
+domain_invariants=Pass
+domain_invariant_count=65
+outbox_lease_recovery_shape=NotVerified
+audit_continuity=BoundedReferentialOnly
+deletion_lifecycle_overlay=NotConfigured
+traffic_eligible=false
+result=BoundedRestoreStateVerified
+EOF
+chmod 600 "$verification"
+validate_restored_state_verification \
+  "$verification" "$SPACETIMEDB_DATABASE_IDENTITY" \
+  "$RESTORE_EXPECTED_INITIAL_PROGRAM_HASH" "$RESTORE_EXPECTED_MODULE_SCHEMA_SHA256"
+
+invariant_failure="$tmp/invariant-failure.verification"
+sed 's/domain_invariants=Pass/domain_invariants=Fail/' "$verification" > "$invariant_failure"
+chmod 600 "$invariant_failure"
+if (validate_restored_state_verification \
+  "$invariant_failure" "$SPACETIMEDB_DATABASE_IDENTITY" \
+  "$RESTORE_EXPECTED_INITIAL_PROGRAM_HASH" "$RESTORE_EXPECTED_MODULE_SCHEMA_SHA256" >/dev/null 2>&1); then
+  die "fixture expected failed restored-state invariants to be rejected"
+fi
+
+cp "$verification" "$tmp/interrupted.verification.partial"
+chmod 600 "$tmp/interrupted.verification.partial"
+if (validate_restored_state_verification \
+  "$tmp/interrupted.verification" "$SPACETIMEDB_DATABASE_IDENTITY" \
+  "$RESTORE_EXPECTED_INITIAL_PROGRAM_HASH" "$RESTORE_EXPECTED_MODULE_SCHEMA_SHA256" >/dev/null 2>&1); then
+  die "fixture expected an interrupted partial verifier record to be rejected"
+fi
+
 marker="$tmp/fixture.success"
 cat > "$marker" <<EOF
-format=project-conversation-restore-drill-v3
+format=project-conversation-restore-drill-v4
 completed_utc=$now_utc
 completed_epoch=$now
 compose_project=project-conversation-staging
@@ -64,9 +106,25 @@ evidence_verify_key_sha256=$BACKUP_BUNDLE_VERIFY_KEY_SHA256
 source_spacetimedb_image=$image
 restore_spacetimedb_image=$image
 ownership_mode=operator-remapped-modes-preserved
+database_identity=$SPACETIMEDB_DATABASE_IDENTITY
+initial_program_hash=$RESTORE_EXPECTED_INITIAL_PROGRAM_HASH
+current_module_code=NotVerified
+module_schema_sha256=$RESTORE_EXPECTED_MODULE_SCHEMA_SHA256
+restored_state_verification=Pass
+required_private_tables=Pass
+required_private_table_count=61
+domain_invariants=Pass
+domain_invariant_count=65
+outbox_lease_recovery_shape=NotVerified
+audit_continuity=BoundedReferentialOnly
+deletion_lifecycle_overlay=NotConfigured
+object_inventory=NotConfigured
+search_rebuild=NotConfigured
+provider_checks=NotConfigured
+traffic_eligible=false
 teardown=completed
-upgrade_eligible=true
-result=spacetimedb-root-health-only
+upgrade_eligible=false
+result=bounded-restored-state-not-traffic-eligible
 EOF
 chmod 600 "$marker"
 write_checksum_sidecar "$marker"
@@ -81,6 +139,56 @@ write_checksum_sidecar "$tampered"
 if (verify_evidence_signature "$tampered" >/dev/null 2>&1); then
   die "fixture expected tampered signed evidence to be rejected"
 fi
+
+failed_marker="$tmp/failed-invariant.success"
+sed 's/domain_invariants=Pass/domain_invariants=Fail/' "$marker" > "$failed_marker"
+chmod 600 "$failed_marker"
+write_checksum_sidecar "$failed_marker"
+sign_evidence_file "$failed_marker"
+if (validate_restore_marker "$failed_marker" "$archive" project-conversation-staging staging "$image" >/dev/null 2>&1); then
+  die "fixture expected a signed marker with failed invariants to be rejected"
+fi
+
+verifier_line="$(grep -nF '"$SCRIPT_DIR/verify-restored-state.sh"' "$ROOT_DIR/infra/scripts/restore-drill.sh" | cut -d: -f1)"
+cleanup_line="$(grep -nF 'cleanup_drill || die "restore-drill teardown failed; no success evidence was published"' "$ROOT_DIR/infra/scripts/restore-drill.sh" | cut -d: -f1)"
+marker_line="$(grep -nF "printf 'format=project-conversation-restore-drill-v4" "$ROOT_DIR/infra/scripts/restore-drill.sh" | cut -d: -f1)"
+[[ "$verifier_line" =~ ^[0-9]+$ && "$cleanup_line" =~ ^[0-9]+$ && "$marker_line" =~ ^[0-9]+$ \
+  && "$verifier_line" -lt "$cleanup_line" && "$cleanup_line" -lt "$marker_line" ]] \
+  || die "fixture expected verifier success and teardown before marker publication"
+grep -Fq 'write_restore_journal verifying' "$ROOT_DIR/infra/scripts/restore-drill.sh" \
+  || die "fixture expected interrupted restored-state verification to remain journal-visible"
+if ("$ROOT_DIR/infra/scripts/verify-restored-state.sh" \
+  --endpoint https://database.example.invalid \
+  --database-name project-conversation-staging \
+  --database-identity "$SPACETIMEDB_DATABASE_IDENTITY" \
+  --initial-program-hash "$RESTORE_EXPECTED_INITIAL_PROGRAM_HASH" \
+  --schema-sha256 "$RESTORE_EXPECTED_MODULE_SCHEMA_SHA256" \
+  --owner-token-file "$tmp/not-used" --output "$tmp/not-used.out" >/dev/null 2>&1); then
+  die "fixture expected a non-loopback restored-state endpoint to be rejected"
+fi
+grep -Fq -- "--proto '=http' --noproxy '*' --max-redirs 0" \
+  "$ROOT_DIR/infra/scripts/verify-restored-state.sh" \
+  || die "fixture expected restored-state HTTP requests to prohibit egress and redirects"
+grep -Fq 'schema?version=9' "$ROOT_DIR/infra/scripts/verify-restored-state.sh" \
+  || die "fixture expected the restored schema wire format to be explicitly pinned"
+grep -Fq '.initial_program == ("0x" + $initial_program_hash)' \
+  "$ROOT_DIR/infra/scripts/verify-restored-state.sh" \
+  || die "fixture expected restored initialization provenance to be checked"
+grep -Fq 'current_module_code=NotVerified' \
+  "$ROOT_DIR/infra/scripts/verify-restored-state.sh" \
+  || die "fixture expected current module code verification to remain explicitly unverified"
+grep -Fq 'FROM \"$table\"' "$ROOT_DIR/infra/scripts/verify-restored-state.sh" \
+  || die "fixture expected reserved SQL table identifiers to be quoted"
+if grep -Fq 'restore_outbox_invariant' "$ROOT_DIR/spacetimedb/src/views.rs"; then
+  die "fixture forbids a public full-history restore invariant view"
+fi
+if grep -Fq 'SELECT lease_owner, worker_slot_id, lease_until FROM outbox_job' \
+  "$ROOT_DIR/infra/scripts/verify-restored-state.sh"; then
+  die "fixture forbids unbounded outbox row export during restored-state verification"
+fi
+grep -Fq 'restore evidence is bounded and cannot authorize a live database upgrade' \
+  "$ROOT_DIR/infra/scripts/upgrade.sh" \
+  || die "fixture expected bounded traffic-ineligible evidence to block live upgrade"
 
 cp "$archive.manifest" "$tmp/bad.manifest"
 printf 'unexpected=value\n' >> "$tmp/bad.manifest"

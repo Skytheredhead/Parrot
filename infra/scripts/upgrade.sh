@@ -33,6 +33,9 @@ marker="$(cd -- "$(dirname -- "$marker")" && pwd -P)/$(basename -- "$marker")"
 [[ "$marker" == "$BACKUP_DIR/restore-drills/"* ]] || die "restore marker must resolve below $BACKUP_DIR/restore-drills"
 validate_backup_bundle "$backup" "$COMPOSE_PROJECT_NAME" "$DEPLOY_ENVIRONMENT"
 validate_restore_marker "$marker" "$backup" "$COMPOSE_PROJECT_NAME" "$DEPLOY_ENVIRONMENT" "$new_image"
+[[ "$(metadata_value "$marker" traffic_eligible)" == true \
+  && "$(metadata_value "$marker" upgrade_eligible)" == true ]] \
+  || die "restore evidence is bounded and cannot authorize a live database upgrade"
 
 state_file="$(deployment_state_dir)/spacetimedb-upgrade.env"
 transition_id="upgrade-${new_image##*@sha256:}"; transition_id="${transition_id:0:24}-${BACKUP_BUNDLE_CHECKSUM:0:12}"

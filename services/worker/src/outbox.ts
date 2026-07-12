@@ -90,7 +90,7 @@ const payloadField = (payload: JsonValue, key: string): string => {
 const semanticResource = (job: Pick<OutboxJob, "kind" | "payload">): string => {
   switch (job.kind) {
     case "notification.deliver":
-      return `intent:${payloadField(job.payload, "intentId")}`;
+      return `intent:${payloadField(job.payload, "intentId")}:revision:${payloadField(job.payload, "deliveryRevision")}`;
     case "search.upsert":
     case "search.tombstone":
       return `resource:${payloadField(job.payload, "resourceId")}:acl:${payloadField(job.payload, "aclRevision")}:revision:${payloadField(job.payload, "resourceRevision")}`;

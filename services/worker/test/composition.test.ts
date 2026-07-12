@@ -10,6 +10,7 @@ import {
   InMemoryApprovalStore,
   InMemoryAuthorizationGate,
   InMemoryEffectLedger,
+  InMemoryNotificationDeliveryAuthority,
   InMemoryNotificationProvider,
   InMemoryObjectStore,
   InMemorySearchBackend,
@@ -111,6 +112,7 @@ const testGraph = (): WorkerProductionPorts => {
     extractor,
     authorization: new InMemoryAuthorizationGate(),
     contextSource: new StaticAgentContextSource([]),
+    notificationAuthority: new InMemoryNotificationDeliveryAuthority(),
     notificationProvider: new InMemoryNotificationProvider(),
     agentProvider: new ScriptedAgentProvider([]),
     logSink,
@@ -208,8 +210,16 @@ test("production composition validates methods, the complete handler graph, and 
     ]),
     scanner: durableAdapter("scanner", ["scan"]),
     extractor: durableAdapter("extractor", ["extract"]),
-    authorization: durableAdapter("authorization", ["canPerform", "dispatchAuthorizedContext"]),
+    authorization: durableAdapter("authorization", [
+      "canPerform",
+      "dispatchAuthorizedContext",
+      "dispatchAuthorizedOperation",
+    ]),
     contextSource: durableAdapter("context", ["list", "read"]),
+    notificationAuthority: durableAdapter("notification-authority", [
+      "resolvePlan",
+      "dispatchCurrentPlan",
+    ]),
     notificationProvider: durableAdapter("notifications", ["send", "reconcile"]),
     agentProvider: durableAdapter("agent-provider", ["next", "reconcile"]),
     logSink,
@@ -240,6 +250,7 @@ test("production composition validates methods, the complete handler graph, and 
   ports.tools.register(durableTool);
   const notificationHandler = createNotificationDeliveryHandler(
     ports.authorization,
+    ports.notificationAuthority,
     ports.notificationProvider,
   );
   const searchHandler = createSearchIndexHandler(ports.search, ports.rebuildSource);
@@ -353,6 +364,33 @@ test("production composition validates methods, the complete handler graph, and 
     scanner: durableAdapter("broken-scanner", []),
   } as WorkerProductionPorts;
   assert.throws(() => composeWorkerRuntime("production", incomplete), /missing_method:scan/);
+  const noPreferencePlanner = {
+    ...ports,
+    notificationAuthority: durableAdapter("broken-notification-authority", []),
+  } as WorkerProductionPorts;
+  assert.throws(
+    () => composeWorkerRuntime("production", noPreferencePlanner),
+    /notificationAuthority:missing_method:resolvePlan/,
+  );
+  const noCurrentPlanDispatch = {
+    ...ports,
+    notificationAuthority: durableAdapter("broken-notification-authority", ["resolvePlan"]),
+  } as WorkerProductionPorts;
+  assert.throws(
+    () => composeWorkerRuntime("production", noCurrentPlanDispatch),
+    /notificationAuthority:missing_method:dispatchCurrentPlan/,
+  );
+  const noFinalNotificationFence = {
+    ...ports,
+    authorization: durableAdapter("broken-notification-authorization", [
+      "canPerform",
+      "dispatchAuthorizedContext",
+    ]),
+  } as WorkerProductionPorts;
+  assert.throws(
+    () => composeWorkerRuntime("production", noFinalNotificationFence),
+    /authorization:missing_method:dispatchAuthorizedOperation/,
+  );
   const { recoverOwned: _recoverOwned, ...outboxWithoutRecovery } = ports.outbox;
   const noOwnedLeaseRecovery = {
     ...ports,

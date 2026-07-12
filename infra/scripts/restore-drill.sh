@@ -147,6 +147,23 @@ done
 [[ "$healthy" == true ]] || die "isolated restored SpacetimeDB did not become healthy"
 write_restore_journal healthy
 
+write_restore_journal verifying
+verification_record="$drill_root/.restored-state-verification"
+"$SCRIPT_DIR/verify-restored-state.sh" \
+  --endpoint "http://127.0.0.1:$drill_port" \
+  --database-name "$SPACETIMEDB_DATABASE_NAME" \
+  --database-identity "$SPACETIMEDB_DATABASE_IDENTITY" \
+  --initial-program-hash "$RESTORE_EXPECTED_INITIAL_PROGRAM_HASH" \
+  --schema-sha256 "$RESTORE_EXPECTED_MODULE_SCHEMA_SHA256" \
+  --owner-token-file "$RESTORE_VERIFIER_DATABASE_OWNER_TOKEN_FILE" \
+  --output "$verification_record"
+validate_restored_state_verification \
+  "$verification_record" "$SPACETIMEDB_DATABASE_IDENTITY" \
+  "$RESTORE_EXPECTED_INITIAL_PROGRAM_HASH" "$RESTORE_EXPECTED_MODULE_SCHEMA_SHA256"
+verification_required_table_count="$(metadata_value "$verification_record" required_private_table_count)"
+verification_domain_invariant_count="$(metadata_value "$verification_record" domain_invariant_count)"
+write_restore_journal verified
+
 marker_dir="$BACKUP_DIR/restore-drills"
 if [[ ! -e "$marker_dir" ]]; then mkdir -m 700 -- "$marker_dir"; fi
 assert_trusted_directory "$marker_dir" "restore marker directory" true
@@ -154,16 +171,16 @@ assert_trusted_directory "$marker_dir" "restore marker directory" true
 if [[ "$keep" == true ]]; then
   completed_utc="$(date -u +%Y%m%dT%H%M%SZ)"; completed_epoch="$(utc_compact_to_epoch "$completed_utc")"
   marker="$marker_dir/${timestamp_lc}.kept"
-  teardown=not-performed; upgrade_eligible=false; result=spacetimedb-root-health-kept-not-upgrade-evidence
+  teardown=not-performed; upgrade_eligible=false; result=bounded-restored-state-kept-not-upgrade-evidence
 else
   cleanup_drill || die "restore-drill teardown failed; no success evidence was published"
   completed_utc="$(date -u +%Y%m%dT%H%M%SZ)"; completed_epoch="$(utc_compact_to_epoch "$completed_utc")"
   marker="$marker_dir/${timestamp_lc}.success"
-  teardown=completed; upgrade_eligible=true; result=spacetimedb-root-health-only
+  teardown=completed; upgrade_eligible=false; result=bounded-restored-state-not-traffic-eligible
 fi
 
 {
-  printf 'format=project-conversation-restore-drill-v3\n'
+  printf 'format=project-conversation-restore-drill-v4\n'
   printf 'completed_utc=%s\n' "$completed_utc"
   printf 'completed_epoch=%s\n' "$completed_epoch"
   printf 'compose_project=%s\n' "$base_project"
@@ -175,6 +192,22 @@ fi
   printf 'source_spacetimedb_image=%s\n' "$BACKUP_BUNDLE_IMAGE"
   printf 'restore_spacetimedb_image=%s\n' "$restore_image"
   printf 'ownership_mode=operator-remapped-modes-preserved\n'
+  printf 'database_identity=%s\n' "$SPACETIMEDB_DATABASE_IDENTITY"
+  printf 'initial_program_hash=%s\n' "$RESTORE_EXPECTED_INITIAL_PROGRAM_HASH"
+  printf 'current_module_code=NotVerified\n'
+  printf 'module_schema_sha256=%s\n' "$RESTORE_EXPECTED_MODULE_SCHEMA_SHA256"
+  printf 'restored_state_verification=Pass\n'
+  printf 'required_private_tables=Pass\n'
+  printf 'required_private_table_count=%s\n' "$verification_required_table_count"
+  printf 'domain_invariants=Pass\n'
+  printf 'domain_invariant_count=%s\n' "$verification_domain_invariant_count"
+  printf 'outbox_lease_recovery_shape=NotVerified\n'
+  printf 'audit_continuity=BoundedReferentialOnly\n'
+  printf 'deletion_lifecycle_overlay=NotConfigured\n'
+  printf 'object_inventory=NotConfigured\n'
+  printf 'search_rebuild=NotConfigured\n'
+  printf 'provider_checks=NotConfigured\n'
+  printf 'traffic_eligible=false\n'
   printf 'teardown=%s\n' "$teardown"
   printf 'upgrade_eligible=%s\n' "$upgrade_eligible"
   printf 'result=%s\n' "$result"
@@ -190,4 +223,4 @@ else
   trap - EXIT INT TERM
   note "Restore drill passed and teardown completed before success evidence was published: $marker"
 fi
-note "This does not prove module, application, authorization, object, search, worker, or RPO/RTO readiness."
+note "Evidence remains explicitly ineligible for traffic: deletion lifecycle overlay, object inventory, search rebuild, provider checks, authorization behavior, and RPO/RTO are not proven."

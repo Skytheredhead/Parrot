@@ -2,6 +2,7 @@ import type {
   AuthorizationGate,
   FileAuthority,
   MalwareScanner,
+  NotificationDeliveryAuthority,
   NotificationProvider,
   ObjectStore,
   SearchBackend,
@@ -33,6 +34,7 @@ export interface WorkerProductionPorts {
   readonly extractor: TextExtractor;
   readonly authorization: AuthorizationGate;
   readonly contextSource: AgentContextSource;
+  readonly notificationAuthority: NotificationDeliveryAuthority;
   readonly notificationProvider: NotificationProvider;
   readonly agentProvider: AgentProvider;
   readonly logSink: LogSink;
@@ -117,8 +119,13 @@ const entries = (ports: WorkerProductionPorts): readonly AdapterEntry[] => [
   ["objects", ports.objects, ["readStream", "writeClean", "stat", "deleteIfMatch", "list"]],
   ["scanner", ports.scanner, ["scan"]],
   ["extractor", ports.extractor, ["extract"]],
-  ["authorization", ports.authorization, ["canPerform", "dispatchAuthorizedContext"]],
+  [
+    "authorization",
+    ports.authorization,
+    ["canPerform", "dispatchAuthorizedContext", "dispatchAuthorizedOperation"],
+  ],
   ["contextSource", ports.contextSource, ["list", "read"]],
+  ["notificationAuthority", ports.notificationAuthority, ["resolvePlan", "dispatchCurrentPlan"]],
   ["notificationProvider", ports.notificationProvider, ["send", "reconcile"]],
   ["agentProvider", ports.agentProvider, ["next", "reconcile"]],
   ["logSink", ports.logSink, ["write"]],
@@ -147,7 +154,11 @@ const allJobKinds: readonly JobKind[] = [
 const expectedHandlerDependencies = (
   ports: WorkerProductionPorts,
 ): Readonly<Record<JobKind, readonly RuntimeAdapter[]>> => ({
-  "notification.deliver": [ports.authorization, ports.notificationProvider],
+  "notification.deliver": [
+    ports.authorization,
+    ports.notificationAuthority,
+    ports.notificationProvider,
+  ],
   "search.upsert": [ports.search, ports.rebuildSource],
   "search.tombstone": [ports.search, ports.rebuildSource],
   "search.rebuild": [ports.search, ports.rebuildSource],

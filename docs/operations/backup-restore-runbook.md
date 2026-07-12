@@ -53,6 +53,21 @@ reserved loopback port in `39200-39999`. It never stops or mounts the base proje
 Without `--image`, the drill uses the exact source image recorded in the validated backup manifest;
 candidate-image upgrade drills must pass `--image` explicitly.
 
+The reviewed environment file must also bind `SPACETIMEDB_DATABASE_NAME`, the exact
+`SPACETIMEDB_DATABASE_IDENTITY`, `RESTORE_EXPECTED_INITIAL_PROGRAM_HASH`, and
+`RESTORE_EXPECTED_MODULE_SCHEMA_SHA256`. Record the database's exact `initial_program` hash as
+initialization provenance only; this endpoint does not prove the code installed by a later
+republish, so every bounded record explicitly says `current_module_code=NotVerified`. Compute the schema
+digest from the approved live module as canonical compact JSON (`curl` the loopback-only
+`/v1/database/<name>/schema?version=9` endpoint, then `jq -S -c` and SHA-256 it), review it with the module
+release, and never learn or bless it from the restore being tested. Place a database-owner
+Spacetime token at `RESTORE_VERIFIER_DATABASE_OWNER_TOKEN_FILE` with mode `0400` or `0600`. It must
+be the OIDC token for the identity that owns/published the database and must match the module's
+immutable issuer/audience policy; an ordinary application/service token and a host-issued token
+rejected by `client_connected` are intentionally insufficient to read private tables. Recover
+or mount this credential just in time through the approved secret process, never copy it into the
+backup, and remove it after the maintenance workflow.
+
 Dry run:
 
 ```bash
@@ -71,10 +86,19 @@ infra/scripts/restore-drill.sh \
   --confirm project-conversation-production
 ```
 
-By default the isolated project is destroyed after the health check. Only after Compose reports no
+After health, the script runs a no-egress verifier against only `http://127.0.0.1:<reserved-port>`.
+It matches the database identity, initialization provenance, and canonical schema digest, proves database-owner access to all 61
+required private tables with aggregate-only queries, compares 65 bounded child/parent counts, and
+verifies audit-to-workspace referential continuity. SQL responses are private transient files, are
+never printed, and are removed before the
+verifier exits. Because the audit model has no global sequence or external anchor, the evidence says
+`BoundedReferentialOnly`; it does not claim immutability or complete temporal continuity.
+
+By default the isolated project is destroyed after bounded verification. Only after Compose reports no
 remaining drill containers and the isolated root has been removed is an integrity-checked success
 marker retained under `backups/restore-drills`. The marker binds the exact archive, backup
-manifest, source image, candidate restore image, project, and environment; it is also signed by the
+manifest, source image, candidate restore image, project, environment, database identity, initial
+program hash, schema digest, the explicit lack of current-module-code proof, and bounded verification results; it is also signed by the
 same environment evidence key. Upgrade verifies both signatures, so recomputing an unkeyed checksum
 cannot fabricate drill evidence. If Compose teardown fails,
 the script fails and deliberately preserves the restore root; never remove that root until the exact
@@ -91,9 +115,23 @@ reviewed UID/GID mapping, an operator-owned test showing the restored service ca
 required path without broadening permissions, and explicit verification that no set-id, link, device,
 or world-writable entry is introduced.
 
-The automated marker proves only that the exact root passed checksum/extraction and that pinned SpacetimeDB reached its configured health check. Before launch, manually test module load, domain invariants/row counts, tenant/private-space authorization, audit continuity, WSS reconnect, login/read/write, object checksums, search rebuild/deletion, worker idempotency, and notification suppression. Record measured data-loss window and restore duration. Only that full drill can demonstrate RPO/RTO.
+The signed v4 marker is deliberately not a traffic-readiness artifact. It always records
+`deletion_lifecycle_overlay=NotConfigured`, `object_inventory=NotConfigured`,
+`search_rebuild=NotConfigured`, `provider_checks=NotConfigured`,
+`outbox_lease_recovery_shape=NotVerified`, and `traffic_eligible=false`. A public global scan is not
+used for restore verification; a future owner-only bounded maintenance snapshot must prove the
+outbox lease invariant without creating a cross-tenant workload amplifier.
+`upgrade_eligible=false` prevents this bounded evidence from authorizing a live database change.
+Before launch, manually test tenant/private-space
+authorization, authorization epochs, WSS reconnect, login/read/write, object checksums, search
+rebuild and deletion propagation, worker recovery/idempotency, provider suppression, and notification
+behavior. Record measured data-loss window and restore duration. Only that full drill can demonstrate
+RPO/RTO and traffic readiness.
 
-Before an image upgrade, repeat the drill with `--image registry/path@sha256:<candidate-digest>`. The marker records the tested image, and the upgrade script refuses evidence from a different image.
+Before an image upgrade, repeat the drill with `--image registry/path@sha256:<candidate-digest>`.
+The bounded marker records the tested image but cannot authorize the upgrade. The upgrade remains
+blocked until a future reviewed evidence format proves traffic eligibility as well as the exact
+candidate image.
 
 ## Image upgrade
 

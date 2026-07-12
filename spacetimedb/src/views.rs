@@ -28,6 +28,14 @@ pub struct VisibleWorkspaceMember {
     pub active: bool,
 }
 
+#[derive(SpacetimeType)]
+pub struct VisiblePresence {
+    pub workspace_id: Uuid,
+    pub identity: Identity,
+    pub status: PresenceStatus,
+    pub expires_at: Timestamp,
+}
+
 impl From<WorkspaceMember> for VisibleWorkspaceMember {
     fn from(row: WorkspaceMember) -> Self {
         Self {
@@ -454,6 +462,56 @@ pub fn my_workspaces(ctx: &ViewContext) -> Vec<Workspace> {
         .collect()
 }
 
+#[spacetimedb::view(accessor = visible_presence, public)]
+pub fn visible_presence(ctx: &ViewContext) -> Vec<VisiblePresence> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|membership| membership.active)
+        .flat_map(|membership| {
+            ctx.db
+                .current_presence()
+                .workspace_id()
+                .filter(membership.workspace_id)
+        })
+        .filter(|presence| {
+            can_read_workspace(ctx, presence.workspace_id, presence.identity)
+                && ctx
+                    .db
+                    .user()
+                    .identity()
+                    .find(presence.identity)
+                    .is_some_and(|user| !user.disabled)
+        })
+        .map(|presence| VisiblePresence {
+            workspace_id: presence.workspace_id,
+            identity: presence.identity,
+            status: presence.status,
+            expires_at: presence.expires_at,
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_notification_preferences, public)]
+pub fn my_notification_preferences(ctx: &ViewContext) -> Vec<NotificationPreference> {
+    ctx.db
+        .notification_preference()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|preference| {
+            can_read_workspace(ctx, preference.workspace_id, ctx.sender())
+                && preference.space_id.is_none_or(|space_id| {
+                    ctx.db
+                        .space()
+                        .id()
+                        .find(space_id)
+                        .is_some_and(|space| can_read_space(ctx, &space, ctx.sender()))
+                })
+        })
+        .collect()
+}
+
 #[spacetimedb::view(accessor = visible_workspace_members, public)]
 pub fn visible_workspace_members(ctx: &ViewContext) -> Vec<VisibleWorkspaceMember> {
     ctx.db
@@ -802,10 +860,11 @@ pub fn my_notifications(ctx: &ViewContext) -> Vec<Notification> {
                     .find(row.resource_id)
                     .is_some_and(|post| {
                         post.workspace_id == row.workspace_id
+                            && !post.deleted
                             && visible_space(ctx, post.space_id).is_some()
                     });
             }
-            true
+            false
         })
         .collect()
 }
@@ -1144,6 +1203,107 @@ pub fn pending_outbox_work(ctx: &ViewContext) -> Vec<OutboxJobEnvelopeView> {
             lease_until: job.lease_until,
             lease_generation: job.lease_generation,
             last_error: job.last_error,
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = pending_notification_delivery_plans, public)]
+pub fn pending_notification_delivery_plans(ctx: &ViewContext) -> Vec<NotificationDeliveryPlanView> {
+    let allowed = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_process_outbox);
+    if !allowed {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| grant.enabled && grant.kind == "notification.deliver")
+        .flat_map(|grant| {
+            ctx.db
+                .outbox_job()
+                .workspace_id()
+                .filter(grant.workspace_id)
+                .filter(|job| {
+                    job.kind == "notification.deliver"
+                        && job.state == OutboxState::Leased
+                        && job.lease_owner == Some(ctx.sender())
+                })
+        })
+        .filter_map(|job| {
+            let notification = ctx.db.notification().id().find(job.resource_id)?;
+            let control = ctx
+                .db
+                .notification_control()
+                .notification_id()
+                .find(notification.id)?;
+            let snapshot =
+                crate::reducers::notification_authority_snapshot(ctx, &notification, &control);
+            let exact_job_binding = policy::notification_delivery_binding_valid(&[
+                job.resource_type == "notification",
+                job.intent_id == Some(notification.id),
+                job.recipient_id == Some(control.recipient_identity),
+                job.payload_resource_id == Some(control.resource_id),
+                job.authorization_epoch == Some(control.membership_epoch),
+                job.resource_revision == control.group_revision,
+                job.version == Some(control.group_revision),
+                job.channel == control.channel,
+                job.minimal_message == notification.summary,
+            ]);
+            let permit = ctx
+                .db
+                .notification_delivery_permit()
+                .job_id()
+                .find(job.id)
+                .filter(|permit| {
+                    exact_job_binding
+                        && permit.service_identity == ctx.sender()
+                        && permit.worker_slot_id == job.worker_slot_id
+                        && permit.lease_generation == job.lease_generation
+                        && permit.notification_id == notification.id
+                        && permit.workspace_id == job.workspace_id
+                        && permit.group_key == control.group_key
+                        && permit.group_revision == control.group_revision
+                        && permit.resource_revision == control.resource_revision
+                        && permit.membership_epoch == control.membership_epoch
+                        && permit.preference_revision == control.preference_revision
+                        && permit.channel == control.channel
+                });
+            let delivery_state = if !exact_job_binding
+                || snapshot.delivery_state == NotificationDeliveryState::Suppressed
+            {
+                NotificationDeliveryState::Suppressed
+            } else {
+                NotificationDeliveryState::Pending
+            };
+            Some(NotificationDeliveryPlanView {
+                job_id: job.id,
+                notification_id: notification.id,
+                workspace_id: job.workspace_id,
+                recipient_identity: control.recipient_identity,
+                channel: control.channel,
+                delivery_state,
+                suppression_reason: if exact_job_binding {
+                    snapshot.suppression_reason
+                } else {
+                    "job_binding_stale".into()
+                },
+                group_key: control.group_key,
+                group_revision: control.group_revision,
+                resource_type: control.resource_type,
+                resource_id: control.resource_id,
+                resource_revision: snapshot.resource_revision,
+                membership_epoch: snapshot.membership_epoch,
+                preference_revision: snapshot.preference_revision,
+                lease_owner: job.lease_owner,
+                worker_slot_id: job.worker_slot_id,
+                lease_generation: job.lease_generation,
+                permit_expires_at: permit.map(|permit| permit.expires_at),
+            })
         })
         .collect()
 }

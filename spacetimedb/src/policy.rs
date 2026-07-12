@@ -549,6 +549,20 @@ pub(crate) fn worker_slot_id_valid(worker_slot_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
+#[cfg(test)]
+pub(crate) fn outbox_lease_shape_valid(
+    leased: bool,
+    lease_owner_present: bool,
+    worker_slot_present: bool,
+    lease_expiry_present: bool,
+) -> bool {
+    if leased {
+        lease_owner_present && worker_slot_present && lease_expiry_present
+    } else {
+        !lease_owner_present && !worker_slot_present && !lease_expiry_present
+    }
+}
+
 pub(crate) const fn recovered_outbox_generation(current_generation: u64) -> Option<u64> {
     current_generation.checked_add(1)
 }
@@ -628,6 +642,71 @@ pub(crate) const fn private_dm_metadata_visible(
     active_participant: bool,
 ) -> bool {
     !is_private_dm_resource || active_participant
+}
+
+pub(crate) fn presence_heartbeat_valid(ttl_seconds: u32, device_label: &str) -> bool {
+    (15..=300).contains(&ttl_seconds)
+        && device_label.len() <= 64
+        && device_label
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+}
+
+pub(crate) const fn presence_authorizes(_active_presence: bool) -> bool {
+    false
+}
+
+pub(crate) const fn presence_session_admission_allowed(
+    existing_session: bool,
+    active_session_count: usize,
+    session_cap: usize,
+) -> bool {
+    existing_session || active_session_count < session_cap
+}
+
+pub(crate) fn notification_preference_valid(
+    mute_start_local_minute: Option<u16>,
+    mute_end_local_minute: Option<u16>,
+    digest_local_minute: u16,
+    time_zone: &str,
+) -> bool {
+    let mute_valid = match (mute_start_local_minute, mute_end_local_minute) {
+        (None, None) => true,
+        (Some(start), Some(end)) => start < 1_440 && end < 1_440 && start != end,
+        _ => false,
+    };
+    let timezone_valid = !time_zone.is_empty()
+        && time_zone.len() <= 64
+        && time_zone
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'_' | b'-' | b'+'))
+        && (time_zone == "UTC" || time_zone.contains('/'));
+    mute_valid && digest_local_minute < 1_440 && timezone_valid
+}
+
+pub(crate) fn notification_coalesce_binding_valid(
+    same_recipient: bool,
+    same_workspace: bool,
+    same_resource: bool,
+    same_event_class: bool,
+) -> bool {
+    same_recipient && same_workspace && same_resource && same_event_class
+}
+
+pub(crate) const fn notification_delivery_allowed(
+    permission_current: bool,
+    immediate_mode: bool,
+    mute_window_configured: bool,
+) -> bool {
+    permission_current && immediate_mode && !mute_window_configured
+}
+
+pub(crate) const fn notification_group_window_reusable(window_is_current: bool) -> bool {
+    window_is_current
+}
+
+pub(crate) fn notification_delivery_binding_valid(bindings: &[bool]) -> bool {
+    !bindings.is_empty() && bindings.iter().all(|binding| *binding)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -914,6 +993,14 @@ mod tests {
     }
 
     #[test]
+    fn outbox_lease_shape_is_all_or_nothing() {
+        assert!(outbox_lease_shape_valid(true, true, true, true));
+        assert!(outbox_lease_shape_valid(false, false, false, false));
+        assert!(!outbox_lease_shape_valid(true, true, false, true));
+        assert!(!outbox_lease_shape_valid(false, true, false, false));
+    }
+
+    #[test]
     fn direct_messages_require_exact_active_human_participation_without_admin_bypass() {
         assert!(direct_participant_set_valid(2, true, true, true));
         assert!(direct_participant_set_valid(8, true, true, true));
@@ -931,6 +1018,63 @@ mod tests {
         assert!(!private_dm_metadata_visible(true, false));
         assert!(private_dm_metadata_visible(true, true));
         assert!(private_dm_metadata_visible(false, false));
+    }
+
+    #[test]
+    fn presence_is_bounded_advisory_and_never_authorizes() {
+        assert!(presence_heartbeat_valid(15, "Web"));
+        assert!(presence_heartbeat_valid(300, "Desktop session"));
+        assert!(!presence_heartbeat_valid(14, "Web"));
+        assert!(!presence_heartbeat_valid(301, "Web"));
+        assert!(!presence_heartbeat_valid(30, &"x".repeat(65)));
+        assert!(!presence_heartbeat_valid(30, "bad\nlabel"));
+        assert!(!presence_authorizes(true));
+        assert!(!presence_authorizes(false));
+        assert!(presence_session_admission_allowed(false, 7, 8));
+        assert!(!presence_session_admission_allowed(false, 8, 8));
+        assert!(presence_session_admission_allowed(true, 8, 8));
+    }
+
+    #[test]
+    fn notification_preferences_and_coalescing_fail_closed() {
+        assert!(notification_preference_valid(None, None, 540, "UTC"));
+        assert!(notification_preference_valid(
+            Some(1_320),
+            Some(420),
+            540,
+            "America/New_York"
+        ));
+        assert!(!notification_preference_valid(Some(60), None, 540, "UTC"));
+        assert!(!notification_preference_valid(
+            Some(60),
+            Some(60),
+            540,
+            "UTC"
+        ));
+        assert!(!notification_preference_valid(None, None, 1_440, "UTC"));
+        assert!(!notification_preference_valid(None, None, 540, "EST"));
+        assert!(notification_coalesce_binding_valid(true, true, true, true));
+        assert!(!notification_coalesce_binding_valid(
+            false, true, true, true
+        ));
+        assert!(!notification_coalesce_binding_valid(
+            true, false, true, true
+        ));
+        assert!(!notification_coalesce_binding_valid(
+            true, true, false, true
+        ));
+        assert!(!notification_coalesce_binding_valid(
+            true, true, true, false
+        ));
+        assert!(notification_delivery_allowed(true, true, false));
+        assert!(!notification_delivery_allowed(false, true, false));
+        assert!(!notification_delivery_allowed(true, false, false));
+        assert!(!notification_delivery_allowed(true, true, true));
+        assert!(notification_group_window_reusable(true));
+        assert!(!notification_group_window_reusable(false));
+        assert!(notification_delivery_binding_valid(&[true, true, true]));
+        assert!(!notification_delivery_binding_valid(&[true, false, true]));
+        assert!(!notification_delivery_binding_valid(&[]));
     }
 
     #[test]

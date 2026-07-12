@@ -5,6 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 spacetime_port="${SPACETIME_OIDC_TEST_PORT:-39002}"
 oidc_port="${SPACETIME_OIDC_PROVIDER_PORT:-39003}"
 runtime_root="$(mktemp -d "${TMPDIR:-/tmp}/project-conversation-oidc.XXXXXX")"
+runtime_root="$(cd "${runtime_root}" && pwd -P)"
 server_log="${runtime_root}/server.log"
 oidc_log="${runtime_root}/oidc.log"
 server_pid=""
@@ -72,6 +73,7 @@ oidc_base="http://localhost:${oidc_port}"
 issuer="${oidc_base}/project-conversation"
 audience="project-conversation-oidc-test"
 owner_subject="project-conversation-owner"
+publisher_subject="project-conversation-deployment-publisher"
 recipient_subject="project-conversation-recipient"
 database="project-conversation-oidc-test"
 
@@ -195,18 +197,6 @@ if [[ "${server_ready}" != true ]]; then
   exit 1
 fi
 
-export PATH="${root}/.tools/binaryen/version_130/bin:${HOME}/.cargo/bin:${PATH}"
-export RUSTUP_TOOLCHAIN="1.93.0"
-export PROJECT_CONVERSATION_BOOTSTRAP_OIDC_ISSUER="${issuer}"
-export PROJECT_CONVERSATION_BOOTSTRAP_OIDC_AUDIENCE="${audience}"
-export PROJECT_CONVERSATION_BOOTSTRAP_OWNER_SUBJECT="${owner_subject}"
-
-"${cli}" --root-dir "${runtime_root}/admin-cli" publish \
-  --server oidc-test \
-  --module-path "${root}/spacetimedb" \
-  --yes \
-  "${database}" >/dev/null
-
 mint_token() {
   local tenant="$1"
   local token_audience="$2"
@@ -218,12 +208,6 @@ mint_token() {
     --data-urlencode "subject=${subject}"
 }
 
-owner_token="$(mint_token project-conversation "${audience}" "${owner_subject}")"
-wrong_issuer_token="$(mint_token project-conversation-wrong-issuer "${audience}" "${owner_subject}")"
-wrong_audience_token="$(mint_token project-conversation project-conversation-wrong-audience "${owner_subject}")"
-wrong_subject_token="$(mint_token project-conversation "${audience}" project-conversation-wrong-subject)"
-recipient_token="$(mint_token project-conversation "${audience}" "${recipient_subject}")"
-
 configure_token_cli() {
   local name="$1"
   local token="$2"
@@ -234,6 +218,27 @@ configure_token_cli() {
     --no-fingerprint >/dev/null
   "${cli}" --root-dir "${cli_root}" login --token "${token}" >/dev/null
 }
+
+publisher_token="$(mint_token project-conversation "${audience}" "${publisher_subject}")"
+configure_token_cli publisher "${publisher_token}"
+
+export PATH="${root}/.tools/binaryen/version_130/bin:${HOME}/.cargo/bin:${PATH}"
+export RUSTUP_TOOLCHAIN="1.93.0"
+export PROJECT_CONVERSATION_BOOTSTRAP_OIDC_ISSUER="${issuer}"
+export PROJECT_CONVERSATION_BOOTSTRAP_OIDC_AUDIENCE="${audience}"
+export PROJECT_CONVERSATION_BOOTSTRAP_OWNER_SUBJECT="${owner_subject}"
+
+"${cli}" --root-dir "${runtime_root}/publisher-cli" publish \
+  --server oidc-test \
+  --module-path "${root}/spacetimedb" \
+  --yes \
+    "${database}" >/dev/null
+
+owner_token="$(mint_token project-conversation "${audience}" "${owner_subject}")"
+wrong_issuer_token="$(mint_token project-conversation-wrong-issuer "${audience}" "${owner_subject}")"
+wrong_audience_token="$(mint_token project-conversation project-conversation-wrong-audience "${owner_subject}")"
+wrong_subject_token="$(mint_token project-conversation "${audience}" project-conversation-wrong-subject)"
+recipient_token="$(mint_token project-conversation "${audience}" "${recipient_subject}")"
 
 configure_token_cli owner "${owner_token}"
 configure_token_cli wrong-issuer "${wrong_issuer_token}"
@@ -329,4 +334,26 @@ expect_failure \
   "${cli}" --root-dir "${runtime_root}/owner-cli" sql --server oidc-test \
   "${database}" "SELECT * FROM workspace"
 
-echo "SpacetimeDB 2.6.1 OIDC bootstrap, accepted handoff, SQL, and WebSocket checks passed"
+database_info="${runtime_root}/database-info.json"
+canonical_schema="${runtime_root}/schema-v9.canonical.json"
+publisher_token_file="${runtime_root}/publisher-owner.token"
+verification_record="${runtime_root}/restored-state.verification"
+curl --fail --silent --show-error "${server_url}/v1/database/${database}" >"${database_info}"
+curl --fail --silent --show-error "${server_url}/v1/database/${database}/schema?version=9" \
+  | jq -S -c . >"${canonical_schema}"
+chmod 600 "${database_info}" "${canonical_schema}"
+database_identity="$(jq -er '.database_identity.__identity__ | ltrimstr("0x")' "${database_info}")"
+initial_program_hash="$(jq -er '.initial_program | ltrimstr("0x")' "${database_info}")"
+schema_sha256="$(shasum -a 256 "${canonical_schema}" | awk '{print $1}')"
+printf '%s\n' "${publisher_token}" >"${publisher_token_file}"
+chmod 600 "${publisher_token_file}"
+"${root}/infra/scripts/verify-restored-state.sh" \
+  --endpoint "${server_url}" \
+  --database-name "${database}" \
+  --database-identity "${database_identity}" \
+  --initial-program-hash "${initial_program_hash}" \
+  --schema-sha256 "${schema_sha256}" \
+  --owner-token-file "${publisher_token_file}" \
+  --output "${verification_record}"
+
+echo "SpacetimeDB 2.6.1 OIDC bootstrap, handoff, SQL, WebSocket, and private restore-verifier checks passed"

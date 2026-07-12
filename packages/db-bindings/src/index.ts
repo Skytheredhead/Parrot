@@ -38,6 +38,7 @@ import AcceptPlatformOperatorTransferReducer from "./accept_platform_operator_tr
 import AcquireAgentToolEffectReducer from "./acquire_agent_tool_effect_reducer";
 import AddContributionReducer from "./add_contribution_reducer";
 import AppendAgentRunEventReducer from "./append_agent_run_event_reducer";
+import AuthorizeNotificationDeliveryReducer from "./authorize_notification_delivery_reducer";
 import BootstrapOwnerReducer from "./bootstrap_owner_reducer";
 import CancelAgentRunReducer from "./cancel_agent_run_reducer";
 import CancelDmPromotionReducer from "./cancel_dm_promotion_reducer";
@@ -68,10 +69,12 @@ import EditDirectMessageReducer from "./edit_direct_message_reducer";
 import EditPostReducer from "./edit_post_reducer";
 import ExpireDmPromotionReducer from "./expire_dm_promotion_reducer";
 import ExpirePlatformOperatorTransferReducer from "./expire_platform_operator_transfer_reducer";
+import ExpirePresenceSessionsReducer from "./expire_presence_sessions_reducer";
 import ExpireToolApprovalReducer from "./expire_tool_approval_reducer";
 import FinalizeDmPromotionReducer from "./finalize_dm_promotion_reducer";
 import HeartbeatAgentRunReducer from "./heartbeat_agent_run_reducer";
 import HeartbeatOutboxJobReducer from "./heartbeat_outbox_job_reducer";
+import HeartbeatPresenceReducer from "./heartbeat_presence_reducer";
 import InstallAgentReducer from "./install_agent_reducer";
 import LeaveDirectConversationReducer from "./leave_direct_conversation_reducer";
 import MarkDirectReadReducer from "./mark_direct_read_reducer";
@@ -96,6 +99,7 @@ import RevokeAgentReducer from "./revoke_agent_reducer";
 import SendDirectMessageReducer from "./send_direct_message_reducer";
 import SetAgentScopeReducer from "./set_agent_scope_reducer";
 import SetAgentToolPolicyReducer from "./set_agent_tool_policy_reducer";
+import SetNotificationPreferenceReducer from "./set_notification_preference_reducer";
 import SetPollClosedReducer from "./set_poll_closed_reducer";
 import SetPostMetadataReducer from "./set_post_metadata_reducer";
 import SetPostPersonalStateReducer from "./set_post_personal_state_reducer";
@@ -120,10 +124,12 @@ import FileProcessingPlansRow from "./file_processing_plans_table";
 import MyCommandReceiptsRow from "./my_command_receipts_table";
 import MyDirectReadStatesRow from "./my_direct_read_states_table";
 import MyFileUploadsRow from "./my_file_uploads_table";
+import MyNotificationPreferencesRow from "./my_notification_preferences_table";
 import MyNotificationsRow from "./my_notifications_table";
 import MyPostStatesRow from "./my_post_states_table";
 import MyWorkspaceMembershipsRow from "./my_workspace_memberships_table";
 import MyWorkspacesRow from "./my_workspaces_table";
+import PendingNotificationDeliveryPlansRow from "./pending_notification_delivery_plans_table";
 import PendingOutboxWorkRow from "./pending_outbox_work_table";
 import PendingPostSearchDocumentsRow from "./pending_post_search_documents_table";
 import VisibleAgentContextManifestsRow from "./visible_agent_context_manifests_table";
@@ -154,6 +160,7 @@ import VisiblePostPinsRow from "./visible_post_pins_table";
 import VisiblePostReactionsRow from "./visible_post_reactions_table";
 import VisiblePostTagsRow from "./visible_post_tags_table";
 import VisiblePostsRow from "./visible_posts_table";
+import VisiblePresenceRow from "./visible_presence_table";
 import VisibleReplyAncestryRow from "./visible_reply_ancestry_table";
 import VisibleSpacesRow from "./visible_spaces_table";
 import VisibleTasksRow from "./visible_tasks_table";
@@ -212,6 +219,13 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, MyFileUploadsRow),
+  my_notification_preferences: __table({
+    name: 'my_notification_preferences',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, MyNotificationPreferencesRow),
   my_notifications: __table({
     name: 'my_notifications',
     indexes: [
@@ -240,6 +254,13 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, MyWorkspacesRow),
+  pending_notification_delivery_plans: __table({
+    name: 'pending_notification_delivery_plans',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, PendingNotificationDeliveryPlansRow),
   pending_outbox_work: __table({
     name: 'pending_outbox_work',
     indexes: [
@@ -450,6 +471,13 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, VisiblePostsRow),
+  visible_presence: __table({
+    name: 'visible_presence',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, VisiblePresenceRow),
   visible_reply_ancestry: __table({
     name: 'visible_reply_ancestry',
     indexes: [
@@ -486,6 +514,7 @@ const reducersSchema = __reducers(
   __reducerSchema("acquire_agent_tool_effect", AcquireAgentToolEffectReducer),
   __reducerSchema("add_contribution", AddContributionReducer),
   __reducerSchema("append_agent_run_event", AppendAgentRunEventReducer),
+  __reducerSchema("authorize_notification_delivery", AuthorizeNotificationDeliveryReducer),
   __reducerSchema("bootstrap_owner", BootstrapOwnerReducer),
   __reducerSchema("cancel_agent_run", CancelAgentRunReducer),
   __reducerSchema("cancel_dm_promotion", CancelDmPromotionReducer),
@@ -516,10 +545,12 @@ const reducersSchema = __reducers(
   __reducerSchema("edit_post", EditPostReducer),
   __reducerSchema("expire_dm_promotion", ExpireDmPromotionReducer),
   __reducerSchema("expire_platform_operator_transfer", ExpirePlatformOperatorTransferReducer),
+  __reducerSchema("expire_presence_sessions", ExpirePresenceSessionsReducer),
   __reducerSchema("expire_tool_approval", ExpireToolApprovalReducer),
   __reducerSchema("finalize_dm_promotion", FinalizeDmPromotionReducer),
   __reducerSchema("heartbeat_agent_run", HeartbeatAgentRunReducer),
   __reducerSchema("heartbeat_outbox_job", HeartbeatOutboxJobReducer),
+  __reducerSchema("heartbeat_presence", HeartbeatPresenceReducer),
   __reducerSchema("install_agent", InstallAgentReducer),
   __reducerSchema("leave_direct_conversation", LeaveDirectConversationReducer),
   __reducerSchema("mark_direct_read", MarkDirectReadReducer),
@@ -544,6 +575,7 @@ const reducersSchema = __reducers(
   __reducerSchema("send_direct_message", SendDirectMessageReducer),
   __reducerSchema("set_agent_scope", SetAgentScopeReducer),
   __reducerSchema("set_agent_tool_policy", SetAgentToolPolicyReducer),
+  __reducerSchema("set_notification_preference", SetNotificationPreferenceReducer),
   __reducerSchema("set_poll_closed", SetPollClosedReducer),
   __reducerSchema("set_post_metadata", SetPostMetadataReducer),
   __reducerSchema("set_post_personal_state", SetPostPersonalStateReducer),

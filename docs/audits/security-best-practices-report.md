@@ -64,6 +64,28 @@ Evidence:
 - `spacetimedb/src/views.rs` applies caller-aware DM, promotion, audit, and receipt filtering.
 - Rust policy tests cover replay, access loss, unauthorized targets, and denial convergence.
 
+### S-006 — Notification revocation, coalescing, presence bounds, and migration safety (P1)
+
+Resolved in the provider-neutral authority contract. The legacy notification table remains unchanged
+and the new controls are additive. Presence is capped per identity/workspace, scheduled for expiry,
+and exposed through one aggregate authority row rather than raw or stale session scans. Notification
+delivery uses bounded revisioned groups; each leased job is resolved through a service-only view and
+must obtain a short job/owner/slot/generation-bound permit that rechecks current membership,
+preference, resource revision, deletion, and private-space visibility immediately before provider
+I/O. Legacy unversioned delivery work is suppressed during module update.
+
+Evidence:
+
+- `spacetimedb/src/model.rs` keeps `Notification` migration-compatible and adds private companion
+  authority tables.
+- `spacetimedb/src/reducers.rs` caps and schedules presence, creates bounded delivery groups, and
+  issues exact short-lived delivery permits.
+- `spacetimedb/src/views.rs` exposes aggregate presence and service-only delivery plans.
+- `services/worker/src/spacetime-outbox.ts` binds the authoritative delivery revision into the
+  decoded job, while `services/worker/src/adapters.ts` requires current-plan dispatch fencing.
+- A real SpacetimeDB 2.6.1 automatic publish from the previous committed schema to the new schema
+  completed successfully.
+
 ## Open release blockers
 
 ### B-001 — Production provider composition and conformance (High)
@@ -97,7 +119,13 @@ Required before release: record the confirmed assumptions, complete the reposito
 
 ### B-004 — Deployment, monitoring, and recovery evidence (High)
 
-No public domain, TLS deployment, selected production host, or production-capacity approval exists. Static container and configuration checks pass, but the local environment did not provide a Docker daemon for an actual image build. Backup documentation exists, but a real backup/restore drill and measured RPO/RTO have not been completed.
+No public domain, TLS deployment, selected production host, or production-capacity approval exists.
+Static container and configuration checks pass, but the local environment did not provide a Docker
+daemon for an actual image build. Backup documentation and a bounded restored-state verifier exist,
+but a real deployed backup/restore drill and measured RPO/RTO have not been completed. The bounded
+verifier intentionally remains ineligible for traffic or live upgrades until current module code
+can be independently bound, outbox lease recovery can be verified without a public global scan, and deletion-overlay, object, search, provider, and
+authorization-behavior checks exist.
 
 Required before release:
 
@@ -119,8 +147,8 @@ Current passing test counts at this review checkpoint are:
 
 - Client SDK: 11/11
 - Gateway: 62/62
-- Worker: 83/83
-- Rust policy and reducer-contract tests: 43/43
+- Worker: 90/90
+- Rust policy and reducer-contract tests: 48/48
 - Job-envelope contract: 2/2
 
 The counts are evidence for the checked-in provider-neutral implementation only; they are not substitutes for the open environment-specific release gates above.

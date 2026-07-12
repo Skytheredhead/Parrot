@@ -1,3 +1,4 @@
+use crate::reducers::expire_presence_schedule;
 use spacetimedb::{Identity, SpacetimeType, Timestamp, Uuid};
 
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +65,41 @@ pub enum NotificationKind {
     Decision,
     Agent,
     System,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationTier {
+    Direct,
+    Important,
+    Ambient,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationDeliveryMode {
+    Immediate,
+    Digest,
+    Disabled,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresenceStatus {
+    Online,
+    Away,
+    DoNotDisturb,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresenceDeviceKind {
+    Web,
+    Desktop,
+    Mobile,
+    Other,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationDeliveryState {
+    Pending,
+    Suppressed,
 }
 
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
@@ -312,6 +348,31 @@ pub struct ProposeDmPromotionInput {
     pub body: String,
     pub source_message_ids: Vec<Uuid>,
     pub expires_in_seconds: u32,
+    pub client_request_id: Uuid,
+}
+
+#[derive(SpacetimeType)]
+pub struct HeartbeatPresenceInput {
+    pub workspace_id: Uuid,
+    pub session_id: Uuid,
+    pub device_kind: PresenceDeviceKind,
+    pub device_label: String,
+    pub status: PresenceStatus,
+    pub ttl_seconds: u32,
+}
+
+#[derive(SpacetimeType)]
+pub struct SetNotificationPreferenceInput {
+    pub workspace_id: Uuid,
+    pub space_id: Option<Uuid>,
+    pub direct_mode: NotificationDeliveryMode,
+    pub important_mode: NotificationDeliveryMode,
+    pub ambient_mode: NotificationDeliveryMode,
+    pub mute_start_local_minute: Option<u16>,
+    pub mute_end_local_minute: Option<u16>,
+    pub time_zone: String,
+    pub digest_local_minute: u16,
+    pub expected_revision: u64,
     pub client_request_id: Uuid,
 }
 
@@ -880,6 +941,152 @@ pub struct Notification {
     pub summary: String,
     pub read_at: Option<Timestamp>,
     pub created_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = notification_control, private)]
+pub struct NotificationControl {
+    #[primary_key]
+    pub notification_id: Uuid,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    #[index(btree)]
+    pub recipient_identity: Identity,
+    pub space_id: Option<Uuid>,
+    pub tier: NotificationTier,
+    pub event_class: NotificationKind,
+    pub resource_type: String,
+    pub resource_id: Uuid,
+    pub resource_revision: u64,
+    pub group_key: String,
+    pub group_revision: u64,
+    pub occurrence_count: u64,
+    pub membership_epoch: u64,
+    pub preference_revision: u64,
+    pub channel: String,
+    pub delivery_state: NotificationDeliveryState,
+    pub suppression_reason: String,
+    pub window_started_at: Timestamp,
+    pub window_expires_at: Timestamp,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = notification_group, private)]
+pub struct NotificationGroup {
+    #[primary_key]
+    pub base_key: String,
+    pub group_key: String,
+    pub notification_id: Uuid,
+    pub group_revision: u64,
+    pub window_started_at: Timestamp,
+    pub window_expires_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = notification_delivery_permit, private)]
+pub struct NotificationDeliveryPermit {
+    #[primary_key]
+    pub job_id: Uuid,
+    pub notification_id: Uuid,
+    pub workspace_id: Uuid,
+    pub service_identity: Identity,
+    pub worker_slot_id: String,
+    pub lease_generation: u64,
+    pub group_key: String,
+    pub group_revision: u64,
+    pub resource_revision: u64,
+    pub membership_epoch: u64,
+    pub preference_revision: u64,
+    pub channel: String,
+    pub expires_at: Timestamp,
+    pub created_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = notification_preference, private)]
+pub struct NotificationPreference {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub identity: Identity,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    pub space_id: Option<Uuid>,
+    pub direct_mode: NotificationDeliveryMode,
+    pub important_mode: NotificationDeliveryMode,
+    pub ambient_mode: NotificationDeliveryMode,
+    pub mute_start_local_minute: Option<u16>,
+    pub mute_end_local_minute: Option<u16>,
+    pub time_zone: String,
+    pub digest_local_minute: u16,
+    pub revision: u64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = presence_session, private)]
+pub struct PresenceSession {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub scope_key: String,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    #[index(btree)]
+    pub identity: Identity,
+    pub session_id: Uuid,
+    pub device_kind: PresenceDeviceKind,
+    pub device_label: String,
+    pub status: PresenceStatus,
+    pub created_at: Timestamp,
+    pub heartbeat_at: Timestamp,
+    #[index(btree)]
+    pub expires_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = current_presence, private)]
+pub struct CurrentPresence {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    #[index(btree)]
+    pub identity: Identity,
+    pub status: PresenceStatus,
+    pub expires_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = presence_expiry_schedule, private, scheduled(expire_presence_schedule))]
+pub struct PresenceExpirySchedule {
+    #[primary_key]
+    #[auto_inc]
+    pub scheduled_id: u64,
+    pub scheduled_at: spacetimedb::ScheduleAt,
+    #[unique]
+    pub presence_key: String,
+    pub expected_expires_at: Timestamp,
+}
+
+#[derive(SpacetimeType)]
+pub struct NotificationDeliveryPlanView {
+    pub job_id: Uuid,
+    pub notification_id: Uuid,
+    pub workspace_id: Uuid,
+    pub recipient_identity: Identity,
+    pub channel: String,
+    pub delivery_state: NotificationDeliveryState,
+    pub suppression_reason: String,
+    pub group_key: String,
+    pub group_revision: u64,
+    pub resource_type: String,
+    pub resource_id: Uuid,
+    pub resource_revision: u64,
+    pub membership_epoch: u64,
+    pub preference_revision: u64,
+    pub lease_owner: Option<Identity>,
+    pub worker_slot_id: String,
+    pub lease_generation: u64,
+    pub permit_expires_at: Option<Timestamp>,
 }
 
 #[spacetimedb::table(accessor = service_principal, private)]

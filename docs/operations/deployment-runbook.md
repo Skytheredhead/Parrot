@@ -73,6 +73,18 @@ Protect and recover the private key separately from the data backup, rotate it o
 old-evidence verification plan, and remove it from the host between maintenance windows if the
 operator workflow can mount it just in time.
 
+Restore-state verification also requires the reviewed database name, exact database identity,
+exact initialization-program hash, canonical module-schema SHA-256, and a mode-`0400`/`0600`
+database-owner token at the fixed
+environment secret path shown in the env example. The token must identify the database publisher and
+also satisfy the module's immutable OIDC issuer/audience connection policy. The verifier sends it only to the reserved
+loopback drill port, never exposes it on a command line, and removes its private transient SQL files.
+Provision the token separately from backups and application/service credentials. A successful v4
+marker is bounded restore evidence only and explicitly remains ineligible for production traffic or
+live upgrades. The database endpoint exposes initialization provenance, not a trustworthy hash of
+code installed by a later republish, so the marker records `current_module_code=NotVerified` while
+deletion lifecycle, objects, search, and providers remain `NotConfigured`.
+
 Copy the appropriate `infra/env/*.env.example` to a mode-`0400`/`0600`, operator/root-owned target-local
 file. Preserve the exact project name, environment, service paths, and non-`4789` ports. Replace every
 `.invalid`, zero digest, adapter placeholder, and WSS real-IP placeholder before enabling the

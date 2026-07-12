@@ -50,12 +50,14 @@ The generated package is the source of truth for the current list. The core surf
   `visible_dm_promotion_consents`
 - outcomes/files: `visible_decisions`, `visible_tasks`, `visible_files`, `my_file_uploads`
 - attention/audit: `my_notifications`, `my_command_receipts`, `visible_audit_log`
+- attention/presence: `visible_presence`, `my_notification_preferences`
 - agents: `visible_agent_installations`, `visible_agent_scopes`, `visible_agent_tool_policies`,
   `visible_agent_runs`, `visible_agent_run_events`, `visible_agent_tool_calls`,
   `visible_approvals`, `visible_agent_context_manifests`
 
-Worker-only views such as pending outbox, search-document, file-processing, context-candidate, and
-agent-work queues require an enabled service grant and must never be subscribed to by the browser.
+Worker-only views such as pending outbox, notification-delivery-plan, search-document,
+file-processing, context-candidate, and agent-work queues require an enabled service grant and must
+never be subscribed to by the browser.
 Direct messages are intentionally absent from search. Workspace owners and administrators have no
 role-based bypass into a direct conversation; render only rows supplied by the caller-aware views.
 
@@ -65,6 +67,12 @@ All public reducer arguments and enum types come from the generated package. Eve
 mutation should use a fresh command ID and preserve it across transport retries. A transport retry
 may repeat the same command ID; a distinct user action must use a distinct command ID. Treat the
 matching receipt as the authoritative resolution after a reconnect.
+
+Presence uses `heartbeat_presence` as disposable advisory state. It never grants access, and the UI
+must compare the aggregate `expires_at` value with its own current time because bounded cleanup may
+lag. Notification settings use `set_notification_preference`; workspace defaults may be overridden
+per visible space. Local mute and digest minutes are stored with an IANA-style timezone identifier
+so a future scheduler can apply daylight-saving rules rather than persisting a stale UTC offset.
 
 Optimistic UI is allowed only when it can roll back. Never optimistically elevate a role, reveal a
 private object, approve an agent tool, mark a quarantined file clean, or display a search result that

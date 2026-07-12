@@ -84,6 +84,15 @@ Provisional retention, subject to user/legal approval: hourly for 48 hours, dail
 
 Run before launch, after every storage/database upgrade, after material schema changes, and at least monthly thereafter:
 
+The current automated first half is intentionally bounded. It checks the restored database identity,
+initialization provenance, and reviewed canonical schema digest, availability of 61 private authority tables, 65 aggregate-only
+cross-reference invariants, and bounded audit referential continuity over a
+loopback-only endpoint without printing row data. Its signed marker remains
+`traffic_eligible=false`: deletion lifecycle overlay, object inventory, search rebuild, and provider
+checks are `NotConfigured`, current module code and outbox lease shape are `NotVerified`, and audit continuity is only
+`BoundedReferentialOnly`. The remaining
+steps below are still mandatory.
+
 1. Create a fresh isolated staging environment with outbound email/push/webhooks disabled.
 2. Verify manifest signatures/checksums and restore the complete SpacetimeDB root using the pinned server image/version.
 3. Verify module load, row counts and domain invariants, tenant/private-space isolation, authorization epochs, audit continuity, and outbox lease recovery.

@@ -19,6 +19,8 @@ mod reducer_contract_tests {
     use crate::policy::{
         PrivateDirectMessageOperation, PrivateDirectMessageTarget, PrivateReplayDisposition,
         direct_message_replay_gate, direct_message_target_gate,
+        notification_coalesce_binding_valid, notification_delivery_allowed,
+        notification_preference_valid, presence_authorizes, presence_heartbeat_valid,
     };
 
     fn assert_private_denial_equivalence(operation: PrivateDirectMessageOperation, expected: &str) {
@@ -72,5 +74,29 @@ mod reducer_contract_tests {
             PrivateDirectMessageOperation::Delete,
             "delete direct message unavailable",
         );
+    }
+
+    #[test]
+    fn presence_reducer_contract_is_bounded_and_non_authoritative() {
+        assert!(presence_heartbeat_valid(60, "Desktop"));
+        assert!(!presence_heartbeat_valid(301, "Desktop"));
+        assert!(!presence_authorizes(true));
+    }
+
+    #[test]
+    fn notification_reducer_contract_rechecks_permission_and_mute_state() {
+        assert!(notification_preference_valid(
+            Some(1_320),
+            Some(420),
+            540,
+            "America/New_York",
+        ));
+        assert!(notification_coalesce_binding_valid(true, true, true, true));
+        assert!(!notification_coalesce_binding_valid(
+            true, true, false, true
+        ));
+        assert!(notification_delivery_allowed(true, true, false));
+        assert!(!notification_delivery_allowed(false, true, false));
+        assert!(!notification_delivery_allowed(true, true, true));
     }
 }

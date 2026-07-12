@@ -130,10 +130,11 @@ const payloadFor = (
   const version = (): number => safeNumber(option(row.version, "version"), "version");
   switch (row.kind) {
     case "notification.deliver": {
+      const deliveryRevision = version();
       const intentId = requireAuthorityBinding(
         "notification",
         option(row.intentId, "intent_id"),
-        0,
+        deliveryRevision,
       );
       return {
         intentId,
@@ -147,6 +148,7 @@ const payloadFor = (
           option(row.authorizationEpoch, "authorization_epoch"),
           "authorization_epoch",
         ),
+        deliveryRevision,
         minimalMessage: option(row.minimalMessage || undefined, "minimal_message"),
       };
     }

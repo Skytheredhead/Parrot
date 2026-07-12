@@ -7,6 +7,7 @@ import {
   HandlerRegistry,
   InMemoryAuthorizationGate,
   InMemoryEffectLedger,
+  InMemoryNotificationDeliveryAuthority,
   InMemoryNotificationProvider,
   InMemorySpanExporter,
   InMemoryTransactionalOutbox,
@@ -37,10 +38,11 @@ const setup = (workerId = "worker-a") => {
   const store = new InMemoryTransactionalOutbox(clock);
   const ledger = new InMemoryEffectLedger(clock);
   const authorization = new InMemoryAuthorizationGate();
+  const notificationAuthority = new InMemoryNotificationDeliveryAuthority();
   const provider = new InMemoryNotificationProvider();
   const registry = new HandlerRegistry().register(
     "notification.deliver",
-    createNotificationDeliveryHandler(authorization, provider),
+    createNotificationDeliveryHandler(authorization, notificationAuthority, provider),
   );
   const retry = new RetryPolicy(
     { baseMs: 100, capMs: 10_000, jitterRatio: 0, maxAttempts: 4, maxAgeMs: 60_000 },
@@ -57,7 +59,18 @@ const setup = (workerId = "worker-a") => {
     new StructuredLogger("test-worker", "debug", logSink),
     new OpenTelemetry(clock, new InMemorySpanExporter()),
   );
-  return { clock, store, ledger, authorization, provider, registry, retry, consumer, logSink };
+  return {
+    clock,
+    store,
+    ledger,
+    authorization,
+    notificationAuthority,
+    provider,
+    registry,
+    retry,
+    consumer,
+    logSink,
+  };
 };
 
 const notificationJob = (id: string, intentId = `intent-${id}`) =>
@@ -72,6 +85,7 @@ const notificationJob = (id: string, intentId = `intent-${id}`) =>
         channel: "email",
         resourceId: "post-1",
         authorizationEpoch: 2,
+        deliveryRevision: 1,
         minimalMessage: "Activity needs your attention",
       },
     },
@@ -92,10 +106,11 @@ const consumerForStore = (
 ) => {
   const ledger = new InMemoryEffectLedger(clock);
   const authorization = new InMemoryAuthorizationGate();
+  const notificationAuthority = new InMemoryNotificationDeliveryAuthority();
   const provider = new InMemoryNotificationProvider();
   const registry = new HandlerRegistry().register(
     "notification.deliver",
-    createNotificationDeliveryHandler(authorization, provider),
+    createNotificationDeliveryHandler(authorization, notificationAuthority, provider),
   );
   const retry = new RetryPolicy(
     { baseMs: 10, capMs: 100, jitterRatio: 0, maxAttempts: 4, maxAgeMs: 60_000 },
@@ -367,6 +382,7 @@ test("same semantic effect with changed payload fails closed as a conflict", asy
         channel: "email",
         resourceId: "post-1",
         authorizationEpoch: 2,
+        deliveryRevision: 1,
         minimalMessage: "Activity needs your attention",
       },
     },
@@ -439,6 +455,7 @@ test("notification bodies are bounded before provider delivery", async () => {
         channel: "email",
         resourceId: "post-1",
         authorizationEpoch: 2,
+        deliveryRevision: 1,
         minimalMessage: "x".repeat(1_001),
       },
     },
@@ -449,7 +466,7 @@ test("notification bodies are bounded before provider delivery", async () => {
   assert.equal(provider.calls.length, 0);
   assert.equal(
     (await store.get("job-oversized"))?.deadLetterReason,
-    "notification_message_too_large",
+    "notification_message_invalid",
   );
 });
 
@@ -759,6 +776,7 @@ test("effect payload complexity, bytes, and semantic identifiers are bounded bef
             channel: "email",
             resourceId: "post-1",
             authorizationEpoch: 2,
+            deliveryRevision: 1,
             minimalMessage: "x".repeat(300_000),
           },
         },

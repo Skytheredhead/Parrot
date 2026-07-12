@@ -1,11 +1,14 @@
 use crate::authz::*;
 use crate::model::*;
-use spacetimedb::{Identity, ReducerContext, Table, TimeDuration, Uuid};
+use spacetimedb::{DbContext, Identity, ReducerContext, Table, TimeDuration, Uuid};
 
 const POLICY_VERSION: u32 = 1;
 const OUTBOX_MAX_ATTEMPTS: u32 = 12;
 const OUTBOX_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const MAX_REPLY_DEPTH: u32 = 32;
+const MAX_PRESENCE_SESSIONS_PER_SCOPE: usize = 8;
+const NOTIFICATION_GROUP_WINDOW_SECONDS: i64 = 5 * 60;
+const NOTIFICATION_PERMIT_MAX_SECONDS: u32 = 5;
 const JOB_NOTIFICATION_DELIVER: &str =
     crate::policy::CanonicalJobKind::NotificationDeliver.as_str();
 const JOB_SEARCH_UPSERT: &str = crate::policy::CanonicalJobKind::SearchUpsert.as_str();
@@ -223,6 +226,13 @@ fn has_application_state(ctx: &ReducerContext) -> bool {
         || ctx.db.decision_record().count() != 0
         || ctx.db.task_item().count() != 0
         || ctx.db.notification().count() != 0
+        || ctx.db.notification_control().count() != 0
+        || ctx.db.notification_group().count() != 0
+        || ctx.db.notification_delivery_permit().count() != 0
+        || ctx.db.notification_preference().count() != 0
+        || ctx.db.presence_session().count() != 0
+        || ctx.db.current_presence().count() != 0
+        || ctx.db.presence_expiry_schedule().count() != 0
         || ctx.db.service_principal().count() != 0
         || ctx.db.service_grant().count() != 0
         || ctx.db.agent_installation().count() != 0
@@ -416,6 +426,7 @@ impl OutboxSemanticPayload {
                     && self.authorization_epoch.is_some()
                     && !self.minimal_message.is_empty()
                     && self.payload_resource_id.is_some()
+                    && self.version.is_some()
             }
             JOB_SEARCH_UPSERT | JOB_SEARCH_TOMBSTONE => {
                 self.payload_resource_id.is_some()
@@ -453,7 +464,9 @@ fn enqueue_outbox(ctx: &ReducerContext, input: OutboxInsert<'_>) -> Result<(), S
         payload,
     } = input;
     let common_fields_match = match kind {
-        JOB_NOTIFICATION_DELIVER => payload.intent_id == Some(resource_id),
+        JOB_NOTIFICATION_DELIVER => {
+            payload.intent_id == Some(resource_id) && payload.version == Some(resource_revision)
+        }
         JOB_SEARCH_UPSERT | JOB_SEARCH_TOMBSTONE => {
             payload.payload_resource_id == Some(resource_id)
                 && payload.version == Some(resource_revision)
@@ -650,6 +663,533 @@ fn refresh_space_search_acl(ctx: &ReducerContext, space_id: Uuid) -> Result<(), 
         }
     }
     Ok(())
+}
+
+fn presence_session_key(workspace_id: Uuid, identity: Identity, session_id: Uuid) -> String {
+    format!("{workspace_id}:{identity}:{session_id}")
+}
+
+fn presence_scope_key(workspace_id: Uuid, identity: Identity) -> String {
+    format!("{workspace_id}:{identity}")
+}
+
+fn remove_presence_session(ctx: &ReducerContext, presence_key: &str) {
+    ctx.db
+        .presence_session()
+        .key()
+        .delete(presence_key.to_string());
+    ctx.db
+        .presence_expiry_schedule()
+        .presence_key()
+        .delete(presence_key.to_string());
+}
+
+fn refresh_current_presence(ctx: &ReducerContext, workspace_id: Uuid, identity: Identity) {
+    let scope_key = presence_scope_key(workspace_id, identity);
+    let latest = ctx
+        .db
+        .presence_session()
+        .scope_key()
+        .filter(&scope_key)
+        .filter(|session| session.expires_at > ctx.timestamp)
+        .max_by_key(|session| session.expires_at);
+    if let Some(session) = latest {
+        let row = CurrentPresence {
+            key: scope_key.clone(),
+            workspace_id,
+            identity,
+            status: session.status,
+            expires_at: session.expires_at,
+            updated_at: ctx.timestamp,
+        };
+        if ctx.db.current_presence().key().find(scope_key).is_some() {
+            ctx.db.current_presence().key().update(row);
+        } else {
+            ctx.db.current_presence().insert(row);
+        }
+    } else {
+        ctx.db.current_presence().key().delete(scope_key);
+    }
+}
+
+fn notification_preference_key(
+    workspace_id: Uuid,
+    space_id: Option<Uuid>,
+    identity: Identity,
+) -> String {
+    format!(
+        "{workspace_id}:{identity}:{}",
+        space_id.map_or_else(|| "workspace".into(), |id| id.to_string())
+    )
+}
+
+fn notification_coalesce_key(
+    workspace_id: Uuid,
+    recipient_identity: Identity,
+    kind: NotificationKind,
+    resource_type: &str,
+    resource_id: Uuid,
+) -> String {
+    format!("{workspace_id}:{recipient_identity}:{kind:?}:{resource_type}:{resource_id}")
+}
+
+fn notification_tier(kind: NotificationKind) -> NotificationTier {
+    match kind {
+        NotificationKind::Mention | NotificationKind::Assignment => NotificationTier::Direct,
+        NotificationKind::Decision | NotificationKind::Agent => NotificationTier::Important,
+        NotificationKind::System => NotificationTier::Ambient,
+    }
+}
+
+pub(crate) struct ResolvedNotificationPreference {
+    pub(crate) mode: NotificationDeliveryMode,
+    pub(crate) mute_window_configured: bool,
+    pub(crate) revision: u64,
+}
+
+pub(crate) fn notification_mode<C: DbContext>(
+    ctx: &C,
+    workspace_id: Uuid,
+    space_id: Option<Uuid>,
+    identity: Identity,
+    tier: NotificationTier,
+) -> ResolvedNotificationPreference {
+    let preference =
+        space_id
+            .and_then(|space_id| {
+                ctx.db_read_only().notification_preference().key().find(
+                    notification_preference_key(workspace_id, Some(space_id), identity),
+                )
+            })
+            .or_else(|| {
+                ctx.db_read_only()
+                    .notification_preference()
+                    .key()
+                    .find(notification_preference_key(workspace_id, None, identity))
+            });
+    let default = match tier {
+        NotificationTier::Direct | NotificationTier::Important => {
+            NotificationDeliveryMode::Immediate
+        }
+        NotificationTier::Ambient => NotificationDeliveryMode::Digest,
+    };
+    preference.map_or(
+        ResolvedNotificationPreference {
+            mode: default,
+            mute_window_configured: false,
+            revision: 0,
+        },
+        |preference| {
+            let mode = match tier {
+                NotificationTier::Direct => preference.direct_mode,
+                NotificationTier::Important => preference.important_mode,
+                NotificationTier::Ambient => preference.ambient_mode,
+            };
+            ResolvedNotificationPreference {
+                mode,
+                mute_window_configured: preference.mute_start_local_minute.is_some(),
+                revision: preference.revision,
+            }
+        },
+    )
+}
+
+pub(crate) fn notification_resource_revision<C: DbContext>(
+    ctx: &C,
+    workspace_id: Uuid,
+    resource_type: &str,
+    resource_id: Uuid,
+) -> Option<u64> {
+    match resource_type {
+        "post" => ctx
+            .db_read_only()
+            .post()
+            .id()
+            .find(resource_id)
+            .filter(|post| post.workspace_id == workspace_id && !post.deleted)
+            .map(|post| post.revision),
+        "task" => ctx
+            .db_read_only()
+            .task_item()
+            .id()
+            .find(resource_id)
+            .filter(|task| task.workspace_id == workspace_id)
+            .map(|task| task.revision),
+        _ => None,
+    }
+}
+
+pub(crate) fn notification_resource_visible_to<C: DbContext>(
+    ctx: &C,
+    workspace_id: Uuid,
+    identity: Identity,
+    resource_type: &str,
+    resource_id: Uuid,
+) -> bool {
+    if !can_read_workspace(ctx, workspace_id, identity) {
+        return false;
+    }
+    match resource_type {
+        "post" => ctx
+            .db_read_only()
+            .post()
+            .id()
+            .find(resource_id)
+            .is_some_and(|post| {
+                post.workspace_id == workspace_id
+                    && !post.deleted
+                    && ctx
+                        .db_read_only()
+                        .space()
+                        .id()
+                        .find(post.space_id)
+                        .is_some_and(|space| can_read_space(ctx, &space, identity))
+            }),
+        "task" => ctx
+            .db_read_only()
+            .task_item()
+            .id()
+            .find(resource_id)
+            .is_some_and(|task| {
+                task.workspace_id == workspace_id
+                    && task.thread_id.is_none_or(|thread_id| {
+                        ctx.db_read_only()
+                            .named_thread()
+                            .id()
+                            .find(thread_id)
+                            .and_then(|thread| {
+                                ctx.db_read_only().space().id().find(thread.space_id)
+                            })
+                            .is_some_and(|space| can_read_space(ctx, &space, identity))
+                    })
+            }),
+        _ => false,
+    }
+}
+
+pub(crate) struct NotificationAuthoritySnapshot {
+    pub(crate) delivery_state: NotificationDeliveryState,
+    pub(crate) suppression_reason: String,
+    pub(crate) membership_epoch: u64,
+    pub(crate) preference_revision: u64,
+    pub(crate) resource_revision: u64,
+}
+
+pub(crate) fn notification_authority_snapshot<C: DbContext>(
+    ctx: &C,
+    notification: &Notification,
+    control: &NotificationControl,
+) -> NotificationAuthoritySnapshot {
+    let membership = find_membership(ctx, control.workspace_id, control.recipient_identity)
+        .filter(|membership| membership.active);
+    let preference = notification_mode(
+        ctx,
+        control.workspace_id,
+        control.space_id,
+        control.recipient_identity,
+        control.tier,
+    );
+    let resource_revision = notification_resource_revision(
+        ctx,
+        control.workspace_id,
+        &control.resource_type,
+        control.resource_id,
+    )
+    .unwrap_or(0);
+    let binding_current = notification.id == control.notification_id
+        && notification.workspace_id == control.workspace_id
+        && notification.recipient_identity == control.recipient_identity
+        && notification.kind == control.event_class
+        && notification.resource_type == control.resource_type
+        && notification.resource_id == control.resource_id;
+    let permission_current = notification_resource_visible_to(
+        ctx,
+        control.workspace_id,
+        control.recipient_identity,
+        &control.resource_type,
+        control.resource_id,
+    );
+    let membership_epoch = membership
+        .as_ref()
+        .map_or(0, |membership| membership.authz_epoch);
+    let current = binding_current
+        && permission_current
+        && membership_epoch == control.membership_epoch
+        && resource_revision == control.resource_revision
+        && preference.revision == control.preference_revision
+        && preference.mode == NotificationDeliveryMode::Immediate
+        && !preference.mute_window_configured;
+    let suppression_reason = if !binding_current {
+        "authority_binding_stale"
+    } else if membership.is_none() || !permission_current {
+        "permission_revoked"
+    } else if membership_epoch != control.membership_epoch {
+        "membership_epoch_stale"
+    } else if resource_revision != control.resource_revision {
+        "resource_revision_stale"
+    } else if preference.revision != control.preference_revision {
+        "preference_revision_stale"
+    } else if preference.mute_window_configured {
+        "mute_window"
+    } else {
+        match preference.mode {
+            NotificationDeliveryMode::Immediate => "",
+            NotificationDeliveryMode::Digest => "digest",
+            NotificationDeliveryMode::Disabled => "disabled",
+        }
+    };
+    NotificationAuthoritySnapshot {
+        delivery_state: if current {
+            NotificationDeliveryState::Pending
+        } else {
+            NotificationDeliveryState::Suppressed
+        },
+        suppression_reason: suppression_reason.into(),
+        membership_epoch,
+        preference_revision: preference.revision,
+        resource_revision,
+    }
+}
+
+struct NotificationIntent<'a> {
+    workspace_id: Uuid,
+    space_id: Option<Uuid>,
+    recipient_identity: Identity,
+    kind: NotificationKind,
+    resource_type: &'a str,
+    resource_id: Uuid,
+    summary: &'a str,
+}
+
+fn coalesce_notification(
+    ctx: &ReducerContext,
+    intent: NotificationIntent<'_>,
+) -> Result<Option<Uuid>, String> {
+    if !notification_resource_visible_to(
+        ctx,
+        intent.workspace_id,
+        intent.recipient_identity,
+        intent.resource_type,
+        intent.resource_id,
+    ) {
+        return Ok(None);
+    }
+    let tier = notification_tier(intent.kind);
+    let base_key = notification_coalesce_key(
+        intent.workspace_id,
+        intent.recipient_identity,
+        intent.kind,
+        intent.resource_type,
+        intent.resource_id,
+    );
+    let resource_revision = notification_resource_revision(
+        ctx,
+        intent.workspace_id,
+        intent.resource_type,
+        intent.resource_id,
+    )
+    .ok_or_else(|| "notification resource revision unavailable".to_string())?;
+    let membership = find_membership(ctx, intent.workspace_id, intent.recipient_identity)
+        .filter(|membership| membership.active)
+        .ok_or_else(|| "notification recipient membership unavailable".to_string())?;
+    let preference = notification_mode(
+        ctx,
+        intent.workspace_id,
+        intent.space_id,
+        intent.recipient_identity,
+        tier,
+    );
+    let existing_group = ctx
+        .db
+        .notification_group()
+        .base_key()
+        .find(base_key.clone());
+    let same_window = crate::policy::notification_group_window_reusable(
+        existing_group
+            .as_ref()
+            .is_some_and(|group| group.window_expires_at > ctx.timestamp),
+    );
+    let (notification_id, group_key, group_revision, window_started_at, window_expires_at) =
+        if same_window {
+            let mut group = existing_group.expect("same-window group must exist");
+            group.group_revision = group
+                .group_revision
+                .checked_add(1)
+                .ok_or_else(|| "notification group revision exhausted".to_string())?;
+            group.updated_at = ctx.timestamp;
+            let mut notification = ctx
+                .db
+                .notification()
+                .id()
+                .find(group.notification_id)
+                .ok_or_else(|| "notification group row unavailable".to_string())?;
+            if !crate::policy::notification_coalesce_binding_valid(
+                notification.recipient_identity == intent.recipient_identity,
+                notification.workspace_id == intent.workspace_id,
+                notification.resource_type == intent.resource_type
+                    && notification.resource_id == intent.resource_id,
+                notification.kind == intent.kind,
+            ) {
+                return Err("notification coalescing authority mismatch".into());
+            }
+            notification.summary = intent.summary.into();
+            notification.read_at = None;
+            ctx.db.notification().id().update(notification);
+            let result = (
+                group.notification_id,
+                group.group_key.clone(),
+                group.group_revision,
+                group.window_started_at,
+                group.window_expires_at,
+            );
+            ctx.db.notification_group().base_key().update(group);
+            result
+        } else {
+            let notification_id = new_id(ctx)?;
+            let group_key = new_id(ctx)?.to_string();
+            let window_expires_at = ctx.timestamp
+                + TimeDuration::from_micros(NOTIFICATION_GROUP_WINDOW_SECONDS * 1_000_000);
+            ctx.db.notification().insert(Notification {
+                id: notification_id,
+                workspace_id: intent.workspace_id,
+                recipient_identity: intent.recipient_identity,
+                kind: intent.kind,
+                resource_type: intent.resource_type.into(),
+                resource_id: intent.resource_id,
+                summary: intent.summary.into(),
+                read_at: None,
+                created_at: ctx.timestamp,
+            });
+            let group = NotificationGroup {
+                base_key,
+                group_key: group_key.clone(),
+                notification_id,
+                group_revision: 1,
+                window_started_at: ctx.timestamp,
+                window_expires_at,
+                updated_at: ctx.timestamp,
+            };
+            if existing_group.is_some() {
+                ctx.db.notification_group().base_key().update(group);
+            } else {
+                ctx.db.notification_group().insert(group);
+            }
+            (
+                notification_id,
+                group_key,
+                1,
+                ctx.timestamp,
+                window_expires_at,
+            )
+        };
+    let permission_current = notification_resource_visible_to(
+        ctx,
+        intent.workspace_id,
+        intent.recipient_identity,
+        intent.resource_type,
+        intent.resource_id,
+    );
+    let delivery_allowed = crate::policy::notification_delivery_allowed(
+        permission_current,
+        preference.mode == NotificationDeliveryMode::Immediate,
+        preference.mute_window_configured,
+    );
+    let suppression_reason = if !permission_current {
+        "permission_revoked"
+    } else if preference.mute_window_configured {
+        "mute_window"
+    } else {
+        match preference.mode {
+            NotificationDeliveryMode::Immediate => "",
+            NotificationDeliveryMode::Digest => "digest",
+            NotificationDeliveryMode::Disabled => "disabled",
+        }
+    };
+    let occurrence_count = ctx
+        .db
+        .notification_control()
+        .notification_id()
+        .find(notification_id)
+        .map(|control| {
+            control
+                .occurrence_count
+                .checked_add(1)
+                .ok_or_else(|| "notification occurrence count exhausted".to_string())
+        })
+        .transpose()?
+        .unwrap_or(1);
+    let control = NotificationControl {
+        notification_id,
+        workspace_id: intent.workspace_id,
+        recipient_identity: intent.recipient_identity,
+        space_id: intent.space_id,
+        tier,
+        event_class: intent.kind,
+        resource_type: intent.resource_type.into(),
+        resource_id: intent.resource_id,
+        resource_revision,
+        group_key: group_key.clone(),
+        group_revision,
+        occurrence_count,
+        membership_epoch: membership.authz_epoch,
+        preference_revision: preference.revision,
+        channel: "email".into(),
+        delivery_state: if delivery_allowed {
+            NotificationDeliveryState::Pending
+        } else {
+            NotificationDeliveryState::Suppressed
+        },
+        suppression_reason: suppression_reason.into(),
+        window_started_at,
+        window_expires_at,
+        created_at: ctx
+            .db
+            .notification_control()
+            .notification_id()
+            .find(notification_id)
+            .map_or(ctx.timestamp, |control| control.created_at),
+        updated_at: ctx.timestamp,
+    };
+    if ctx
+        .db
+        .notification_control()
+        .notification_id()
+        .find(notification_id)
+        .is_some()
+    {
+        ctx.db
+            .notification_control()
+            .notification_id()
+            .update(control);
+    } else {
+        ctx.db.notification_control().insert(control);
+    }
+    if delivery_allowed {
+        enqueue_outbox(
+            ctx,
+            OutboxInsert {
+                workspace_id: intent.workspace_id,
+                kind: JOB_NOTIFICATION_DELIVER,
+                resource_type: "notification",
+                resource_id: notification_id,
+                resource_revision: group_revision,
+                effect_key: format!(
+                    "notification:{notification_id}:group:{group_key}:revision:{group_revision}"
+                ),
+                payload: OutboxSemanticPayload {
+                    intent_id: Some(notification_id),
+                    recipient_id: Some(intent.recipient_identity),
+                    channel: "email".into(),
+                    authorization_epoch: Some(membership.authz_epoch),
+                    minimal_message: intent.summary.into(),
+                    payload_resource_id: Some(intent.resource_id),
+                    version: Some(group_revision),
+                    ..Default::default()
+                },
+            },
+        )?;
+    }
+    Ok(Some(notification_id))
 }
 
 fn is_terminal(state: AgentRunState) -> bool {
@@ -1042,6 +1582,39 @@ pub fn migrate_platform_authority(ctx: &ReducerContext) -> Result<(), String> {
                 }
             }
         }
+    }
+    for mut job in ctx
+        .db
+        .outbox_job()
+        .state()
+        .filter(OutboxState::Pending)
+        .chain(ctx.db.outbox_job().state().filter(OutboxState::Retry))
+        .chain(
+            ctx.db
+                .outbox_job()
+                .state()
+                .filter(OutboxState::OutcomeUnknown),
+        )
+        .chain(ctx.db.outbox_job().state().filter(OutboxState::Leased))
+        .filter(|job| {
+            job.kind == JOB_NOTIFICATION_DELIVER
+                && (job.version.is_none()
+                    || job.resource_revision == 0
+                    || ctx
+                        .db
+                        .notification_control()
+                        .notification_id()
+                        .find(job.resource_id)
+                        .is_none())
+        })
+    {
+        job.state = OutboxState::DeadLetter;
+        job.last_error = "legacy_notification_delivery_suppressed".into();
+        job.lease_owner = None;
+        job.worker_slot_id.clear();
+        job.lease_until = None;
+        job.updated_at = ctx.timestamp;
+        ctx.db.outbox_job().id().update(job);
     }
     Ok(())
 }
@@ -1926,17 +2499,18 @@ fn replace_post_metadata(
             created_at: ctx.timestamp,
         });
         if identity != ctx.sender() && !existing_mentions.contains(&identity) {
-            ctx.db.notification().insert(Notification {
-                id: new_id(ctx)?,
-                workspace_id: post.workspace_id,
-                recipient_identity: identity,
-                kind: NotificationKind::Mention,
-                resource_type: "post".into(),
-                resource_id: post.id,
-                summary: "You were mentioned in a post".into(),
-                read_at: None,
-                created_at: ctx.timestamp,
-            });
+            coalesce_notification(
+                ctx,
+                NotificationIntent {
+                    workspace_id: post.workspace_id,
+                    space_id: Some(post.space_id),
+                    recipient_identity: identity,
+                    kind: NotificationKind::Mention,
+                    resource_type: "post",
+                    resource_id: post.id,
+                    summary: "You were mentioned in a post",
+                },
+            )?;
         }
     }
     Ok(())
@@ -2399,7 +2973,6 @@ pub fn set_post_metadata(
         return Ok(());
     }
     revision_matches(post.revision, expected_revision)?;
-    replace_post_metadata(ctx, &post, tags, mentions)?;
     post.revision = post.revision.saturating_add(1);
     post.updated_at = ctx.timestamp;
     append_post_activity(
@@ -2409,6 +2982,7 @@ pub fn set_post_metadata(
         "Post tags or mentions updated",
     )?;
     ctx.db.post().id().update(post.clone());
+    replace_post_metadata(ctx, &post, tags, mentions)?;
     insert_receipt(
         ctx,
         Some(post.workspace_id),
@@ -2495,17 +3069,18 @@ pub fn update_post_lifecycle(
         && Some(identity) != previous_assignee
         && identity != ctx.sender()
     {
-        ctx.db.notification().insert(Notification {
-            id: new_id(ctx)?,
-            workspace_id: post.workspace_id,
-            recipient_identity: identity,
-            kind: NotificationKind::Assignment,
-            resource_type: "post".into(),
-            resource_id: post.id,
-            summary: "A post was assigned to you".into(),
-            read_at: None,
-            created_at: ctx.timestamp,
-        });
+        coalesce_notification(
+            ctx,
+            NotificationIntent {
+                workspace_id: post.workspace_id,
+                space_id: Some(post.space_id),
+                recipient_identity: identity,
+                kind: NotificationKind::Assignment,
+                resource_type: "post",
+                resource_id: post.id,
+                summary: "A post was assigned to you",
+            },
+        )?;
     }
     insert_receipt(
         ctx,
@@ -4786,36 +5361,22 @@ pub fn create_task(
         created_at: ctx.timestamp,
         updated_at: ctx.timestamp,
     });
-    let notification_id = new_id(ctx)?;
-    ctx.db.notification().insert(Notification {
-        id: notification_id,
-        workspace_id,
-        recipient_identity: assignee.identity,
-        kind: NotificationKind::Assignment,
-        resource_type: "task".into(),
-        resource_id: id,
-        summary: "You were assigned a task".into(),
-        read_at: None,
-        created_at: ctx.timestamp,
-    });
-    enqueue_outbox(
+    coalesce_notification(
         ctx,
-        OutboxInsert {
+        NotificationIntent {
             workspace_id,
-            kind: JOB_NOTIFICATION_DELIVER,
-            resource_type: "notification",
-            resource_id: notification_id,
-            resource_revision: 0,
-            effect_key: format!("notification:{notification_id}"),
-            payload: OutboxSemanticPayload {
-                intent_id: Some(notification_id),
-                recipient_id: Some(assignee.identity),
-                channel: "email".into(),
-                authorization_epoch: Some(assignee.authz_epoch),
-                minimal_message: "You were assigned a task".into(),
-                payload_resource_id: Some(id),
-                ..Default::default()
-            },
+            space_id: thread_id.and_then(|thread_id| {
+                ctx.db
+                    .named_thread()
+                    .id()
+                    .find(thread_id)
+                    .map(|thread| thread.space_id)
+            }),
+            recipient_identity: assignee.identity,
+            kind: NotificationKind::Assignment,
+            resource_type: "task",
+            resource_id: id,
+            summary: "You were assigned a task",
         },
     )?;
     insert_receipt(
@@ -5312,6 +5873,352 @@ pub fn delete_file(
 }
 
 #[spacetimedb::reducer]
+pub fn heartbeat_presence(
+    ctx: &ReducerContext,
+    input: HeartbeatPresenceInput,
+) -> Result<(), String> {
+    require_workspace_action(ctx, input.workspace_id, Action::Read)?;
+    if !crate::policy::presence_heartbeat_valid(input.ttl_seconds, &input.device_label) {
+        return Err("presence heartbeat metadata or ttl is invalid".into());
+    }
+    if crate::policy::presence_authorizes(true) {
+        return Err("presence must never grant authorization".into());
+    }
+    let scope_key = presence_scope_key(input.workspace_id, ctx.sender());
+    let expired_keys: Vec<_> = ctx
+        .db
+        .presence_session()
+        .scope_key()
+        .filter(&scope_key)
+        .filter(|session| session.expires_at <= ctx.timestamp)
+        .map(|session| session.key)
+        .collect();
+    for expired_key in expired_keys {
+        remove_presence_session(ctx, &expired_key);
+    }
+    let key = presence_session_key(input.workspace_id, ctx.sender(), input.session_id);
+    let expires_at =
+        ctx.timestamp + TimeDuration::from_micros(i64::from(input.ttl_seconds) * 1_000_000);
+    if let Some(mut session) = ctx.db.presence_session().key().find(key.clone()) {
+        session.device_kind = input.device_kind;
+        session.device_label = input.device_label;
+        session.status = input.status;
+        session.heartbeat_at = ctx.timestamp;
+        session.expires_at = expires_at;
+        ctx.db.presence_session().key().update(session);
+    } else {
+        let active_count = ctx
+            .db
+            .presence_session()
+            .scope_key()
+            .filter(&scope_key)
+            .count();
+        if !crate::policy::presence_session_admission_allowed(
+            false,
+            active_count,
+            MAX_PRESENCE_SESSIONS_PER_SCOPE,
+        ) {
+            return Err("presence session cap reached for identity and workspace".into());
+        }
+        ctx.db.presence_session().insert(PresenceSession {
+            key: key.clone(),
+            scope_key: scope_key.clone(),
+            workspace_id: input.workspace_id,
+            identity: ctx.sender(),
+            session_id: input.session_id,
+            device_kind: input.device_kind,
+            device_label: input.device_label,
+            status: input.status,
+            created_at: ctx.timestamp,
+            heartbeat_at: ctx.timestamp,
+            expires_at,
+        });
+    }
+    let schedule = PresenceExpirySchedule {
+        scheduled_id: ctx
+            .db
+            .presence_expiry_schedule()
+            .presence_key()
+            .find(key.clone())
+            .map_or(0, |row| row.scheduled_id),
+        scheduled_at: expires_at.into(),
+        presence_key: key.clone(),
+        expected_expires_at: expires_at,
+    };
+    if schedule.scheduled_id == 0 {
+        ctx.db.presence_expiry_schedule().insert(schedule);
+    } else {
+        ctx.db
+            .presence_expiry_schedule()
+            .scheduled_id()
+            .update(schedule);
+    }
+    refresh_current_presence(ctx, input.workspace_id, ctx.sender());
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn expire_presence_schedule(
+    ctx: &ReducerContext,
+    schedule: PresenceExpirySchedule,
+) -> Result<(), String> {
+    if ctx.sender() != ctx.database_identity() {
+        return Err("presence expiry may only be invoked by the scheduler".into());
+    }
+    if let Some(session) = ctx
+        .db
+        .presence_session()
+        .key()
+        .find(schedule.presence_key.clone())
+        && session.expires_at == schedule.expected_expires_at
+        && session.expires_at <= ctx.timestamp
+    {
+        let workspace_id = session.workspace_id;
+        let identity = session.identity;
+        ctx.db.presence_session().key().delete(session.key);
+        refresh_current_presence(ctx, workspace_id, identity);
+    }
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn expire_presence_sessions(
+    ctx: &ReducerContext,
+    workspace_id: Uuid,
+    max_rows: u32,
+) -> Result<(), String> {
+    require_workspace_action(ctx, workspace_id, Action::Read)?;
+    if !(1..=256).contains(&max_rows) {
+        return Err("presence cleanup limit must be between 1 and 256".into());
+    }
+    let expired: Vec<_> = ctx
+        .db
+        .presence_session()
+        .workspace_id()
+        .filter(workspace_id)
+        .filter(|session| session.expires_at <= ctx.timestamp)
+        .take(max_rows as usize)
+        .map(|session| (session.key, session.identity))
+        .collect();
+    for (key, identity) in expired {
+        remove_presence_session(ctx, &key);
+        refresh_current_presence(ctx, workspace_id, identity);
+    }
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn set_notification_preference(
+    ctx: &ReducerContext,
+    input: SetNotificationPreferenceInput,
+) -> Result<(), String> {
+    require_workspace_action(ctx, input.workspace_id, Action::Read)?;
+    if !crate::policy::notification_preference_valid(
+        input.mute_start_local_minute,
+        input.mute_end_local_minute,
+        input.digest_local_minute,
+        &input.time_zone,
+    ) {
+        return Err("notification preference is invalid".into());
+    }
+    if let Some(space_id) = input.space_id {
+        let space = ctx
+            .db
+            .space()
+            .id()
+            .find(space_id)
+            .filter(|space| space.workspace_id == input.workspace_id)
+            .ok_or_else(|| "notification preference space unavailable".to_string())?;
+        if !can_read_space(ctx, &space, ctx.sender()) {
+            return Err("notification preference space unavailable".into());
+        }
+    }
+    let input_hash = normalized_input_hash(&format!(
+        "{}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{:?}\0{}\0{}\0{}",
+        input.workspace_id,
+        input.space_id,
+        input.direct_mode,
+        input.important_mode,
+        input.ambient_mode,
+        input.mute_start_local_minute,
+        input.mute_end_local_minute,
+        input.time_zone,
+        input.digest_local_minute,
+        input.expected_revision,
+    ));
+    if existing_receipt(
+        ctx,
+        Some(input.workspace_id),
+        "set_notification_preference",
+        input.client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    let key = notification_preference_key(input.workspace_id, input.space_id, ctx.sender());
+    if let Some(mut preference) = ctx.db.notification_preference().key().find(key.clone()) {
+        revision_matches(preference.revision, input.expected_revision)?;
+        preference.direct_mode = input.direct_mode;
+        preference.important_mode = input.important_mode;
+        preference.ambient_mode = input.ambient_mode;
+        preference.mute_start_local_minute = input.mute_start_local_minute;
+        preference.mute_end_local_minute = input.mute_end_local_minute;
+        preference.time_zone = input.time_zone;
+        preference.digest_local_minute = input.digest_local_minute;
+        preference.revision = preference
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "notification preference revision exhausted".to_string())?;
+        preference.updated_at = ctx.timestamp;
+        ctx.db.notification_preference().key().update(preference);
+    } else {
+        if input.expected_revision != 0 {
+            return Err("new notification preference must use expected revision 0".into());
+        }
+        ctx.db
+            .notification_preference()
+            .insert(NotificationPreference {
+                key,
+                identity: ctx.sender(),
+                workspace_id: input.workspace_id,
+                space_id: input.space_id,
+                direct_mode: input.direct_mode,
+                important_mode: input.important_mode,
+                ambient_mode: input.ambient_mode,
+                mute_start_local_minute: input.mute_start_local_minute,
+                mute_end_local_minute: input.mute_end_local_minute,
+                time_zone: input.time_zone,
+                digest_local_minute: input.digest_local_minute,
+                revision: 1,
+                created_at: ctx.timestamp,
+                updated_at: ctx.timestamp,
+            });
+    }
+    insert_receipt(
+        ctx,
+        Some(input.workspace_id),
+        "set_notification_preference",
+        input.client_request_id,
+        input_hash,
+        "notification_preference",
+        input.space_id.unwrap_or(input.workspace_id),
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn authorize_notification_delivery(
+    ctx: &ReducerContext,
+    job_id: Uuid,
+    worker_slot_id: String,
+    lease_generation: u64,
+    permit_seconds: u32,
+) -> Result<(), String> {
+    if !crate::policy::worker_slot_id_valid(&worker_slot_id)
+        || !(1..=NOTIFICATION_PERMIT_MAX_SECONDS).contains(&permit_seconds)
+    {
+        return Err("notification delivery permit request is invalid".into());
+    }
+    let job = ctx
+        .db
+        .outbox_job()
+        .id()
+        .find(job_id)
+        .filter(|job| job.kind == JOB_NOTIFICATION_DELIVER)
+        .ok_or_else(|| "notification delivery plan unavailable".to_string())?;
+    require_service(ctx, job.workspace_id, JOB_NOTIFICATION_DELIVER)?;
+    if job.state != OutboxState::Leased
+        || job.lease_owner != Some(ctx.sender())
+        || job.worker_slot_id != worker_slot_id
+        || job.lease_generation != lease_generation
+        || job
+            .lease_until
+            .is_none_or(|expires_at| expires_at <= ctx.timestamp)
+    {
+        return Err("notification delivery plan unavailable".into());
+    }
+    let notification = ctx
+        .db
+        .notification()
+        .id()
+        .find(job.resource_id)
+        .ok_or_else(|| "notification delivery plan unavailable".to_string())?;
+    let mut control = ctx
+        .db
+        .notification_control()
+        .notification_id()
+        .find(notification.id)
+        .ok_or_else(|| "notification delivery plan unavailable".to_string())?;
+    let snapshot = notification_authority_snapshot(ctx, &notification, &control);
+    let exact_job_binding = crate::policy::notification_delivery_binding_valid(&[
+        job.resource_type == "notification",
+        job.intent_id == Some(notification.id),
+        job.recipient_id == Some(control.recipient_identity),
+        job.payload_resource_id == Some(control.resource_id),
+        job.authorization_epoch == Some(control.membership_epoch),
+        job.resource_revision == control.group_revision,
+        job.version == Some(control.group_revision),
+        job.channel == control.channel,
+        job.minimal_message == notification.summary,
+        snapshot.membership_epoch == control.membership_epoch,
+        snapshot.preference_revision == control.preference_revision,
+        snapshot.resource_revision == control.resource_revision,
+    ]);
+    if !exact_job_binding || snapshot.delivery_state != NotificationDeliveryState::Pending {
+        ctx.db
+            .notification_delivery_permit()
+            .job_id()
+            .delete(job_id);
+        return Err("notification delivery plan unavailable".into());
+    }
+    let lease_until = job
+        .lease_until
+        .ok_or_else(|| "notification delivery plan unavailable".to_string())?;
+    let requested_expiry =
+        ctx.timestamp + TimeDuration::from_micros(i64::from(permit_seconds) * 1_000_000);
+    let permit = NotificationDeliveryPermit {
+        job_id,
+        notification_id: notification.id,
+        workspace_id: job.workspace_id,
+        service_identity: ctx.sender(),
+        worker_slot_id,
+        lease_generation,
+        group_key: control.group_key.clone(),
+        group_revision: control.group_revision,
+        resource_revision: control.resource_revision,
+        membership_epoch: control.membership_epoch,
+        preference_revision: control.preference_revision,
+        channel: control.channel.clone(),
+        expires_at: std::cmp::min(lease_until, requested_expiry),
+        created_at: ctx.timestamp,
+    };
+    if ctx
+        .db
+        .notification_delivery_permit()
+        .job_id()
+        .find(job_id)
+        .is_some()
+    {
+        ctx.db
+            .notification_delivery_permit()
+            .job_id()
+            .update(permit);
+    } else {
+        ctx.db.notification_delivery_permit().insert(permit);
+    }
+    control.delivery_state = NotificationDeliveryState::Pending;
+    control.suppression_reason.clear();
+    control.updated_at = ctx.timestamp;
+    ctx.db
+        .notification_control()
+        .notification_id()
+        .update(control);
+    Ok(())
+}
+
+#[spacetimedb::reducer]
 pub fn mark_notification_read(ctx: &ReducerContext, notification_id: Uuid) -> Result<(), String> {
     require_registered_user(ctx)?;
     let mut row = ctx
@@ -5321,7 +6228,13 @@ pub fn mark_notification_read(ctx: &ReducerContext, notification_id: Uuid) -> Re
         .find(notification_id)
         .ok_or_else(|| "notification not found".to_string())?;
     if row.recipient_identity != ctx.sender()
-        || !can_read_workspace(ctx, row.workspace_id, ctx.sender())
+        || !notification_resource_visible_to(
+            ctx,
+            row.workspace_id,
+            ctx.sender(),
+            &row.resource_type,
+            row.resource_id,
+        )
     {
         return Err("notification access denied".into());
     }

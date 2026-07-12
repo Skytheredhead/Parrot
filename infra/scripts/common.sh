@@ -9,7 +9,9 @@ EXPECTED_OTEL_IMAGE='otel/opentelemetry-collector-contrib:0.156.0@sha256:125bdbe
 PLACEHOLDER_DIGEST='sha256:0000000000000000000000000000000000000000000000000000000000000000'
 DEPLOYMENT_ENV_KEYS=(
   COMPOSE_PROJECT_NAME DEPLOY_ENVIRONMENT SPACETIMEDB_IMAGE SPACETIMEDB_DATA_DIR
-  SPACETIMEDB_LOOPBACK_PORT BACKUP_DIR GATEWAY_IMAGE WORKER_IMAGE GATEWAY_LOOPBACK_PORT
+  SPACETIMEDB_LOOPBACK_PORT SPACETIMEDB_DATABASE_NAME SPACETIMEDB_DATABASE_IDENTITY
+  RESTORE_EXPECTED_INITIAL_PROGRAM_HASH RESTORE_EXPECTED_MODULE_SCHEMA_SHA256 RESTORE_VERIFIER_DATABASE_OWNER_TOKEN_FILE
+  BACKUP_DIR GATEWAY_IMAGE WORKER_IMAGE GATEWAY_LOOPBACK_PORT
   GATEWAY_READINESS_TOKEN_FILE BACKUP_EVIDENCE_SIGNING_KEY_FILE BACKUP_EVIDENCE_VERIFY_KEY_FILE
   GATEWAY_ADAPTER_MODULE GATEWAY_LOG_LEVEL ALLOWED_ORIGINS
   WORKER_ADAPTER_MODULE WORKER_ID WORKER_LOG_LEVEL WORKER_POLL_INTERVAL_MS
@@ -54,7 +56,7 @@ load_env_file() {
     value="${line#*=}"
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid environment key: $key"
     case "$key" in
-      COMPOSE_PROJECT_NAME|DEPLOY_ENVIRONMENT|SPACETIMEDB_IMAGE|SPACETIMEDB_DATA_DIR|SPACETIMEDB_LOOPBACK_PORT|BACKUP_DIR|GATEWAY_IMAGE|WORKER_IMAGE|GATEWAY_LOOPBACK_PORT|GATEWAY_READINESS_TOKEN_FILE|BACKUP_EVIDENCE_SIGNING_KEY_FILE|BACKUP_EVIDENCE_VERIFY_KEY_FILE|GATEWAY_ADAPTER_MODULE|GATEWAY_LOG_LEVEL|ALLOWED_ORIGINS|TRUSTED_PROXY_CIDRS|OIDC_ISSUER|OIDC_AUDIENCE|OIDC_JWKS_URI|DB_TOKEN_AUDIENCE|AGENT_STREAM_ORIGINS|FILE_CAPABILITY_ORIGINS|PUBLIC_WSS_REAL_IP_MODE|PUBLIC_WSS_REAL_IP_TRUSTED_CIDRS|GATEWAY_OTEL_ENABLED|GATEWAY_OTEL_TRACES_ENDPOINT|OTEL_COLLECTOR_IMAGE|OTEL_CONFIG_PATH|OTEL_EXPORTER_OTLP_ENDPOINT|CONTAINER_LOG_MAX_SIZE|CONTAINER_LOG_MAX_FILES|SPACETIMEDB_PIDS_LIMIT|SPACETIMEDB_MEMORY_LIMIT|SPACETIMEDB_CPU_LIMIT|GATEWAY_PIDS_LIMIT|GATEWAY_MEMORY_LIMIT|GATEWAY_CPU_LIMIT|OTEL_PIDS_LIMIT|OTEL_MEMORY_LIMIT|OTEL_CPU_LIMIT|WORKER_ADAPTER_MODULE|WORKER_ID|WORKER_LOG_LEVEL|WORKER_POLL_INTERVAL_MS|WORKER_CLAIM_TIMEOUT_MS|WORKER_READINESS_TIMEOUT_MS|WORKER_LEASE_MS|WORKER_HEARTBEAT_MS|WORKER_HANDLER_TIMEOUT_MS|WORKER_HEARTBEAT_TIMEOUT_MS|WORKER_SHUTDOWN_TIMEOUT_MS|WORKER_MAX_ATTEMPTS|WORKER_MAX_JOB_AGE_MS|WORKER_BACKOFF_BASE_MS|WORKER_BACKOFF_CAP_MS|WORKER_BACKOFF_JITTER_RATIO|WORKER_CHECKPOINT_MS|AGENT_MAX_CONTEXT_BYTES|AGENT_MAX_OUTPUT_TOKENS|AGENT_MAX_TOOL_CALLS|AGENT_MAX_RUN_COST_MICROS|WORKER_PIDS_LIMIT|WORKER_MEMORY_LIMIT|WORKER_CPU_LIMIT) ;;
+      COMPOSE_PROJECT_NAME|DEPLOY_ENVIRONMENT|SPACETIMEDB_IMAGE|SPACETIMEDB_DATA_DIR|SPACETIMEDB_LOOPBACK_PORT|SPACETIMEDB_DATABASE_NAME|SPACETIMEDB_DATABASE_IDENTITY|RESTORE_EXPECTED_INITIAL_PROGRAM_HASH|RESTORE_EXPECTED_MODULE_SCHEMA_SHA256|RESTORE_VERIFIER_DATABASE_OWNER_TOKEN_FILE|BACKUP_DIR|GATEWAY_IMAGE|WORKER_IMAGE|GATEWAY_LOOPBACK_PORT|GATEWAY_READINESS_TOKEN_FILE|BACKUP_EVIDENCE_SIGNING_KEY_FILE|BACKUP_EVIDENCE_VERIFY_KEY_FILE|GATEWAY_ADAPTER_MODULE|GATEWAY_LOG_LEVEL|ALLOWED_ORIGINS|TRUSTED_PROXY_CIDRS|OIDC_ISSUER|OIDC_AUDIENCE|OIDC_JWKS_URI|DB_TOKEN_AUDIENCE|AGENT_STREAM_ORIGINS|FILE_CAPABILITY_ORIGINS|PUBLIC_WSS_REAL_IP_MODE|PUBLIC_WSS_REAL_IP_TRUSTED_CIDRS|GATEWAY_OTEL_ENABLED|GATEWAY_OTEL_TRACES_ENDPOINT|OTEL_COLLECTOR_IMAGE|OTEL_CONFIG_PATH|OTEL_EXPORTER_OTLP_ENDPOINT|CONTAINER_LOG_MAX_SIZE|CONTAINER_LOG_MAX_FILES|SPACETIMEDB_PIDS_LIMIT|SPACETIMEDB_MEMORY_LIMIT|SPACETIMEDB_CPU_LIMIT|GATEWAY_PIDS_LIMIT|GATEWAY_MEMORY_LIMIT|GATEWAY_CPU_LIMIT|OTEL_PIDS_LIMIT|OTEL_MEMORY_LIMIT|OTEL_CPU_LIMIT|WORKER_ADAPTER_MODULE|WORKER_ID|WORKER_LOG_LEVEL|WORKER_POLL_INTERVAL_MS|WORKER_CLAIM_TIMEOUT_MS|WORKER_READINESS_TIMEOUT_MS|WORKER_LEASE_MS|WORKER_HEARTBEAT_MS|WORKER_HANDLER_TIMEOUT_MS|WORKER_HEARTBEAT_TIMEOUT_MS|WORKER_SHUTDOWN_TIMEOUT_MS|WORKER_MAX_ATTEMPTS|WORKER_MAX_JOB_AGE_MS|WORKER_BACKOFF_BASE_MS|WORKER_BACKOFF_CAP_MS|WORKER_BACKOFF_JITTER_RATIO|WORKER_CHECKPOINT_MS|AGENT_MAX_CONTEXT_BYTES|AGENT_MAX_OUTPUT_TOKENS|AGENT_MAX_TOOL_CALLS|AGENT_MAX_RUN_COST_MICROS|WORKER_PIDS_LIMIT|WORKER_MEMORY_LIMIT|WORKER_CPU_LIMIT) ;;
       *) die "environment key is not on the deployment allowlist: $key" ;;
     esac
     [[ "$value" != *$'\n'* ]] || die "multiline environment values are not supported"
@@ -76,6 +78,14 @@ require_base_identity() {
   (( GATEWAY_LOOPBACK_PORT >= 1024 && GATEWAY_LOOPBACK_PORT <= 65535 )) || die "gateway loopback port must be 1024-65535"
   (( GATEWAY_LOOPBACK_PORT != 4789 )) || die "port 4789 belongs to the audited unrelated SpacetimeDB service"
   [[ "$GATEWAY_LOOPBACK_PORT" != "$SPACETIMEDB_LOOPBACK_PORT" ]] || die "gateway and SpacetimeDB ports must differ"
+  [[ "${SPACETIMEDB_DATABASE_NAME:-}" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] \
+    || die "SpacetimeDB database name must be a bounded lowercase DNS-style name"
+  [[ "${SPACETIMEDB_DATABASE_IDENTITY:-}" =~ ^[a-f0-9]{64}$ ]] \
+    || die "SpacetimeDB database identity must be an exact 64-character lowercase hex identity"
+  [[ "${RESTORE_EXPECTED_INITIAL_PROGRAM_HASH:-}" =~ ^[a-f0-9]{64}$ ]] \
+    || die "restore expected initial program hash must be an exact 64-character lowercase hex hash"
+  [[ "${RESTORE_EXPECTED_MODULE_SCHEMA_SHA256:-}" =~ ^[a-f0-9]{64}$ ]] \
+    || die "restore expected module/schema digest must be an exact sha256"
 
   local expected_root="/srv/project-conversation/$DEPLOY_ENVIRONMENT"
   [[ "${SPACETIMEDB_DATA_DIR:-}" == "$expected_root/spacetime" ]] || die "SpacetimeDB data path must be $expected_root/spacetime"
@@ -86,6 +96,8 @@ require_base_identity() {
     || die "backup evidence signing-key path must stay inside the approved environment"
   [[ "${BACKUP_EVIDENCE_VERIFY_KEY_FILE:-}" == "$expected_root/config/backup-evidence-ed25519-public.pem" ]] \
     || die "backup evidence verification-key path must stay inside the approved environment"
+  [[ "${RESTORE_VERIFIER_DATABASE_OWNER_TOKEN_FILE:-}" == "$expected_root/secrets/restore-verifier-database-owner-token" ]] \
+    || die "restore verifier owner-token path must stay inside the approved environment"
 }
 
 assert_immutable_image() {
@@ -592,6 +604,42 @@ validate_backup_bundle() {
     BACKUP_BUNDLE_CREATED_EPOCH
 }
 
+validate_restored_state_verification() {
+  local record="$1" expected_identity="$2" expected_initial_program_hash="$3" expected_schema_sha256="$4"
+  assert_private_regular_file "$record" "restored-state verification record"
+  assert_metadata_keys "$record" \
+    format database_identity initial_program_hash current_module_code module_schema_sha256 required_private_tables \
+    required_private_table_count domain_invariants domain_invariant_count \
+    outbox_lease_recovery_shape audit_continuity deletion_lifecycle_overlay \
+    traffic_eligible result
+  [[ "$(metadata_value "$record" format)" == project-conversation-restored-state-verification-v1 ]] \
+    || die "restored-state verification format is unsupported"
+  [[ "$(metadata_value "$record" database_identity)" == "$expected_identity" ]] \
+    || die "restored-state verification names another database identity"
+  [[ "$(metadata_value "$record" initial_program_hash)" == "$expected_initial_program_hash" ]] \
+    || die "restored-state initialization provenance differs from the reviewed hash"
+  [[ "$(metadata_value "$record" current_module_code)" == NotVerified ]] \
+    || die "restored-state evidence must not claim current module code verification"
+  [[ "$(metadata_value "$record" module_schema_sha256)" == "$expected_schema_sha256" ]] \
+    || die "restored-state module/schema identity differs from the reviewed digest"
+  [[ "$(metadata_value "$record" required_private_tables)" == Pass \
+    && "$(metadata_value "$record" required_private_table_count)" == 61 ]] \
+    || die "restored-state required private-table verification did not pass"
+  [[ "$(metadata_value "$record" domain_invariants)" == Pass \
+    && "$(metadata_value "$record" domain_invariant_count)" == 65 ]] \
+    || die "restored-state domain invariants did not pass"
+  [[ "$(metadata_value "$record" outbox_lease_recovery_shape)" == NotVerified ]] \
+    || die "restored-state evidence must not claim outbox lease recovery verification"
+  [[ "$(metadata_value "$record" audit_continuity)" == BoundedReferentialOnly ]] \
+    || die "restored-state audit evidence overclaims or omits its bounded scope"
+  [[ "$(metadata_value "$record" deletion_lifecycle_overlay)" == NotConfigured ]] \
+    || die "restored-state deletion lifecycle overlay status is invalid"
+  [[ "$(metadata_value "$record" traffic_eligible)" == false ]] \
+    || die "bounded restored-state evidence must remain ineligible for traffic"
+  [[ "$(metadata_value "$record" result)" == BoundedRestoreStateVerified ]] \
+    || die "restored-state verification result is invalid"
+}
+
 validate_restore_marker() {
   local marker="$1" archive="$2" expected_project="$3" expected_environment="$4" expected_restore_image="$5"
   local marker_checksum completed_epoch
@@ -602,8 +650,11 @@ validate_restore_marker() {
   assert_metadata_keys "$marker" \
     format completed_utc completed_epoch compose_project source_environment archive \
     archive_sha256 backup_manifest_sha256 evidence_verify_key_sha256 source_spacetimedb_image restore_spacetimedb_image \
-    ownership_mode teardown upgrade_eligible result
-  [[ "$(metadata_value "$marker" format)" == project-conversation-restore-drill-v3 ]] \
+    ownership_mode database_identity initial_program_hash current_module_code module_schema_sha256 restored_state_verification \
+    required_private_tables required_private_table_count domain_invariants domain_invariant_count \
+    outbox_lease_recovery_shape audit_continuity deletion_lifecycle_overlay object_inventory \
+    search_rebuild provider_checks traffic_eligible teardown upgrade_eligible result
+  [[ "$(metadata_value "$marker" format)" == project-conversation-restore-drill-v4 ]] \
     || die "restore marker format is unsupported"
   [[ "$(metadata_value "$marker" compose_project)" == "$expected_project" ]] \
     || die "restore marker belongs to another Compose project"
@@ -623,11 +674,30 @@ validate_restore_marker() {
     || die "restore marker did not exercise the requested image"
   [[ "$(metadata_value "$marker" ownership_mode)" == operator-remapped-modes-preserved ]] \
     || die "restore marker ownership/mode evidence is invalid"
+  [[ "$(metadata_value "$marker" database_identity)" == "$SPACETIMEDB_DATABASE_IDENTITY" \
+    && "$(metadata_value "$marker" initial_program_hash)" == "$RESTORE_EXPECTED_INITIAL_PROGRAM_HASH" \
+    && "$(metadata_value "$marker" current_module_code)" == NotVerified \
+    && "$(metadata_value "$marker" module_schema_sha256)" == "$RESTORE_EXPECTED_MODULE_SCHEMA_SHA256" \
+    && "$(metadata_value "$marker" restored_state_verification)" == Pass ]] \
+    || die "restore marker initialization/schema identity evidence is invalid"
+  [[ "$(metadata_value "$marker" required_private_tables)" == Pass \
+    && "$(metadata_value "$marker" required_private_table_count)" == 61 \
+    && "$(metadata_value "$marker" domain_invariants)" == Pass \
+    && "$(metadata_value "$marker" domain_invariant_count)" == 65 \
+    && "$(metadata_value "$marker" outbox_lease_recovery_shape)" == NotVerified ]] \
+    || die "restore marker bounded invariant evidence is invalid"
+  [[ "$(metadata_value "$marker" audit_continuity)" == BoundedReferentialOnly \
+    && "$(metadata_value "$marker" deletion_lifecycle_overlay)" == NotConfigured \
+    && "$(metadata_value "$marker" object_inventory)" == NotConfigured \
+    && "$(metadata_value "$marker" search_rebuild)" == NotConfigured \
+    && "$(metadata_value "$marker" provider_checks)" == NotConfigured \
+    && "$(metadata_value "$marker" traffic_eligible)" == false ]] \
+    || die "restore marker must retain explicit partial/not-traffic-eligible scope"
   [[ "$(metadata_value "$marker" teardown)" == completed ]] \
     || die "restore marker does not prove isolated project teardown"
-  [[ "$(metadata_value "$marker" upgrade_eligible)" == true ]] \
-    || die "restore marker is explicitly not upgrade evidence"
-  [[ "$(metadata_value "$marker" result)" == spacetimedb-root-health-only ]] \
+  [[ "$(metadata_value "$marker" upgrade_eligible)" == false ]] \
+    || die "bounded restored-state marker must not authorize a live upgrade"
+  [[ "$(metadata_value "$marker" result)" == bounded-restored-state-not-traffic-eligible ]] \
     || die "restore marker result is invalid"
   completed_epoch="$(metadata_value "$marker" completed_epoch)"
   assert_epoch_utc_pair "$completed_epoch" "$(metadata_value "$marker" completed_utc)" "restore marker completion"

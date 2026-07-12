@@ -360,6 +360,18 @@ export const CreateTypedPostInput = __t.object("CreateTypedPostInput", {
 });
 export type CreateTypedPostInput = __Infer<typeof CreateTypedPostInput>;
 
+export const CurrentPresence = __t.object("CurrentPresence", {
+  key: __t.string(),
+  workspaceId: __t.uuid(),
+  identity: __t.identity(),
+  get status() {
+    return PresenceStatus;
+  },
+  expiresAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type CurrentPresence = __Infer<typeof CurrentPresence>;
+
 export const DecisionRecord = __t.object("DecisionRecord", {
   id: __t.uuid(),
   workspaceId: __t.uuid(),
@@ -648,6 +660,20 @@ export const FileVersion = __t.object("FileVersion", {
 });
 export type FileVersion = __Infer<typeof FileVersion>;
 
+export const HeartbeatPresenceInput = __t.object("HeartbeatPresenceInput", {
+  workspaceId: __t.uuid(),
+  sessionId: __t.uuid(),
+  get deviceKind() {
+    return PresenceDeviceKind;
+  },
+  deviceLabel: __t.string(),
+  get status() {
+    return PresenceStatus;
+  },
+  ttlSeconds: __t.u32(),
+});
+export type HeartbeatPresenceInput = __Infer<typeof HeartbeatPresenceInput>;
+
 export const InstallAgentInput = __t.object("InstallAgentInput", {
   name: __t.string(),
   provider: __t.string(),
@@ -690,6 +716,105 @@ export const Notification = __t.object("Notification", {
 });
 export type Notification = __Infer<typeof Notification>;
 
+export const NotificationControl = __t.object("NotificationControl", {
+  notificationId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  recipientIdentity: __t.identity(),
+  spaceId: __t.option(__t.uuid()),
+  get tier() {
+    return NotificationTier;
+  },
+  get eventClass() {
+    return NotificationKind;
+  },
+  resourceType: __t.string(),
+  resourceId: __t.uuid(),
+  resourceRevision: __t.u64(),
+  groupKey: __t.string(),
+  groupRevision: __t.u64(),
+  occurrenceCount: __t.u64(),
+  membershipEpoch: __t.u64(),
+  preferenceRevision: __t.u64(),
+  channel: __t.string(),
+  get deliveryState() {
+    return NotificationDeliveryState;
+  },
+  suppressionReason: __t.string(),
+  windowStartedAt: __t.timestamp(),
+  windowExpiresAt: __t.timestamp(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type NotificationControl = __Infer<typeof NotificationControl>;
+
+// The tagged union or sum type for the algebraic type `NotificationDeliveryMode`.
+export const NotificationDeliveryMode = __t.enum("NotificationDeliveryMode", {
+  Immediate: __t.unit(),
+  Digest: __t.unit(),
+  Disabled: __t.unit(),
+});
+export type NotificationDeliveryMode = __Infer<typeof NotificationDeliveryMode>;
+
+export const NotificationDeliveryPermit = __t.object("NotificationDeliveryPermit", {
+  jobId: __t.uuid(),
+  notificationId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  serviceIdentity: __t.identity(),
+  workerSlotId: __t.string(),
+  leaseGeneration: __t.u64(),
+  groupKey: __t.string(),
+  groupRevision: __t.u64(),
+  resourceRevision: __t.u64(),
+  membershipEpoch: __t.u64(),
+  preferenceRevision: __t.u64(),
+  channel: __t.string(),
+  expiresAt: __t.timestamp(),
+  createdAt: __t.timestamp(),
+});
+export type NotificationDeliveryPermit = __Infer<typeof NotificationDeliveryPermit>;
+
+export const NotificationDeliveryPlanView = __t.object("NotificationDeliveryPlanView", {
+  jobId: __t.uuid(),
+  notificationId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  recipientIdentity: __t.identity(),
+  channel: __t.string(),
+  get deliveryState() {
+    return NotificationDeliveryState;
+  },
+  suppressionReason: __t.string(),
+  groupKey: __t.string(),
+  groupRevision: __t.u64(),
+  resourceType: __t.string(),
+  resourceId: __t.uuid(),
+  resourceRevision: __t.u64(),
+  membershipEpoch: __t.u64(),
+  preferenceRevision: __t.u64(),
+  leaseOwner: __t.option(__t.identity()),
+  workerSlotId: __t.string(),
+  leaseGeneration: __t.u64(),
+  permitExpiresAt: __t.option(__t.timestamp()),
+});
+export type NotificationDeliveryPlanView = __Infer<typeof NotificationDeliveryPlanView>;
+
+// The tagged union or sum type for the algebraic type `NotificationDeliveryState`.
+export const NotificationDeliveryState = __t.enum("NotificationDeliveryState", {
+  Pending: __t.unit(),
+  Suppressed: __t.unit(),
+});
+export type NotificationDeliveryState = __Infer<typeof NotificationDeliveryState>;
+
+export const NotificationGroup = __t.object("NotificationGroup", {
+  baseKey: __t.string(),
+  groupKey: __t.string(),
+  notificationId: __t.uuid(),
+  groupRevision: __t.u64(),
+  windowStartedAt: __t.timestamp(),
+  windowExpiresAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type NotificationGroup = __Infer<typeof NotificationGroup>;
+
 // The tagged union or sum type for the algebraic type `NotificationKind`.
 export const NotificationKind = __t.enum("NotificationKind", {
   Mention: __t.unit(),
@@ -699,6 +824,38 @@ export const NotificationKind = __t.enum("NotificationKind", {
   System: __t.unit(),
 });
 export type NotificationKind = __Infer<typeof NotificationKind>;
+
+export const NotificationPreference = __t.object("NotificationPreference", {
+  key: __t.string(),
+  identity: __t.identity(),
+  workspaceId: __t.uuid(),
+  spaceId: __t.option(__t.uuid()),
+  get directMode() {
+    return NotificationDeliveryMode;
+  },
+  get importantMode() {
+    return NotificationDeliveryMode;
+  },
+  get ambientMode() {
+    return NotificationDeliveryMode;
+  },
+  muteStartLocalMinute: __t.option(__t.u16()),
+  muteEndLocalMinute: __t.option(__t.u16()),
+  timeZone: __t.string(),
+  digestLocalMinute: __t.u16(),
+  revision: __t.u64(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type NotificationPreference = __Infer<typeof NotificationPreference>;
+
+// The tagged union or sum type for the algebraic type `NotificationTier`.
+export const NotificationTier = __t.enum("NotificationTier", {
+  Direct: __t.unit(),
+  Important: __t.unit(),
+  Ambient: __t.unit(),
+});
+export type NotificationTier = __Infer<typeof NotificationTier>;
 
 export const OutboxJob = __t.object("OutboxJob", {
   id: __t.uuid(),
@@ -961,6 +1118,50 @@ export const PostUserState = __t.object("PostUserState", {
 });
 export type PostUserState = __Infer<typeof PostUserState>;
 
+// The tagged union or sum type for the algebraic type `PresenceDeviceKind`.
+export const PresenceDeviceKind = __t.enum("PresenceDeviceKind", {
+  Web: __t.unit(),
+  Desktop: __t.unit(),
+  Mobile: __t.unit(),
+  Other: __t.unit(),
+});
+export type PresenceDeviceKind = __Infer<typeof PresenceDeviceKind>;
+
+export const PresenceExpirySchedule = __t.object("PresenceExpirySchedule", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  presenceKey: __t.string(),
+  expectedExpiresAt: __t.timestamp(),
+});
+export type PresenceExpirySchedule = __Infer<typeof PresenceExpirySchedule>;
+
+export const PresenceSession = __t.object("PresenceSession", {
+  key: __t.string(),
+  scopeKey: __t.string(),
+  workspaceId: __t.uuid(),
+  identity: __t.identity(),
+  sessionId: __t.uuid(),
+  get deviceKind() {
+    return PresenceDeviceKind;
+  },
+  deviceLabel: __t.string(),
+  get status() {
+    return PresenceStatus;
+  },
+  createdAt: __t.timestamp(),
+  heartbeatAt: __t.timestamp(),
+  expiresAt: __t.timestamp(),
+});
+export type PresenceSession = __Infer<typeof PresenceSession>;
+
+// The tagged union or sum type for the algebraic type `PresenceStatus`.
+export const PresenceStatus = __t.enum("PresenceStatus", {
+  Online: __t.unit(),
+  Away: __t.unit(),
+  DoNotDisturb: __t.unit(),
+});
+export type PresenceStatus = __Infer<typeof PresenceStatus>;
+
 export const ProposeDmPromotionInput = __t.object("ProposeDmPromotionInput", {
   conversationId: __t.uuid(),
   destinationSpaceId: __t.uuid(),
@@ -1055,6 +1256,27 @@ export const SetAgentToolPolicyInput = __t.object("SetAgentToolPolicyInput", {
   clientRequestId: __t.uuid(),
 });
 export type SetAgentToolPolicyInput = __Infer<typeof SetAgentToolPolicyInput>;
+
+export const SetNotificationPreferenceInput = __t.object("SetNotificationPreferenceInput", {
+  workspaceId: __t.uuid(),
+  spaceId: __t.option(__t.uuid()),
+  get directMode() {
+    return NotificationDeliveryMode;
+  },
+  get importantMode() {
+    return NotificationDeliveryMode;
+  },
+  get ambientMode() {
+    return NotificationDeliveryMode;
+  },
+  muteStartLocalMinute: __t.option(__t.u16()),
+  muteEndLocalMinute: __t.option(__t.u16()),
+  timeZone: __t.string(),
+  digestLocalMinute: __t.u16(),
+  expectedRevision: __t.u64(),
+  clientRequestId: __t.uuid(),
+});
+export type SetNotificationPreferenceInput = __Infer<typeof SetNotificationPreferenceInput>;
 
 export const Space = __t.object("Space", {
   id: __t.uuid(),
@@ -1317,6 +1539,16 @@ export const VisiblePostUserState = __t.object("VisiblePostUserState", {
   readAt: __t.option(__t.timestamp()),
 });
 export type VisiblePostUserState = __Infer<typeof VisiblePostUserState>;
+
+export const VisiblePresence = __t.object("VisiblePresence", {
+  workspaceId: __t.uuid(),
+  identity: __t.identity(),
+  get status() {
+    return PresenceStatus;
+  },
+  expiresAt: __t.timestamp(),
+});
+export type VisiblePresence = __Infer<typeof VisiblePresence>;
 
 export const VisibleUser = __t.object("VisibleUser", {
   identity: __t.identity(),

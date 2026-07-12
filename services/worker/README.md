@@ -35,6 +35,15 @@ missing live readiness checks.
   was lost or a process restart between claim and processing.
 - Effect acquisition is atomic and bound to workspace, kind, semantic resource, and payload.
   Ambiguous non-idempotent effects reconcile and are never replayed blindly.
+- Notification delivery requires a live authoritative preference/suppression plan exactly bound to
+  workspace, intent, recipient, requested channel, resource, authorization epoch, and deterministic
+  delivery key. Rendering is normalized plain text with independent character, byte, and control
+  bounds. The provider call begins inside nested final authorization and exact current preference
+  revision fences, so revocation after planning prevents dispatch. Transient, permanent, and
+  ambiguous outcomes use a closed provider-neutral classification, with ambiguous sends reconciled
+  by the same stable key before replay. Suppression is a durable successful no-op, while invalid
+  plans, invalid rendering, revocation, and permanent provider failures dead-letter through the
+  existing effect/outbox fences.
 - File keys, cleanup prefixes, and versions come from authoritative plans. Cleanup uses durable
   deletion claims, claim generations, object-version preconditions, and explicit finalization.
 - Search rebuilds use monotonic generations, capture concurrent deltas, and swap atomically. Every
@@ -98,6 +107,14 @@ reconciles ambiguous work. Once a lease expires, any worker may reclaim it with 
 Consequently the outbox provides generation-fenced, at-least-once
 orchestration—not exactly-once external effects; ambiguous provider outcomes still require the
 handler's durable reconciliation protocol before any replay.
+
+The canonical notification envelope now binds a stable authority-created intent/group and its
+delivery revision. The Rust authority uses a bounded five-minute group window; revisions within the
+same group share the provider key, while a later window receives a new intent and key. The delivery
+authority must obtain the exact lease/slot/generation-bound permit immediately before provider
+dispatch. Because reducers cannot perform external I/O, the real adapter must keep that final gap
+bounded, honor the permit expiry, and re-run resolution after any stale-plan result; it must never
+invent a group, revision, or permit locally.
 
 In-memory adapters are for tests and local simulation only. They are not a persistence substitute
 and must never be selected in a production environment.
