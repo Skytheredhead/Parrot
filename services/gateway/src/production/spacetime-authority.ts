@@ -85,6 +85,10 @@ function identityString(value: unknown): string {
   return String(value ?? "");
 }
 
+function tableAccessor(value: string): string {
+  return value.replace(/[A-Z]/g, (character) => `_${character.toLowerCase()}`);
+}
+
 function valueString(value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "object" && value !== null) {
@@ -175,7 +179,7 @@ export const generatedGatewaySpacetimeConnector: GatewaySpacetimeConnector = {
         },
         rows(accessor) {
           if (!active) throw new Error("spacetime_gateway_connection_closed");
-          const table = db[accessor];
+          const table = db[tableAccessor(accessor)];
           if (!table) throw new Error(`spacetime_gateway_view_missing:${accessor}`);
           return [...table.iter()] as Row[];
         },
