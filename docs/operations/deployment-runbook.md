@@ -111,6 +111,10 @@ file. Preserve the exact project name, environment, service paths, and non-`4789
 `.invalid`, zero digest, adapter placeholder, and WSS real-IP placeholder before enabling the
 corresponding profile. Runtime scripts reject group/other access to this file.
 
+`BACKUP_MOUNT_OWNER_UID` must be the verified numeric owner of the fixed `/mnt/bigboi` mount. Only
+that mount root receives this additional ownership allowance, and it must still reject group/other
+write access. Descendant Parrot backup directories remain private to the runtime operator.
+
 ## Validate and inspect
 
 Static repository validation is non-mutating:
