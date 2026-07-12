@@ -42,7 +42,7 @@ server {
     client_max_body_size 100m;
 
     # Public gateway surface. Authorization remains the gateway's responsibility.
-    location ~ ^/v1/(?:db-token|search|object-capabilities/(?:upload|download)/[A-Za-z0-9_-]{40,4096}|files/(?:uploads|uploads/[A-Za-z0-9._:-]+/complete|[A-Za-z0-9._:-]+/download)|webhooks/[A-Za-z0-9._:-]+|agent/runs/[A-Za-z0-9._:-]+/(?:stream-ticket|tools/[A-Za-z0-9._:-]+))$ {
+    location ~ "^/v1/(?:db-token|search|object-capabilities/(?:upload|download)/[A-Za-z0-9_-]{40,4096}|files/(?:uploads|uploads/[A-Za-z0-9._:-]+/complete|[A-Za-z0-9._:-]+/download)|webhooks/[A-Za-z0-9._:-]+|agent/runs/[A-Za-z0-9._:-]+/(?:stream-ticket|tools/[A-Za-z0-9._:-]+))$" {
         proxy_pass http://parrot_gateway;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
