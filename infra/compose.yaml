@@ -279,8 +279,12 @@ services:
   clamav-volume-init:
     profiles: [scanner, worker]
     image: ${CLAMAV_IMAGE:-clamav/clamav:1.4.3_base@sha256:be37f82c9cccf6c2559a44b8fb537e6f11e8547b37988650b169c4540c2f298c}
-    entrypoint: [/bin/chown]
-    command: ["100:101", /var/lib/clamav, /run/clamav]
+    entrypoint: [/bin/sh, -c]
+    command:
+      - >-
+        chown 100:101 /var/lib/clamav /run/clamav &&
+        chmod 0700 /var/lib/clamav &&
+        chmod 0755 /run/clamav
     network_mode: none
     user: "0:0"
     volumes:
@@ -288,7 +292,7 @@ services:
       - clamav-runtime:/run/clamav
     read_only: true
     cap_drop: [ALL]
-    cap_add: [CHOWN]
+    cap_add: [CHOWN, FOWNER]
     security_opt:
       - no-new-privileges:true
     labels:
