@@ -14,23 +14,28 @@ function assertResolvedIdentity(identity: VerifiedIdentity, principal: Principal
     principal.issuer !== identity.issuer ||
     principal.subject !== identity.subject ||
     !principal.id ||
+    !["human", "agent", "service"].includes(principal.kind) ||
     !Number.isSafeInteger(principal.authzEpoch) ||
-    principal.authzEpoch < 0
+    principal.authzEpoch < 0 ||
+    (principal.email !== undefined &&
+      (typeof principal.email !== "string" || principal.email.length > 254)) ||
+    (principal.emailVerified !== undefined && typeof principal.emailVerified !== "boolean")
   ) {
     throw unauthorized("Authoritative identity resolution failed");
   }
-  const {
-    sessionId: _untrustedResolvedSession,
-    authenticatedAt: _untrustedResolvedAuthenticationTime,
-    ...authoritativePrincipal
-  } = principal;
-  return {
-    ...authoritativePrincipal,
+  return Object.freeze({
+    id: principal.id,
+    issuer: principal.issuer,
+    subject: principal.subject,
+    kind: principal.kind,
+    authzEpoch: principal.authzEpoch,
+    ...(principal.email === undefined ? {} : { email: principal.email }),
+    ...(principal.emailVerified === undefined ? {} : { emailVerified: principal.emailVerified }),
     ...(identity.sessionId === undefined ? {} : { sessionId: identity.sessionId }),
     ...(identity.authenticatedAt === undefined
       ? {}
       : { authenticatedAt: identity.authenticatedAt }),
-  };
+  });
 }
 
 export async function authenticateRequest(
@@ -54,7 +59,9 @@ export async function authenticateRequest(
   } else {
     throw unauthorized();
   }
-  const principal = assertResolvedIdentity(identity, await principals.resolve(identity));
-  request.principal = principal;
-  return principal;
+  const resolved = await principals.resolve(identity);
+  const checked = assertResolvedIdentity(identity, resolved);
+  principals.bindCheckedPrincipal?.({ identity, resolved, checked });
+  request.principal = checked;
+  return checked;
 }

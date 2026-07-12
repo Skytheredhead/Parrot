@@ -14,6 +14,8 @@ const rawConfigSchema = z.object({
   OIDC_AUDIENCE: z.string().min(1),
   OIDC_JWKS_URI: z.url(),
   OIDC_ALLOWED_TOKEN_TYPES: z.string().min(1).default("at+jwt"),
+  OIDC_ALLOW_MISSING_TYP: z.enum(["true", "false"]).default("false"),
+  OIDC_ALLOW_CLIENT_ID_AUDIENCE: z.enum(["true", "false"]).default("false"),
   OIDC_MAX_TOKEN_AGE_SECONDS: z.coerce.number().int().min(60).max(3_600).default(900),
   OIDC_MAX_JWKS_BYTES: z.coerce.number().int().min(1_024).max(1_048_576).default(262_144),
   DB_TOKEN_AUDIENCE: z.string().min(1),
@@ -41,6 +43,15 @@ const rawConfigSchema = z.object({
   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: z.url().optional(),
   OTEL_SERVICE_NAME: z.string().min(1).default("project-conversation-gateway"),
   GATEWAY_ADAPTER_MODULE: z.string().min(1).optional(),
+  FILE_CAPABILITY_PUBLIC_ORIGIN: z.url().optional(),
+  LOCAL_OBJECT_ROOT: z.string().min(1).optional(),
+  FILE_CAPABILITY_HMAC_SECRET_FILE: z.string().min(1).optional(),
+  WORKOS_API_KEY_FILE: z.string().min(1).optional(),
+  SPACETIMEDB_URI: z.url().optional(),
+  SPACETIMEDB_DATABASE_NAME: z.string().min(1).max(64).optional(),
+  SPACETIMEDB_CONNECT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(30_000).default(10_000),
+  SPACETIMEDB_COMMAND_TIMEOUT_MS: z.coerce.number().int().min(500).max(10_000).default(3_000),
+  GATEWAY_SQLITE_PATH: z.string().min(1).optional(),
 });
 
 export interface GatewayConfig {
@@ -55,6 +66,8 @@ export interface GatewayConfig {
     audience: string;
     jwksUri: string;
     allowedTokenTypes: readonly string[];
+    allowMissingTokenType: boolean;
+    allowClientIdAudience: boolean;
     maxTokenAgeSeconds: number;
     maxJwksBytes: number;
   };
@@ -80,6 +93,20 @@ export interface GatewayConfig {
   readiness: { token?: string; timeoutMs: number };
   telemetry: { enabled: boolean; serviceName: string; endpoint?: string };
   adapterModule?: string;
+  production?: {
+    fileCapabilityPublicOrigin: string;
+    localObjectRoot: string;
+    fileCapabilityHmacSecretFile: string;
+    /** A mounted staging secret reference. The bearer-only gateway never reads this value. */
+    workosApiKeyFile?: string;
+    spacetime?: {
+      uri: string;
+      databaseName: string;
+      connectTimeoutMs: number;
+      commandTimeoutMs: number;
+    };
+    gatewaySqlitePath?: string;
+  };
 }
 
 function csv(value: string): string[] {
@@ -197,6 +224,58 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
   }
   if (production && parsed.READINESS_TOKEN === undefined)
     throw new Error("READINESS_TOKEN is required in production");
+  const productionObjectValues = [
+    parsed.FILE_CAPABILITY_PUBLIC_ORIGIN,
+    parsed.LOCAL_OBJECT_ROOT,
+    parsed.FILE_CAPABILITY_HMAC_SECRET_FILE,
+  ];
+  if (parsed.WORKOS_API_KEY_FILE !== undefined && !parsed.WORKOS_API_KEY_FILE.startsWith("/"))
+    throw new Error("WORKOS_API_KEY_FILE must be an absolute path");
+  if ((parsed.SPACETIMEDB_URI === undefined) !== (parsed.SPACETIMEDB_DATABASE_NAME === undefined))
+    throw new Error("SPACETIMEDB_URI and SPACETIMEDB_DATABASE_NAME must be configured together");
+  if (parsed.SPACETIMEDB_URI !== undefined) {
+    const spacetime = new URL(parsed.SPACETIMEDB_URI);
+    const loopback = ["127.0.0.1", "::1", "localhost"].includes(spacetime.hostname);
+    if (
+      spacetime.username ||
+      spacetime.password ||
+      spacetime.search ||
+      spacetime.hash ||
+      spacetime.pathname !== "/" ||
+      (spacetime.protocol !== "wss:" && !(spacetime.protocol === "ws:" && loopback))
+    )
+      throw new Error("SPACETIMEDB_URI must be an exact WSS origin or loopback WS origin");
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(parsed.SPACETIMEDB_DATABASE_NAME ?? ""))
+      throw new Error("SPACETIMEDB_DATABASE_NAME is invalid");
+  }
+  if (parsed.GATEWAY_SQLITE_PATH !== undefined && !parsed.GATEWAY_SQLITE_PATH.startsWith("/"))
+    throw new Error("GATEWAY_SQLITE_PATH must be an absolute path");
+  if (productionObjectValues.some((value) => value !== undefined)) {
+    if (productionObjectValues.some((value) => value === undefined)) {
+      throw new Error(
+        "FILE_CAPABILITY_PUBLIC_ORIGIN, LOCAL_OBJECT_ROOT, and FILE_CAPABILITY_HMAC_SECRET_FILE must be configured together",
+      );
+    }
+    const capabilityOrigin = normalizedServiceOrigins(
+      "FILE_CAPABILITY_PUBLIC_ORIGIN",
+      parsed.FILE_CAPABILITY_PUBLIC_ORIGIN ?? "",
+      "https:",
+    )[0];
+    if (
+      !capabilityOrigin ||
+      !normalizedServiceOrigins(
+        "FILE_CAPABILITY_ORIGINS",
+        parsed.FILE_CAPABILITY_ORIGINS,
+        "https:",
+      ).includes(capabilityOrigin)
+    ) {
+      throw new Error("FILE_CAPABILITY_PUBLIC_ORIGIN must be listed in FILE_CAPABILITY_ORIGINS");
+    }
+    if (!parsed.LOCAL_OBJECT_ROOT?.startsWith("/"))
+      throw new Error("LOCAL_OBJECT_ROOT must be an absolute path");
+    if (!parsed.FILE_CAPABILITY_HMAC_SECRET_FILE?.startsWith("/"))
+      throw new Error("FILE_CAPABILITY_HMAC_SECRET_FILE must be an absolute path");
+  }
   const allowedTokenTypes = csv(parsed.OIDC_ALLOWED_TOKEN_TYPES).map((value) =>
     value.toLowerCase(),
   );
@@ -214,6 +293,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
       audience: parsed.OIDC_AUDIENCE,
       jwksUri: parsed.OIDC_JWKS_URI,
       allowedTokenTypes,
+      allowMissingTokenType: parsed.OIDC_ALLOW_MISSING_TYP === "true",
+      allowClientIdAudience: parsed.OIDC_ALLOW_CLIENT_ID_AUDIENCE === "true",
       maxTokenAgeSeconds: parsed.OIDC_MAX_TOKEN_AGE_SECONDS,
       maxJwksBytes: parsed.OIDC_MAX_JWKS_BYTES,
     },
@@ -260,5 +341,30 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
     ...(parsed.GATEWAY_ADAPTER_MODULE === undefined
       ? {}
       : { adapterModule: parsed.GATEWAY_ADAPTER_MODULE }),
+    ...(productionObjectValues.every((value) => value !== undefined)
+      ? {
+          production: {
+            fileCapabilityPublicOrigin: parsed.FILE_CAPABILITY_PUBLIC_ORIGIN as string,
+            localObjectRoot: parsed.LOCAL_OBJECT_ROOT as string,
+            fileCapabilityHmacSecretFile: parsed.FILE_CAPABILITY_HMAC_SECRET_FILE as string,
+            ...(parsed.WORKOS_API_KEY_FILE === undefined
+              ? {}
+              : { workosApiKeyFile: parsed.WORKOS_API_KEY_FILE }),
+            ...(parsed.SPACETIMEDB_URI === undefined
+              ? {}
+              : {
+                  spacetime: {
+                    uri: parsed.SPACETIMEDB_URI,
+                    databaseName: parsed.SPACETIMEDB_DATABASE_NAME as string,
+                    connectTimeoutMs: parsed.SPACETIMEDB_CONNECT_TIMEOUT_MS,
+                    commandTimeoutMs: parsed.SPACETIMEDB_COMMAND_TIMEOUT_MS,
+                  },
+                }),
+            ...(parsed.GATEWAY_SQLITE_PATH === undefined
+              ? {}
+              : { gatewaySqlitePath: parsed.GATEWAY_SQLITE_PATH }),
+          },
+        }
+      : {}),
   };
 }

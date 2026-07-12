@@ -10,8 +10,12 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+import {
+  CompleteFileUploadInput,
+} from "./types";
+
 export default {
-  fileId: __t.uuid(),
-  expectedRevision: __t.u64(),
-  clientRequestId: __t.uuid(),
+  get input() {
+    return CompleteFileUploadInput;
+  },
 };

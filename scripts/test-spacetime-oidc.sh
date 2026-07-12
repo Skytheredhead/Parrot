@@ -72,9 +72,11 @@ server_url="http://127.0.0.1:${spacetime_port}"
 oidc_base="http://localhost:${oidc_port}"
 issuer="${oidc_base}/project-conversation"
 audience="project-conversation-oidc-test"
+additional_audience="project-conversation-oidc-web-test"
 owner_subject="project-conversation-owner"
 publisher_subject="project-conversation-deployment-publisher"
 recipient_subject="project-conversation-recipient"
+additional_audience_subject="project-conversation-web-user"
 database="project-conversation-oidc-test"
 
 OIDC_PORT="${oidc_port}" "${node}" --input-type=module \
@@ -226,6 +228,7 @@ export PATH="${root}/.tools/binaryen/version_130/bin:${HOME}/.cargo/bin:${PATH}"
 export RUSTUP_TOOLCHAIN="1.93.0"
 export PROJECT_CONVERSATION_BOOTSTRAP_OIDC_ISSUER="${issuer}"
 export PROJECT_CONVERSATION_BOOTSTRAP_OIDC_AUDIENCE="${audience}"
+export PROJECT_CONVERSATION_BOOTSTRAP_OIDC_ADDITIONAL_AUDIENCES="${additional_audience}"
 export PROJECT_CONVERSATION_BOOTSTRAP_OWNER_SUBJECT="${owner_subject}"
 
 "${cli}" --root-dir "${runtime_root}/publisher-cli" publish \
@@ -239,12 +242,14 @@ wrong_issuer_token="$(mint_token project-conversation-wrong-issuer "${audience}"
 wrong_audience_token="$(mint_token project-conversation project-conversation-wrong-audience "${owner_subject}")"
 wrong_subject_token="$(mint_token project-conversation "${audience}" project-conversation-wrong-subject)"
 recipient_token="$(mint_token project-conversation "${audience}" "${recipient_subject}")"
+additional_audience_token="$(mint_token project-conversation "${additional_audience}" "${additional_audience_subject}")"
 
 configure_token_cli owner "${owner_token}"
 configure_token_cli wrong-issuer "${wrong_issuer_token}"
 configure_token_cli wrong-audience "${wrong_audience_token}"
 configure_token_cli wrong-subject "${wrong_subject_token}"
 configure_token_cli recipient "${recipient_token}"
+configure_token_cli additional-audience "${additional_audience_token}"
 
 expect_failure \
   "Wrong-issuer bootstrap" \
@@ -269,6 +274,9 @@ expect_failure \
 
 "${cli}" --root-dir "${runtime_root}/owner-cli" call --server oidc-test \
   "${database}" bootstrap_owner Owner Workspace '[4]' >/dev/null
+
+"${cli}" --root-dir "${runtime_root}/additional-audience-cli" call --server oidc-test \
+  "${database}" register_user "Web User" >/dev/null
 
 expect_failure \
   "Second owner bootstrap" \

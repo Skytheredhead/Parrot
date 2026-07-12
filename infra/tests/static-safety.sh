@@ -61,9 +61,9 @@ initial_program_hash=$RESTORE_EXPECTED_INITIAL_PROGRAM_HASH
 current_module_code=NotVerified
 module_schema_sha256=$RESTORE_EXPECTED_MODULE_SCHEMA_SHA256
 required_private_tables=Pass
-required_private_table_count=71
+required_private_table_count=78
 domain_invariants=Pass
-domain_invariant_count=81
+domain_invariant_count=90
 outbox_lease_recovery_shape=NotVerified
 audit_continuity=BoundedReferentialOnly
 deletion_lifecycle_overlay=NotConfigured
@@ -112,9 +112,9 @@ current_module_code=NotVerified
 module_schema_sha256=$RESTORE_EXPECTED_MODULE_SCHEMA_SHA256
 restored_state_verification=Pass
 required_private_tables=Pass
-required_private_table_count=71
+required_private_table_count=78
 domain_invariants=Pass
-domain_invariant_count=81
+domain_invariant_count=90
 outbox_lease_recovery_shape=NotVerified
 audit_continuity=BoundedReferentialOnly
 deletion_lifecycle_overlay=NotConfigured
@@ -312,12 +312,72 @@ dry_env="$tmp/validation.env"
 cp "$ROOT_DIR/infra/env/validation.env" "$dry_env"
 chmod 600 "$dry_env"
 for command in \
-  "$ROOT_DIR/infra/scripts/deploy.sh --env-file $dry_env --with-gateway" \
+  "$ROOT_DIR/infra/scripts/deploy.sh --env-file $dry_env --with-edge --with-worker --with-scanner --with-telemetry" \
   "$ROOT_DIR/infra/scripts/backup.sh --env-file $dry_env" \
   "$ROOT_DIR/infra/scripts/upgrade.sh --env-file $dry_env --image $image --backup /not-used --restore-marker /not-used --ack-forward-only" \
   "$ROOT_DIR/infra/scripts/rollback.sh --env-file $dry_env --ack-schema-compatible"; do
   output="$(bash -c "$command" 2>&1)"
   grep -Fq 'DRY RUN: no mutation performed' <<< "$output" || die "fixture expected guarded dry-run output"
 done
+
+grep -Fq '127.0.0.1:${EDGE_LOOPBACK_PORT' "$ROOT_DIR/infra/compose.yaml" \
+  || die "fixture expected the edge listener to remain loopback-only"
+grep -Fq 'location = /v1/database/${SPACETIMEDB_DATABASE_NAME}/subscribe' \
+  "$ROOT_DIR/infra/nginx/edge.conf.template" \
+  || die "fixture expected one exact public database subscription route"
+[[ "$(grep -Fc 'proxy_pass http://parrot_spacetimedb;' "$ROOT_DIR/infra/nginx/edge.conf.template")" == 1 ]] \
+  || die "fixture expected exactly one direct SpacetimeDB proxy route"
+grep -Fq 'location / { return 404; }' "$ROOT_DIR/infra/nginx/edge.conf.template" \
+  || die "fixture expected the edge to deny unmatched routes"
+grep -Fq '/mnt/bigboi/project-conversation/production/backups' \
+  "$ROOT_DIR/infra/env/production.env.example" \
+  || die "fixture expected production backups on /mnt/bigboi"
+grep -Fq 'ConditionPathExists=/srv/project-conversation/%i/state/ALLOW_IMAGE_ROLLBACK' \
+  "$ROOT_DIR/infra/systemd/parrot-rollback@.service" \
+  || die "fixture expected the rollback unit to require an operator-created one-shot gate"
+grep -Fq 'OnCalendar=hourly' "$ROOT_DIR/infra/systemd/parrot-cold-backup@.timer" \
+  || die "fixture expected hourly cold-backup scheduling for the approved RPO"
+for mount in GATEWAY_STATE_DIR WORKER_STATE_DIR OBJECT_DATA_DIR EXPORT_DATA_DIR; do
+  grep -Fq 'source: ${'"$mount" "$ROOT_DIR/infra/compose.yaml" \
+    || die "fixture expected an explicit durable provider mount: $mount"
+done
+grep -Fq 'CLAMAV_SOCKET: /run/clamav/clamd.sock' "$ROOT_DIR/infra/compose.yaml" \
+  || die "fixture expected worker scanning through the private Unix socket"
+if grep -Fq 'CLAMAV_PORT:' "$ROOT_DIR/infra/compose.yaml"; then
+  die "fixture forbids the stale ClamAV TCP provider configuration"
+fi
+grep -Fq 'OLLAMA_ENDPOINT: http://127.0.0.1:11434' "$ROOT_DIR/infra/compose.yaml" \
+  || die "fixture expected the worker provider to retain its loopback-only endpoint"
+grep -Fq 'UNIX-LISTEN:/srv/project-conversation/%i/state/worker/ollama-bridge/ollama.sock' \
+  "$ROOT_DIR/infra/systemd/parrot-ollama-bridge@.service" \
+  || die "fixture expected a native Unix-only Ollama bridge"
+grep -Fq 'OIDC_ALLOW_MISSING_TYP=false' "$ROOT_DIR/infra/env/staging.env.example" \
+  || die "fixture expected missing JOSE typ to remain explicit and disabled in the public example"
+grep -Fq 'OIDC_ALLOW_CLIENT_ID_AUDIENCE=false' "$ROOT_DIR/infra/env/staging.env.example" \
+  || die "fixture expected client-ID audience compatibility to remain explicit and disabled in the public example"
+grep -Fq 'object-capabilities/(?:upload|download)/[A-Za-z0-9_-]{40,4096}' \
+  "$ROOT_DIR/infra/nginx/edge.conf.template" \
+  || die "fixture expected only bounded signed object data-plane routes at the edge"
+grep -Fq 'valueSecretFiles = new Map([["READINESS_TOKEN_FILE", "READINESS_TOKEN"]])' \
+  "$ROOT_DIR/infra/docker/gateway-entrypoint.mjs" \
+  || die "fixture expected secret dereferencing to use an exact allowlist"
+if grep -Fq 'name.endsWith("_FILE")' "$ROOT_DIR/infra/docker/gateway-entrypoint.mjs"; then
+  die "fixture forbids dereferencing arbitrary secret-file references into environment values"
+fi
+
+bad_env="$tmp/bad-backup.env"
+sed 's#BACKUP_DIR=/mnt/bigboi/project-conversation/staging/backups#BACKUP_DIR=/srv/project-conversation/staging/backups#' \
+  "$dry_env" > "$bad_env"
+chmod 600 "$bad_env"
+if ("$ROOT_DIR/infra/scripts/validate-config.sh" --env-file "$bad_env" >/dev/null 2>&1); then
+  die "fixture expected backups outside /mnt/bigboi to fail"
+fi
+
+bad_ports="$tmp/bad-ports.env"
+sed 's/EDGE_LOOPBACK_PORT=39190/EDGE_LOOPBACK_PORT=4789/' "$dry_env" > "$bad_ports"
+chmod 600 "$bad_ports"
+if ("$ROOT_DIR/infra/scripts/validate-config.sh" --env-file "$bad_ports" >/dev/null 2>&1); then
+  die "fixture expected the unrelated SpacetimeDB port to be rejected for the edge"
+fi
 
 printf 'Static infrastructure safety fixtures passed.\n'

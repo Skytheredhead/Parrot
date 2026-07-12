@@ -5,6 +5,7 @@ WORKDIR /workspace
 RUN corepack enable && corepack prepare pnpm@10.10.0 --activate
 COPY . .
 RUN pnpm install --frozen-lockfile \
+    && pnpm --filter @project-conversation/db-bindings build \
     && pnpm --filter @project-conversation/worker build \
     && pnpm --filter @project-conversation/worker deploy --prod --legacy /out
 
@@ -12,7 +13,9 @@ FROM ${NODE_IMAGE} AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 RUN groupadd --system --gid 10001 app \
-    && useradd --system --uid 10001 --gid app --home-dir /nonexistent --shell /usr/sbin/nologin app
+    && useradd --system --uid 10001 --gid app --home-dir /nonexistent --shell /usr/sbin/nologin app \
+    && install -d -o 10001 -g 10001 -m 0700 /var/lib/parrot/state \
+       /var/lib/parrot/data /var/lib/parrot/data/objects /var/lib/parrot/data/exports /run/clamav
 COPY --from=build --chown=10001:10001 /out/ /app/
 COPY --chown=10001:10001 infra/healthchecks/worker-readiness.mjs /usr/local/libexec/worker-readiness.mjs
 USER 10001:10001

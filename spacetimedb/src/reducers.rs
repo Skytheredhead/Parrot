@@ -32,6 +32,8 @@ const BOOTSTRAP_OIDC_ISSUER: Option<&str> =
     option_env!("PROJECT_CONVERSATION_BOOTSTRAP_OIDC_ISSUER");
 const BOOTSTRAP_OIDC_AUDIENCE: Option<&str> =
     option_env!("PROJECT_CONVERSATION_BOOTSTRAP_OIDC_AUDIENCE");
+const BOOTSTRAP_OIDC_ADDITIONAL_AUDIENCES: Option<&str> =
+    option_env!("PROJECT_CONVERSATION_BOOTSTRAP_OIDC_ADDITIONAL_AUDIENCES");
 const BOOTSTRAP_OWNER_SUBJECT: Option<&str> =
     option_env!("PROJECT_CONVERSATION_BOOTSTRAP_OWNER_SUBJECT");
 
@@ -129,12 +131,19 @@ pub(crate) fn require_oidc(ctx: &ReducerContext) -> Result<(), String> {
                 .map(|authority| (authority.issuer, authority.audience))
         })
         .ok_or_else(|| "bootstrap authority has not been provisioned".to_string())?;
-    if jwt.issuer() != expected.0
-        || !jwt
+    let trusted_audience = jwt.audience().iter().any(|candidate| {
+        ctx.db
+            .trusted_oidc_audience()
+            .audience()
+            .find(candidate.clone())
+            .is_some()
+    });
+    let legacy_primary_fallback = ctx.db.trusted_oidc_audience().count() == 0
+        && jwt
             .audience()
             .iter()
-            .any(|audience| audience == &expected.1)
-    {
+            .any(|audience| audience == &expected.1);
+    if jwt.issuer() != expected.0 || (!trusted_audience && !legacy_primary_fallback) {
         return Err("token issuer or audience rejected".into());
     }
     Ok(())
@@ -291,6 +300,25 @@ fn compiled_bootstrap_configuration() -> Result<(&'static str, &'static str, &'s
     Ok((issuer, audience, owner_subject))
 }
 
+fn compiled_oidc_audiences(primary: &'static str) -> Result<Vec<&'static str>, String> {
+    let mut audiences = vec![primary];
+    if let Some(additional) = BOOTSTRAP_OIDC_ADDITIONAL_AUDIENCES {
+        if additional.is_empty() {
+            return Err("compiled additional OIDC audiences cannot be empty".into());
+        }
+        for audience in additional.split(',') {
+            if !crate::policy::oidc_audience_valid(audience)
+                || audiences.contains(&audience)
+                || audiences.len() >= 8
+            {
+                return Err("compiled additional OIDC audiences are invalid".into());
+            }
+            audiences.push(audience);
+        }
+    }
+    Ok(audiences)
+}
+
 fn has_application_state(ctx: &ReducerContext) -> bool {
     ctx.db.pending_operator_transfer().count() != 0
         || ctx.db.platform_command_receipt().count() != 0
@@ -348,16 +376,22 @@ fn has_application_state(ctx: &ReducerContext) -> bool {
         || ctx.db.agent_tool_policy().count() != 0
         || ctx.db.trusted_tool().count() != 0
         || ctx.db.agent_run().count() != 0
+        || ctx.db.agent_execution_progress().count() != 0
+        || ctx.db.agent_execution_checkpoint().count() != 0
+        || ctx.db.agent_provider_dispatch().count() != 0
         || ctx.db.agent_run_event().count() != 0
         || ctx.db.agent_context_manifest().count() != 0
         || ctx.db.agent_tool_call().count() != 0
         || ctx.db.approval_request().count() != 0
         || ctx.db.effect_ledger().count() != 0
+        || ctx.db.worker_effect_ledger().count() != 0
         || ctx.db.outbox_job().count() != 0
         || ctx.db.search_document_snapshot().count() != 0
         || ctx.db.file_record().count() != 0
         || ctx.db.file_version().count() != 0
         || ctx.db.file_upload().count() != 0
+        || ctx.db.file_deletion_claim().count() != 0
+        || ctx.db.file_orphan_discrepancy().count() != 0
         || ctx.db.audit_log().count() != 0
         || ctx.db.command_receipt().count() != 0
 }
@@ -913,7 +947,9 @@ fn notification_coalesce_key(
 
 fn notification_tier(kind: NotificationKind) -> NotificationTier {
     match kind {
-        NotificationKind::Mention | NotificationKind::Assignment => NotificationTier::Direct,
+        NotificationKind::Mention | NotificationKind::Reply | NotificationKind::Assignment => {
+            NotificationTier::Direct
+        }
         NotificationKind::Decision | NotificationKind::Agent => NotificationTier::Important,
         NotificationKind::System => NotificationTier::Ambient,
     }
@@ -1151,6 +1187,22 @@ pub(crate) fn notification_resource_revision<C: DbContext>(
             .find(resource_id)
             .filter(|task| task.workspace_id == workspace_id)
             .map(|task| task.revision),
+        "contribution" => ctx
+            .db_read_only()
+            .contribution()
+            .id()
+            .find(resource_id)
+            .filter(|contribution| {
+                contribution.workspace_id == workspace_id && !contribution.deleted
+            })
+            .map(|contribution| contribution.revision),
+        "direct_message" => ctx
+            .db_read_only()
+            .direct_message()
+            .id()
+            .find(resource_id)
+            .filter(|message| message.workspace_id == workspace_id && !message.deleted)
+            .map(|message| message.revision),
         _ => None,
     }
 }
@@ -1198,6 +1250,35 @@ pub(crate) fn notification_resource_visible_to<C: DbContext>(
                             })
                             .is_some_and(|space| can_read_space(ctx, &space, identity))
                     })
+            }),
+        "contribution" => ctx
+            .db_read_only()
+            .contribution()
+            .id()
+            .find(resource_id)
+            .filter(|contribution| {
+                contribution.workspace_id == workspace_id && !contribution.deleted
+            })
+            .and_then(|contribution| {
+                ctx.db_read_only()
+                    .named_thread()
+                    .id()
+                    .find(contribution.thread_id)
+            })
+            .and_then(|thread| ctx.db_read_only().space().id().find(thread.space_id))
+            .is_some_and(|space| can_read_space(ctx, &space, identity)),
+        "direct_message" => ctx
+            .db_read_only()
+            .direct_message()
+            .id()
+            .find(resource_id)
+            .filter(|message| message.workspace_id == workspace_id && !message.deleted)
+            .is_some_and(|message| {
+                ctx.db_read_only()
+                    .direct_participant()
+                    .key()
+                    .find(direct_participant_key(message.conversation_id, identity))
+                    .is_some_and(|participant| participant.left_at.is_none())
             }),
         _ => false,
     }
@@ -2177,7 +2258,12 @@ pub fn client_connected(ctx: &ReducerContext) -> Result<(), String> {
 pub fn initialize_bootstrap_authority(ctx: &ReducerContext) -> Result<(), String> {
     let (issuer, audience, owner_subject) = compiled_bootstrap_configuration()
         .map_err(|error| format!("{error}; refusing initialization"))?;
-    if ctx.db.auth_policy().count() != 0 || ctx.db.bootstrap_authority().count() != 0 {
+    let audiences = compiled_oidc_audiences(audience)
+        .map_err(|error| format!("{error}; refusing initialization"))?;
+    if ctx.db.auth_policy().count() != 0
+        || ctx.db.bootstrap_authority().count() != 0
+        || ctx.db.trusted_oidc_audience().count() != 0
+    {
         return Err("bootstrap authority tables must be empty during initialization".into());
     }
     ctx.db.bootstrap_authority().insert(BootstrapAuthority {
@@ -2188,6 +2274,12 @@ pub fn initialize_bootstrap_authority(ctx: &ReducerContext) -> Result<(), String
         consumed: false,
         configured_at: ctx.timestamp,
     });
+    for audience in audiences {
+        ctx.db.trusted_oidc_audience().insert(TrustedOidcAudience {
+            audience: audience.into(),
+            configured_at: ctx.timestamp,
+        });
+    }
     Ok(())
 }
 
@@ -2203,6 +2295,15 @@ pub fn migrate_platform_authority(ctx: &ReducerContext) -> Result<(), String> {
         || ctx.db.pending_operator_transfer().count() != u64::from(pending_operator.is_some())
     {
         return Err("authority singleton table contains an unexpected key; refusing update".into());
+    }
+    if ctx
+        .db
+        .trusted_oidc_audience()
+        .iter()
+        .any(|row| !crate::policy::oidc_audience_valid(&row.audience))
+        || ctx.db.trusted_oidc_audience().count() > 8
+    {
+        return Err("trusted OIDC audience table is invalid; refusing update".into());
     }
     if let Some(pending) = pending_operator.as_ref() {
         let current = platform
@@ -2240,10 +2341,20 @@ pub fn migrate_platform_authority(ctx: &ReducerContext) -> Result<(), String> {
         has_application_state: has_application_state(ctx),
     })
     .map_err(|error| format!("unsafe platform authority migration refused: {error}"))?;
+    let existing_primary_audience = policy
+        .as_ref()
+        .map(|policy| policy.audience.clone())
+        .or_else(|| {
+            bootstrap
+                .as_ref()
+                .map(|bootstrap| bootstrap.audience.clone())
+        });
 
     match action {
         crate::policy::PlatformUpdateAction::ProvisionBootstrap => {
             let (issuer, audience, owner_subject) = compiled_bootstrap_configuration()
+                .map_err(|error| format!("{error}; refusing empty-database migration"))?;
+            let audiences = compiled_oidc_audiences(audience)
                 .map_err(|error| format!("{error}; refusing empty-database migration"))?;
             ctx.db.bootstrap_authority().insert(BootstrapAuthority {
                 singleton: 0,
@@ -2253,6 +2364,12 @@ pub fn migrate_platform_authority(ctx: &ReducerContext) -> Result<(), String> {
                 consumed: false,
                 configured_at: ctx.timestamp,
             });
+            for audience in audiences {
+                ctx.db.trusted_oidc_audience().insert(TrustedOidcAudience {
+                    audience: audience.into(),
+                    configured_at: ctx.timestamp,
+                });
+            }
         }
         crate::policy::PlatformUpdateAction::BackfillPlatformAuthority => {
             let policy =
@@ -2295,6 +2412,25 @@ pub fn migrate_platform_authority(ctx: &ReducerContext) -> Result<(), String> {
                 }
             }
         }
+    }
+    if let Some(primary) = existing_primary_audience.as_ref()
+        && ctx
+            .db
+            .trusted_oidc_audience()
+            .audience()
+            .find(primary.clone())
+            .is_none()
+        && ctx.db.trusted_oidc_audience().count() != 0
+    {
+        return Err("trusted OIDC audiences omit the immutable primary".into());
+    }
+    if ctx.db.trusted_oidc_audience().count() == 0 {
+        let primary = existing_primary_audience
+            .ok_or_else(|| "authentication primary audience is unavailable".to_string())?;
+        ctx.db.trusted_oidc_audience().insert(TrustedOidcAudience {
+            audience: primary,
+            configured_at: ctx.timestamp,
+        });
     }
     for mut job in ctx
         .db
@@ -5613,6 +5749,9 @@ pub fn add_contribution(
     {
         return Ok(());
     }
+    let reply_recipient = parent_contribution_id
+        .and_then(|parent_id| ctx.db.contribution().id().find(parent_id))
+        .map_or(root_post.author_identity, |parent| parent.author_identity);
     let id = new_id(ctx)?;
     insert_contribution_ancestry(ctx, id, thread_id, parent_contribution_id)?;
     ctx.db.contribution().insert(Contribution {
@@ -5630,6 +5769,20 @@ pub fn add_contribution(
         created_at: ctx.timestamp,
         updated_at: ctx.timestamp,
     });
+    if reply_recipient != ctx.sender() {
+        coalesce_notification(
+            ctx,
+            NotificationIntent {
+                workspace_id: thread.workspace_id,
+                space_id: Some(thread.space_id),
+                recipient_identity: reply_recipient,
+                kind: NotificationKind::Reply,
+                resource_type: "contribution",
+                resource_id: id,
+                summary: "Someone replied in a thread you participated in",
+            },
+        )?;
+    }
     append_post_activity(
         ctx,
         &mut root_post,
@@ -6239,6 +6392,9 @@ pub fn send_direct_message(
     }
     validate_text(&body, "direct message body", 50_000)?;
     let mut conversation = require_direct_write(ctx, conversation_id)?;
+    let reply_recipient = parent_message_id
+        .and_then(|parent_id| ctx.db.direct_message().id().find(parent_id))
+        .map(|parent| parent.author_identity);
     let message_id = new_id(ctx)?;
     let sequence = conversation.next_sequence;
     insert_direct_ancestry(ctx, conversation_id, message_id, parent_message_id)?;
@@ -6257,6 +6413,20 @@ pub fn send_direct_message(
         edited_at: None,
         deleted_at: None,
     });
+    if let Some(recipient_identity) = reply_recipient.filter(|identity| *identity != ctx.sender()) {
+        coalesce_notification(
+            ctx,
+            NotificationIntent {
+                workspace_id: conversation.workspace_id,
+                space_id: None,
+                recipient_identity,
+                kind: NotificationKind::Reply,
+                resource_type: "direct_message",
+                resource_id: message_id,
+                summary: "Someone replied to your direct message",
+            },
+        )?;
+    }
     conversation.next_sequence = conversation.next_sequence.saturating_add(1);
     conversation.revision = conversation.revision.saturating_add(1);
     conversation.updated_at = ctx.timestamp;
@@ -7315,21 +7485,35 @@ pub fn update_task_status(
 #[spacetimedb::reducer]
 pub fn create_file_upload(ctx: &ReducerContext, input: FileUploadInput) -> Result<(), String> {
     let FileUploadInput {
+        reservation_id,
         space_id,
         file_name,
+        declared_type,
         declared_size_bytes,
         checksum,
+        ttl_seconds,
         client_request_id,
     } = input;
     let (space, _) = require_space_action(ctx, space_id, Action::Write)?;
     validate_text(&file_name, "file name", 500)?;
+    validate_text(&declared_type, "declared file type", 200)?;
     validate_text(&checksum, "file checksum", 200)?;
+    if !crate::policy::clean_object_identity_valid("reserved", &checksum) {
+        return Err("file checksum must be lowercase SHA-256".into());
+    }
+    if !declared_type.contains('/') || declared_type.chars().any(char::is_whitespace) {
+        return Err("declared file type is invalid".into());
+    }
     if declared_size_bytes == 0 || declared_size_bytes > 100 * 1024 * 1024 {
         return Err("file size must be between 1 byte and 100 MiB".into());
     }
+    if !(60..=900).contains(&ttl_seconds) {
+        return Err("file upload lifetime must be 60-900 seconds".into());
+    }
     let input_hash = normalized_input_hash(&format!(
-        "{space_id}\0{}\0{declared_size_bytes}\0{checksum}",
-        file_name.trim()
+        "{reservation_id}\0{space_id}\0{}\0{}\0{declared_size_bytes}\0{checksum}\0{ttl_seconds}",
+        file_name.trim(),
+        declared_type.trim()
     ));
     if existing_receipt(
         ctx,
@@ -7343,17 +7527,25 @@ pub fn create_file_upload(ctx: &ReducerContext, input: FileUploadInput) -> Resul
         return Ok(());
     }
     let file_id = new_id(ctx)?;
-    let upload_id = new_id(ctx)?;
-    let source_key = format!("uploads/{}/{file_id}/1", space.workspace_id);
-    let cleanup_prefix = format!("tmp/{}/{file_id}/", space.workspace_id);
+    if ctx.db.file_upload().id().find(reservation_id).is_some() {
+        return Err("file upload reservation is unavailable".into());
+    }
+    let upload_id = reservation_id;
+    let cleanup_prefix = format!("files/{}/{file_id}/", space.workspace_id);
+    let source_key = format!("{cleanup_prefix}source/1");
     ctx.db.file_record().insert(FileRecord {
         id: file_id,
         workspace_id: space.workspace_id,
         space_id,
         owner_identity: ctx.sender(),
         file_name: file_name.trim().into(),
+        declared_type: declared_type.trim().into(),
         source_key: source_key.clone(),
+        source_object_version: String::new(),
+        source_checksum_sha256: String::new(),
         clean_key: String::new(),
+        clean_object_version: String::new(),
+        clean_checksum_sha256: String::new(),
         cleanup_prefix: cleanup_prefix.clone(),
         declared_size_bytes,
         checksum: checksum.clone(),
@@ -7371,7 +7563,12 @@ pub fn create_file_upload(ctx: &ReducerContext, input: FileUploadInput) -> Resul
         workspace_id: space.workspace_id,
         content_version: 1,
         source_key: source_key.clone(),
+        declared_type: declared_type.trim().into(),
+        source_object_version: String::new(),
+        source_checksum_sha256: String::new(),
         clean_key: String::new(),
+        clean_object_version: String::new(),
+        clean_checksum_sha256: String::new(),
         declared_size_bytes,
         checksum,
         detected_type: String::new(),
@@ -7387,7 +7584,7 @@ pub fn create_file_upload(ctx: &ReducerContext, input: FileUploadInput) -> Resul
         owner_identity: ctx.sender(),
         source_key,
         completed: false,
-        expires_at: ctx.timestamp + TimeDuration::from_micros(3_600_000_000),
+        expires_at: ctx.timestamp + TimeDuration::from_micros(i64::from(ttl_seconds) * 1_000_000),
         created_at: ctx.timestamp,
         completed_at: None,
     });
@@ -7432,13 +7629,346 @@ fn validate_file_job_lease(
     Ok(())
 }
 
+fn canonical_cleanup_object_key(file: &FileRecord, key: &str) -> bool {
+    key.starts_with(&file.cleanup_prefix)
+        && key.len() <= 1_024
+        && !key.contains(['\\', '?', '#', '%'])
+        && key
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn file_deletion_key(file_id: Uuid, key: &str) -> String {
+    format!("{file_id}:{}:{key}", key.len())
+}
+
+#[spacetimedb::reducer]
+pub fn service_claim_file_deletion(
+    ctx: &ReducerContext,
+    input: ClaimFileDeletionInput,
+) -> Result<(), String> {
+    let mut file = ctx
+        .db
+        .file_record()
+        .id()
+        .find(input.file_id)
+        .ok_or_else(|| "file cleanup unavailable".to_string())?;
+    validate_file_job_lease(
+        ctx,
+        input.job_id,
+        input.lease_generation,
+        &file,
+        JOB_FILE_CLEANUP,
+    )?;
+    revision_matches(file.revision, input.expected_revision)?;
+    if file.state != FileSecurityState::Deleted
+        || !canonical_cleanup_object_key(&file, &input.key)
+        || !crate::policy::workspace_export_artifact_version_valid(&input.object_version_tag)
+    {
+        return Err("file cleanup object is outside the deletion fence".into());
+    }
+    let file_key = file_deletion_key(file.id, &input.key);
+    if let Some(mut existing) = ctx
+        .db
+        .file_deletion_claim()
+        .file_key()
+        .find(file_key.clone())
+    {
+        if existing.file_id != file.id
+            || existing.workspace_id != file.workspace_id
+            || existing.file_revision != file.revision
+            || existing.key != input.key
+            || existing.state == FileDeletionClaimState::Finalized
+            || (existing.state == FileDeletionClaimState::Claimed
+                && existing.object_version_tag != input.object_version_tag)
+        {
+            return Err("file deletion claim conflicts with durable history".into());
+        }
+        if existing.state == FileDeletionClaimState::Claimed
+            && existing.service_identity == ctx.sender()
+            && existing.job_id == input.job_id
+            && existing.lease_generation == input.lease_generation
+        {
+            return Ok(());
+        }
+        if !crate::policy::file_deletion_reclaim_allowed(
+            existing.state == FileDeletionClaimState::Finalized,
+            existing.state == FileDeletionClaimState::Released,
+            false,
+            input.lease_generation > existing.lease_generation,
+        ) {
+            return Err("file deletion claim is owned by a current generation".into());
+        }
+        existing.job_id = input.job_id;
+        existing.service_identity = ctx.sender();
+        existing.lease_generation = input.lease_generation;
+        existing.generation = existing.generation.saturating_add(1);
+        existing.object_version_tag = input.object_version_tag;
+        existing.state = FileDeletionClaimState::Claimed;
+        existing.code.clear();
+        existing.updated_at = ctx.timestamp;
+        ctx.db.file_deletion_claim().claim_id().update(existing);
+        return Ok(());
+    }
+    ctx.db.file_deletion_claim().insert(FileDeletionClaim {
+        claim_id: new_id(ctx)?,
+        file_key,
+        workspace_id: file.workspace_id,
+        file_id: file.id,
+        file_revision: file.revision,
+        job_id: input.job_id,
+        service_identity: ctx.sender(),
+        lease_generation: input.lease_generation,
+        generation: 1,
+        key: input.key,
+        object_version_tag: input.object_version_tag,
+        state: FileDeletionClaimState::Claimed,
+        code: String::new(),
+        created_at: ctx.timestamp,
+        updated_at: ctx.timestamp,
+    });
+    file.updated_at = ctx.timestamp;
+    ctx.db.file_record().id().update(file);
+    Ok(())
+}
+
+fn exact_file_deletion_claim(
+    ctx: &ReducerContext,
+    input: &FileDeletionClaimInput,
+) -> Result<FileDeletionClaim, String> {
+    let claim = ctx
+        .db
+        .file_deletion_claim()
+        .claim_id()
+        .find(input.claim_id)
+        .ok_or_else(|| "file deletion claim unavailable".to_string())?;
+    require_service(ctx, claim.workspace_id, JOB_FILE_CLEANUP)?;
+    if claim.service_identity != ctx.sender()
+        || claim.state != FileDeletionClaimState::Claimed
+        || claim.generation != input.generation
+        || claim.workspace_id != input.workspace_id
+        || claim.file_id != input.file_id
+        || claim.file_revision != input.file_revision
+        || claim.key != input.key
+        || claim.object_version_tag != input.object_version_tag
+    {
+        return Err("file deletion claim is stale".into());
+    }
+    Ok(claim)
+}
+
+fn upsert_file_orphan(
+    ctx: &ReducerContext,
+    workspace_id: Uuid,
+    file_id: Uuid,
+    file_revision: u64,
+    file_key: String,
+    key: String,
+) {
+    if let Some(mut row) = ctx
+        .db
+        .file_orphan_discrepancy()
+        .file_key()
+        .find(file_key.clone())
+    {
+        row.occurrence_count = row.occurrence_count.saturating_add(1);
+        row.resolved = false;
+        row.updated_at = ctx.timestamp;
+        ctx.db.file_orphan_discrepancy().file_key().update(row);
+    } else {
+        ctx.db
+            .file_orphan_discrepancy()
+            .insert(FileOrphanDiscrepancy {
+                file_key,
+                workspace_id,
+                file_id,
+                file_revision,
+                key,
+                occurrence_count: 1,
+                resolved: false,
+                created_at: ctx.timestamp,
+                updated_at: ctx.timestamp,
+            });
+    }
+}
+
+#[spacetimedb::reducer]
+pub fn service_finalize_file_deletion(
+    ctx: &ReducerContext,
+    input: FileDeletionClaimInput,
+) -> Result<(), String> {
+    if let Some(existing) = ctx.db.file_deletion_claim().claim_id().find(input.claim_id)
+        && existing.state == FileDeletionClaimState::Finalized
+        && existing.generation == input.generation
+        && existing.service_identity == ctx.sender()
+        && existing.workspace_id == input.workspace_id
+        && existing.file_id == input.file_id
+        && existing.file_revision == input.file_revision
+        && existing.key == input.key
+        && existing.object_version_tag == input.object_version_tag
+    {
+        return Ok(());
+    }
+    let mut claim = exact_file_deletion_claim(ctx, &input)?;
+    claim.state = FileDeletionClaimState::Finalized;
+    claim.code = "deleted".into();
+    claim.updated_at = ctx.timestamp;
+    if let Some(mut orphan) = ctx
+        .db
+        .file_orphan_discrepancy()
+        .file_key()
+        .find(claim.file_key.clone())
+    {
+        orphan.resolved = true;
+        orphan.updated_at = ctx.timestamp;
+        ctx.db.file_orphan_discrepancy().file_key().update(orphan);
+    }
+    ctx.db.file_deletion_claim().claim_id().update(claim);
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn service_release_file_deletion(
+    ctx: &ReducerContext,
+    input: ReleaseFileDeletionInput,
+) -> Result<(), String> {
+    validate_text(&input.code, "file deletion release code", 120)?;
+    if let Some(existing) = ctx
+        .db
+        .file_deletion_claim()
+        .claim_id()
+        .find(input.claim.claim_id)
+        && existing.state == FileDeletionClaimState::Released
+        && existing.generation == input.claim.generation
+        && existing.service_identity == ctx.sender()
+        && existing.code == input.code
+        && existing.workspace_id == input.claim.workspace_id
+        && existing.file_id == input.claim.file_id
+        && existing.file_revision == input.claim.file_revision
+        && existing.key == input.claim.key
+        && existing.object_version_tag == input.claim.object_version_tag
+    {
+        return Ok(());
+    }
+    let mut claim = exact_file_deletion_claim(ctx, &input.claim)?;
+    upsert_file_orphan(
+        ctx,
+        claim.workspace_id,
+        claim.file_id,
+        claim.file_revision,
+        claim.file_key.clone(),
+        claim.key.clone(),
+    );
+    claim.state = FileDeletionClaimState::Released;
+    claim.code = input.code;
+    claim.updated_at = ctx.timestamp;
+    ctx.db.file_deletion_claim().claim_id().update(claim);
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn service_record_file_orphan(
+    ctx: &ReducerContext,
+    input: RecordFileOrphanInput,
+) -> Result<(), String> {
+    let file = ctx
+        .db
+        .file_record()
+        .id()
+        .find(input.file_id)
+        .ok_or_else(|| "file cleanup unavailable".to_string())?;
+    validate_file_job_lease(
+        ctx,
+        input.job_id,
+        input.lease_generation,
+        &file,
+        JOB_FILE_CLEANUP,
+    )?;
+    revision_matches(file.revision, input.expected_revision)?;
+    if file.state != FileSecurityState::Deleted || !canonical_cleanup_object_key(&file, &input.key)
+    {
+        return Err("file orphan is outside the cleanup fence".into());
+    }
+    let file_key = file_deletion_key(file.id, &input.key);
+    upsert_file_orphan(
+        ctx,
+        file.workspace_id,
+        file.id,
+        file.revision,
+        file_key,
+        input.key,
+    );
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn register_clean_file_object(
+    ctx: &ReducerContext,
+    input: RegisterCleanFileObjectInput,
+) -> Result<(), String> {
+    let mut file = ctx
+        .db
+        .file_record()
+        .id()
+        .find(input.file_id)
+        .ok_or_else(|| "file not found".to_string())?;
+    validate_file_job_lease(
+        ctx,
+        input.job_id,
+        input.lease_generation,
+        &file,
+        JOB_FILE_SCAN,
+    )?;
+    revision_matches(file.revision, input.expected_revision)?;
+    let expected_key = format!("{}clean/1", file.cleanup_prefix);
+    if input.clean_key != expected_key
+        || !crate::policy::clean_object_identity_valid(
+            &input.object_version,
+            &input.checksum_sha256,
+        )
+    {
+        return Err("clean file object identity is invalid".into());
+    }
+    if !matches!(
+        file.state,
+        FileSecurityState::Uploaded | FileSecurityState::Scanning
+    ) {
+        return Err("file is not awaiting a clean object".into());
+    }
+    file.clean_key = input.clean_key.clone();
+    file.clean_object_version = input.object_version.clone();
+    file.clean_checksum_sha256 = input.checksum_sha256.clone();
+    file.updated_at = ctx.timestamp;
+    ctx.db.file_record().id().update(file);
+    let mut version = ctx
+        .db
+        .file_version()
+        .key()
+        .find(file_version_key(input.file_id, 1))
+        .ok_or_else(|| "file version not found".to_string())?;
+    version.clean_key = input.clean_key;
+    version.clean_object_version = input.object_version;
+    version.clean_checksum_sha256 = input.checksum_sha256;
+    version.updated_at = ctx.timestamp;
+    ctx.db.file_version().key().update(version);
+    Ok(())
+}
+
 #[spacetimedb::reducer]
 pub fn complete_file_upload(
     ctx: &ReducerContext,
-    file_id: Uuid,
-    expected_revision: u64,
-    client_request_id: Uuid,
+    input: CompleteFileUploadInput,
 ) -> Result<(), String> {
+    let CompleteFileUploadInput {
+        upload_id,
+        file_id,
+        expected_revision,
+        observed_size_bytes,
+        observed_type,
+        object_version,
+        checksum_sha256,
+        client_request_id,
+    } = input;
     let mut file = ctx
         .db
         .file_record()
@@ -7449,7 +7979,9 @@ pub fn complete_file_upload(
     if file.owner_identity != ctx.sender() && !role_allows(member.role, Action::ManageWorkspace) {
         return Err("file upload completion denied".into());
     }
-    let input_hash = normalized_input_hash(&format!("{file_id}\0{expected_revision}"));
+    let input_hash = normalized_input_hash(&format!(
+        "{upload_id}\0{file_id}\0{expected_revision}\0{observed_size_bytes}\0{observed_type}\0{object_version}\0{checksum_sha256}"
+    ));
     if existing_receipt(
         ctx,
         Some(file.workspace_id),
@@ -7468,16 +8000,25 @@ pub fn complete_file_upload(
     let mut upload = ctx
         .db
         .file_upload()
-        .file_id()
-        .find(file_id)
+        .id()
+        .find(upload_id)
         .ok_or_else(|| "upload session not found".to_string())?;
-    if upload.completed || upload.expires_at <= ctx.timestamp {
+    if upload.file_id != file_id || upload.completed || upload.expires_at <= ctx.timestamp {
         return Err("upload session is completed or expired".into());
+    }
+    if observed_size_bytes != file.declared_size_bytes
+        || observed_type != file.declared_type
+        || checksum_sha256 != file.checksum
+        || !crate::policy::clean_object_identity_valid(&object_version, &checksum_sha256)
+    {
+        return Err("uploaded object does not match its reservation".into());
     }
     upload.completed = true;
     upload.completed_at = Some(ctx.timestamp);
     ctx.db.file_upload().id().update(upload);
     file.state = FileSecurityState::Uploaded;
+    file.source_object_version = object_version.clone();
+    file.source_checksum_sha256 = checksum_sha256.clone();
     file.revision = file.revision.saturating_add(1);
     file.updated_at = ctx.timestamp;
     ctx.db.file_record().id().update(file.clone());
@@ -7488,6 +8029,8 @@ pub fn complete_file_upload(
         .find(file_version_key(file_id, 1))
         .ok_or_else(|| "file version not found".to_string())?;
     version.state = FileSecurityState::Uploaded;
+    version.source_object_version = object_version;
+    version.source_checksum_sha256 = checksum_sha256;
     version.revision = version.revision.saturating_add(1);
     version.updated_at = ctx.timestamp;
     ctx.db.file_version().key().update(version);
@@ -7551,9 +8094,16 @@ pub fn record_file_scan_outcome(
         detected_type.as_str(),
         "text/plain" | "application/pdf" | "image/png" | "image/jpeg"
     );
-    let expected_clean_key = format!("clean/{}/{file_id}/1", file.workspace_id);
+    let expected_clean_key = format!("{}clean/1", file.cleanup_prefix);
     if clean && (!allowed || clean_key != expected_clean_key) {
         return Err("clean file result violates type or destination policy".into());
+    }
+    if clean
+        && (file.clean_key != clean_key
+            || file.clean_object_version.is_empty()
+            || file.clean_checksum_sha256.is_empty())
+    {
+        return Err("clean file object identity was not registered".into());
     }
     file.detected_type = detected_type.clone();
     file.scanner = scanner;
@@ -7562,6 +8112,10 @@ pub fn record_file_scan_outcome(
     } else {
         String::new()
     };
+    if !clean {
+        file.clean_object_version.clear();
+        file.clean_checksum_sha256.clear();
+    }
     file.state = if clean {
         FileSecurityState::Clean
     } else {
@@ -7578,6 +8132,8 @@ pub fn record_file_scan_outcome(
         .ok_or_else(|| "file version not found".to_string())?;
     version.detected_type = detected_type;
     version.clean_key = file.clean_key.clone();
+    version.clean_object_version = file.clean_object_version.clone();
+    version.clean_checksum_sha256 = file.clean_checksum_sha256.clone();
     version.state = file.state;
     version.revision = version.revision.saturating_add(1);
     version.updated_at = ctx.timestamp;
@@ -9378,6 +9934,7 @@ pub fn start_agent_run(
         lease_owner: None,
         lease_until: None,
         lease_generation: 0,
+        execution_request_id: String::new(),
         expires_at: ctx.timestamp
             + TimeDuration::from_micros(i64::from(installation.max_age_seconds) * 1_000_000),
         next_event_sequence: 1,
@@ -9509,6 +10066,315 @@ pub fn claim_agent_run(
     run.updated_at = ctx.timestamp;
     ctx.db.agent_run().id().update(run);
     Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn service_claim_agent_execution(
+    ctx: &ReducerContext,
+    input: ClaimAgentExecutionInput,
+) -> Result<(), String> {
+    let ClaimAgentExecutionInput {
+        run_id,
+        workspace_id,
+        authority_job_id,
+        execution_request_id,
+        expected_version,
+        lease_seconds,
+    } = input;
+    validate_text(&execution_request_id, "execution request id", 500)?;
+    let run = ctx
+        .db
+        .agent_run()
+        .id()
+        .find(run_id)
+        .ok_or_else(|| "agent run not found".to_string())?;
+    if run.workspace_id != workspace_id
+        || (!run.execution_request_id.is_empty()
+            && run.execution_request_id != execution_request_id)
+    {
+        return Err("agent execution request binding mismatch".into());
+    }
+    let _job = ctx
+        .db
+        .outbox_job()
+        .id()
+        .find(authority_job_id)
+        .filter(|job| {
+            job.kind == JOB_AGENT_RUN
+                && job.workspace_id == workspace_id
+                && job.resource_type == "agent_run"
+                && job.resource_id == run_id
+                && job.run_id == Some(run_id)
+                && job.state == OutboxState::Leased
+                && job.lease_owner == Some(ctx.sender())
+                && job.lease_until.is_some_and(|expiry| expiry > ctx.timestamp)
+        })
+        .ok_or_else(|| "exact leased agent outbox request required".to_string())?;
+    require_service(ctx, workspace_id, JOB_AGENT_RUN)?;
+    claim_agent_run(ctx, run_id, expected_version, lease_seconds)?;
+    let mut claimed = ctx
+        .db
+        .agent_run()
+        .id()
+        .find(run_id)
+        .ok_or_else(|| "claimed agent run disappeared".to_string())?;
+    claimed.execution_request_id = execution_request_id;
+    ctx.db.agent_run().id().update(claimed);
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn service_transition_agent_run(
+    ctx: &ReducerContext,
+    run_id: Uuid,
+    lease_generation: u64,
+    next_state: AgentRunState,
+    code: String,
+) -> Result<(), String> {
+    let run = ctx
+        .db
+        .agent_run()
+        .id()
+        .find(run_id)
+        .ok_or_else(|| "agent run not found".to_string())?;
+    if run.state == next_state {
+        validate_agent_lease(ctx, &run, lease_generation, false, true)?;
+        return Ok(());
+    }
+    append_agent_run_event(
+        ctx,
+        run_id,
+        lease_generation,
+        run.version,
+        next_state,
+        code.clone(),
+        code,
+    )
+}
+
+fn validate_json(value: &str, field: &str, max_bytes: usize) -> Result<(), String> {
+    if value.len() > max_bytes || serde_json::from_str::<serde_json::Value>(value).is_err() {
+        return Err(format!("{field} must be bounded valid JSON"));
+    }
+    Ok(())
+}
+
+fn save_agent_progress_row(
+    ctx: &ReducerContext,
+    input: SaveAgentProgressInput,
+) -> Result<(), String> {
+    validate_json(&input.tool_results_json, "tool results", 1_048_576)?;
+    if !input.pending_step_json.is_empty() {
+        validate_json(&input.pending_step_json, "pending step", 262_144)?;
+    }
+    let run = ctx
+        .db
+        .agent_run()
+        .id()
+        .find(input.run_id)
+        .ok_or_else(|| "agent run not found".to_string())?;
+    require_service(ctx, run.workspace_id, JOB_AGENT_RUN)?;
+    let installation = validate_agent_lease(ctx, &run, input.lease_generation, false, true)?;
+    if input.output_tokens > installation.max_run_tokens
+        || input.cost_micros > installation.max_run_cost_micros
+        || input.tool_calls > 32
+        || input.provider_input_bytes > 8_388_608
+    {
+        return Err("agent progress exceeds authoritative budgets".into());
+    }
+    if let Some(existing) = ctx
+        .db
+        .agent_execution_progress()
+        .run_id()
+        .find(input.run_id)
+        && (existing.lease_generation > input.lease_generation
+            || (existing.lease_generation == input.lease_generation
+                && existing.sequence > input.sequence))
+    {
+        return Err("agent progress is stale".into());
+    }
+    let row = AgentExecutionProgress {
+        run_id: input.run_id,
+        lease_generation: input.lease_generation,
+        sequence: input.sequence,
+        output_tokens: input.output_tokens,
+        cost_micros: input.cost_micros,
+        tool_calls: input.tool_calls,
+        tool_results_json: input.tool_results_json,
+        provider_input_bytes: input.provider_input_bytes,
+        pending_step_json: input.pending_step_json,
+        updated_at: ctx.timestamp,
+    };
+    if ctx
+        .db
+        .agent_execution_progress()
+        .run_id()
+        .find(input.run_id)
+        .is_some()
+    {
+        ctx.db.agent_execution_progress().run_id().update(row);
+    } else {
+        ctx.db.agent_execution_progress().insert(row);
+    }
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn service_save_agent_progress(
+    ctx: &ReducerContext,
+    input: SaveAgentProgressInput,
+) -> Result<(), String> {
+    save_agent_progress_row(ctx, input)
+}
+
+#[spacetimedb::reducer]
+pub fn service_append_agent_checkpoint(
+    ctx: &ReducerContext,
+    input: SaveAgentCheckpointInput,
+) -> Result<(), String> {
+    validate_text(&input.code, "checkpoint code", 120)?;
+    if !input.details_json.is_empty() {
+        validate_json(&input.details_json, "checkpoint details", 64 * 1024)?;
+    }
+    let run = ctx
+        .db
+        .agent_run()
+        .id()
+        .find(input.run_id)
+        .ok_or_else(|| "agent run not found".to_string())?;
+    require_service(ctx, run.workspace_id, JOB_AGENT_RUN)?;
+    validate_agent_lease(ctx, &run, input.lease_generation, false, true)?;
+    let key = format!("{}:{}", input.run_id, input.sequence);
+    let row = AgentExecutionCheckpoint {
+        key: key.clone(),
+        run_id: input.run_id,
+        lease_generation: input.lease_generation,
+        sequence: input.sequence,
+        state: input.state,
+        code: input.code,
+        details_json: input.details_json,
+        created_at_millis: input.created_at_millis,
+        recorded_at: ctx.timestamp,
+    };
+    if let Some(existing) = ctx.db.agent_execution_checkpoint().key().find(key) {
+        if existing.lease_generation == row.lease_generation
+            && existing.state == row.state
+            && existing.code == row.code
+            && existing.details_json == row.details_json
+            && existing.created_at_millis == row.created_at_millis
+        {
+            return Ok(());
+        }
+        return Err("agent checkpoint replay mismatch".into());
+    }
+    ctx.db.agent_execution_checkpoint().insert(row);
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn service_record_agent_provider_dispatch(
+    ctx: &ReducerContext,
+    input: RecordAgentProviderDispatchInput,
+) -> Result<(), String> {
+    for (value, field, max) in [
+        (&input.request_id, "provider request id", 500),
+        (&input.input_fingerprint, "provider input fingerprint", 200),
+        (&input.context_binding_hash, "context binding hash", 200),
+    ] {
+        validate_text(value, field, max)?;
+    }
+    if input.canonical_input.len() > 2_097_152
+        || input.canonical_input.len() as u64 != input.input_bytes
+    {
+        return Err("provider input byte binding is invalid".into());
+    }
+    validate_json(&input.canonical_input, "provider input", 2_097_152)?;
+    validate_json(&input.context_json, "provider context", 262_144)?;
+    let run = ctx
+        .db
+        .agent_run()
+        .id()
+        .find(input.run_id)
+        .ok_or_else(|| "agent run not found".to_string())?;
+    require_service(ctx, run.workspace_id, JOB_AGENT_RUN)?;
+    validate_agent_lease(ctx, &run, input.lease_generation, false, true)?;
+    if input.authorization_epoch != run.membership_epoch {
+        return Err("provider dispatch authorization epoch is stale".into());
+    }
+    let key = format!("{}:{}", input.run_id, input.provider_sequence);
+    if let Some(existing) = ctx.db.agent_provider_dispatch().key().find(key.clone()) {
+        if existing.lease_generation == input.lease_generation
+            && existing.authorization_epoch == input.authorization_epoch
+            && existing.request_id == input.request_id
+            && existing.input_fingerprint == input.input_fingerprint
+            && existing.canonical_input == input.canonical_input
+            && existing.input_bytes == input.input_bytes
+            && existing.context_binding_hash == input.context_binding_hash
+            && existing.context_json == input.context_json
+        {
+            return Ok(());
+        }
+        return Err("provider dispatch replay mismatch".into());
+    }
+    ctx.db
+        .agent_provider_dispatch()
+        .insert(AgentProviderDispatch {
+            key,
+            run_id: input.run_id,
+            provider_sequence: input.provider_sequence,
+            lease_generation: input.lease_generation,
+            authorization_epoch: input.authorization_epoch,
+            request_id: input.request_id,
+            input_fingerprint: input.input_fingerprint,
+            canonical_input: input.canonical_input,
+            input_bytes: input.input_bytes,
+            context_binding_hash: input.context_binding_hash,
+            context_json: input.context_json,
+            created_at: ctx.timestamp,
+        });
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn service_commit_agent_final(
+    ctx: &ReducerContext,
+    input: CommitAgentFinalInput,
+) -> Result<(), String> {
+    let run = ctx
+        .db
+        .agent_run()
+        .id()
+        .find(input.run_id)
+        .ok_or_else(|| "agent run not found".to_string())?;
+    if input.authorization_epoch != run.membership_epoch {
+        return Err("agent final authorization epoch is stale".into());
+    }
+    save_agent_progress_row(
+        ctx,
+        SaveAgentProgressInput {
+            run_id: input.run_id,
+            lease_generation: input.lease_generation,
+            sequence: input.progress_sequence,
+            output_tokens: input.output_tokens,
+            cost_micros: input.cost_micros,
+            tool_calls: input.tool_calls,
+            tool_results_json: input.tool_results_json,
+            provider_input_bytes: input.provider_input_bytes,
+            pending_step_json: String::new(),
+        },
+    )?;
+    complete_agent_run(
+        ctx,
+        CompleteAgentRunInput {
+            run_id: input.run_id,
+            lease_generation: input.lease_generation,
+            expected_version: run.version,
+            succeeded: true,
+            output_summary: input.text,
+            used_tokens: input.output_tokens,
+            used_cost_micros: input.cost_micros,
+        },
+    )
 }
 
 #[spacetimedb::reducer]
@@ -9848,6 +10714,8 @@ pub fn request_agent_tool_call(
     ctx.db.agent_tool_call().insert(AgentToolCall {
         id: tool_call_id,
         run_id,
+        provider_call_key: format!("{run_id}:{}:{tool_call_id}", tool_call_id.to_string().len()),
+        provider_call_id: tool_call_id.to_string(),
         tool_name,
         tool_version,
         policy_key,
@@ -10165,6 +11033,546 @@ pub fn acquire_agent_tool_effect(
         ctx.db.approval_request().id().update(approval);
     }
     Ok(())
+}
+
+fn constant_time_string_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+#[spacetimedb::reducer]
+pub fn service_prepare_agent_tool_call(
+    ctx: &ReducerContext,
+    input: PrepareAgentToolCallInput,
+) -> Result<(), String> {
+    for (value, field, max) in [
+        (&input.provider_call_id, "provider call id", 128),
+        (&input.tool_name, "tool name", 200),
+        (&input.tool_version, "tool version", 120),
+        (&input.normalized_args_hash, "argument hash", 200),
+        (&input.effect_key, "effect key", 200),
+    ] {
+        validate_text(value, field, max)?;
+    }
+    if input.normalized_args_hash.len() != 64
+        || !input
+            .normalized_args_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || !input.effect_key.starts_with("agent-tool:")
+        || input.effect_key.len() != 75
+        || !input.effect_key[11..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("agent tool effect binding is invalid".into());
+    }
+    let mut run = ctx
+        .db
+        .agent_run()
+        .id()
+        .find(input.run_id)
+        .ok_or_else(|| "agent run not found".to_string())?;
+    require_service(ctx, run.workspace_id, JOB_AGENT_RUN)?;
+    validate_agent_lease(ctx, &run, input.lease_generation, false, true)?;
+    let provider_call_key = format!(
+        "{}:{}:{}",
+        input.run_id,
+        input.provider_call_id.len(),
+        input.provider_call_id
+    );
+    if let Some(existing) = ctx
+        .db
+        .agent_tool_call()
+        .provider_call_key()
+        .find(provider_call_key.clone())
+    {
+        let approval = ctx.db.approval_request().tool_call_id().find(existing.id);
+        let exact = existing.run_id == input.run_id
+            && existing.provider_call_id == input.provider_call_id
+            && existing.tool_name == input.tool_name
+            && existing.tool_version == input.tool_version
+            && existing.normalized_args_hash == input.normalized_args_hash
+            && existing.effect_class == input.effect_class
+            && existing.effect_key == input.effect_key
+            && approval.as_ref().map(|row| row.nonce_hash.as_str())
+                == if existing.requires_approval {
+                    Some(input.nonce_hash.as_str())
+                } else {
+                    None
+                };
+        return if exact {
+            Ok(())
+        } else {
+            Err("agent tool preparation replay mismatch".into())
+        };
+    }
+    if run.state != AgentRunState::Running {
+        return Err("agent tool calls may only be prepared while running".into());
+    }
+    let policy_key =
+        agent_tool_policy_key(run.installation_id, &input.tool_name, &input.tool_version);
+    let policy = ctx
+        .db
+        .agent_tool_policy()
+        .key()
+        .find(policy_key.clone())
+        .filter(|policy| policy.enabled)
+        .ok_or_else(|| "agent tool is not registered or enabled".to_string())?;
+    let trusted = ctx
+        .db
+        .trusted_tool()
+        .key()
+        .find(trusted_tool_key(&input.tool_name, &input.tool_version))
+        .filter(|trusted| trusted.enabled)
+        .ok_or_else(|| "tool is disabled or absent from the trusted catalog".to_string())?;
+    if input.effect_class != policy.effect_class
+        || !crate::policy::trusted_tool_policy_current(
+            trusted.enabled,
+            trusted.revision,
+            policy.trusted_tool_revision,
+            trusted.capability == policy.capability,
+            trusted.effect_class == policy.effect_class,
+        )
+        || !agent_scope_enabled(ctx, run.installation_id, run.space_id, policy.capability)
+    {
+        return Err("agent tool policy or capability is stale".into());
+    }
+    if policy.requires_approval {
+        validate_text(&input.nonce_hash, "approval nonce hash", 200)?;
+    } else if !input.nonce_hash.is_empty() {
+        return Err("approval nonce is not allowed for this tool".into());
+    }
+    if ctx
+        .db
+        .effect_ledger()
+        .effect_key()
+        .find(input.effect_key.clone())
+        .is_some()
+    {
+        return Err("agent tool effect key is already bound".into());
+    }
+    let tool_call_id = new_id(ctx)?;
+    ctx.db.agent_tool_call().insert(AgentToolCall {
+        id: tool_call_id,
+        run_id: input.run_id,
+        provider_call_key,
+        provider_call_id: input.provider_call_id,
+        tool_name: input.tool_name,
+        tool_version: input.tool_version,
+        policy_key,
+        policy_revision: policy.revision,
+        effect_class: input.effect_class,
+        normalized_args_hash: input.normalized_args_hash.clone(),
+        effect_key: input.effect_key.clone(),
+        requires_approval: policy.requires_approval,
+        state: if policy.requires_approval {
+            ToolCallState::AwaitingApproval
+        } else {
+            ToolCallState::Approved
+        },
+        result_summary: String::new(),
+        created_at: ctx.timestamp,
+        updated_at: ctx.timestamp,
+    });
+    ctx.db.effect_ledger().insert(EffectLedger {
+        effect_key: input.effect_key,
+        tool_call_id,
+        run_id: input.run_id,
+        normalized_args_hash: input.normalized_args_hash.clone(),
+        owner_identity: None,
+        owner_generation: 0,
+        state: EffectLedgerState::Pending,
+        provider_reference: String::new(),
+        result_summary: String::new(),
+        updated_at: ctx.timestamp,
+    });
+    if policy.requires_approval {
+        ctx.db.approval_request().insert(ApprovalRequest {
+            id: new_id(ctx)?,
+            run_id: input.run_id,
+            tool_call_id,
+            normalized_args_hash: input.normalized_args_hash,
+            effect_class: input.effect_class,
+            nonce_hash: input.nonce_hash,
+            state: ApprovalState::Pending,
+            requested_by_service: ctx.sender(),
+            decided_by: None,
+            expires_at: ctx.timestamp
+                + TimeDuration::from_micros(i64::from(policy.approval_ttl_seconds) * 1_000_000),
+            created_at: ctx.timestamp,
+            decided_at: None,
+        });
+        run.state = AgentRunState::AwaitingApproval;
+        run.version = run.version.saturating_add(1);
+        run.updated_at = ctx.timestamp;
+        ctx.db.agent_run().id().update(run);
+    }
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn consume_agent_tool_approval(
+    ctx: &ReducerContext,
+    input: ConsumeAgentApprovalInput,
+) -> Result<(), String> {
+    validate_text(&input.call_id, "approval call id", 128)?;
+    validate_text(&input.nonce_hash, "approval nonce hash", 200)?;
+    let mut run = ctx
+        .db
+        .agent_run()
+        .id()
+        .find(input.run_id)
+        .ok_or_else(|| "approval unavailable".to_string())?;
+    require_service(ctx, run.workspace_id, JOB_AGENT_RUN)?;
+    validate_agent_lease(ctx, &run, run.lease_generation, true, true)?;
+    let tool = ctx
+        .db
+        .agent_tool_call()
+        .provider_call_key()
+        .find(format!(
+            "{}:{}:{}",
+            input.run_id,
+            input.call_id.len(),
+            input.call_id
+        ))
+        .ok_or_else(|| "approval unavailable".to_string())?;
+    let mut approval = ctx
+        .db
+        .approval_request()
+        .tool_call_id()
+        .find(tool.id)
+        .ok_or_else(|| "approval unavailable".to_string())?;
+    if approval.state == ApprovalState::Consumed
+        && tool.effect_key == input.effect_key
+        && constant_time_string_eq(&approval.nonce_hash, &input.nonce_hash)
+    {
+        return Ok(());
+    }
+    if approval.state != ApprovalState::Approved
+        || approval.expires_at <= ctx.timestamp
+        || tool.run_id != input.run_id
+        || tool.tool_name != input.tool_name
+        || tool.tool_version != input.tool_version
+        || tool.normalized_args_hash != input.normalized_args_hash
+        || tool.effect_class != input.effect_class
+        || tool.effect_key != input.effect_key
+        || !constant_time_string_eq(&approval.nonce_hash, &input.nonce_hash)
+    {
+        return Err("approval unavailable".into());
+    }
+    approval.state = ApprovalState::Consumed;
+    approval.decided_at = Some(ctx.timestamp);
+    ctx.db.approval_request().id().update(approval);
+    if run.state == AgentRunState::AwaitingApproval {
+        run.state = AgentRunState::ExecutingTool;
+        run.version = run.version.saturating_add(1);
+        run.updated_at = ctx.timestamp;
+        ctx.db.agent_run().id().update(run);
+    }
+    Ok(())
+}
+
+fn worker_effect_workspace(
+    ctx: &ReducerContext,
+    workspace_id: Uuid,
+    run_id: Option<Uuid>,
+    authority_job_id: Option<Uuid>,
+) -> Result<(Uuid, String), String> {
+    if let Some(authority_job_id) = authority_job_id {
+        let job = ctx
+            .db
+            .outbox_job()
+            .id()
+            .find(authority_job_id)
+            .filter(|job| {
+                job.workspace_id == workspace_id
+                    && job.lease_owner == Some(ctx.sender())
+                    && job.state == OutboxState::Leased
+                    && job.lease_until.is_some_and(|expiry| expiry > ctx.timestamp)
+                    && run_id.is_none_or(|run_id| job.run_id == Some(run_id))
+            })
+            .ok_or_else(|| "worker effect outbox authority is stale".to_string())?;
+        require_service(ctx, job.workspace_id, &job.kind)?;
+        return Ok((job.workspace_id, job.kind));
+    }
+    let run_id = run_id.ok_or_else(|| "worker effect authority is missing".to_string())?;
+    let run = ctx
+        .db
+        .agent_run()
+        .id()
+        .find(run_id)
+        .filter(|run| {
+            run.workspace_id == workspace_id
+                && run.lease_owner == Some(ctx.sender())
+                && run.lease_until.is_some_and(|expiry| expiry > ctx.timestamp)
+                && !is_terminal(run.state)
+                && !run.cancel_requested
+        })
+        .ok_or_else(|| "worker effect agent authority is stale".to_string())?;
+    require_service(ctx, run.workspace_id, JOB_AGENT_RUN)?;
+    Ok((run.workspace_id, JOB_AGENT_RUN.into()))
+}
+
+fn sync_agent_tool_effect_acquired(
+    ctx: &ReducerContext,
+    effect_key: &str,
+    payload_fingerprint: &str,
+    run_id: Option<Uuid>,
+    owner_generation: u64,
+) -> Result<(), String> {
+    let Some(mut tool) = ctx
+        .db
+        .agent_tool_call()
+        .effect_key()
+        .find(effect_key.to_owned())
+    else {
+        return Ok(());
+    };
+    let run_id = run_id.ok_or_else(|| "agent tool effect requires run authority".to_string())?;
+    let run = ctx
+        .db
+        .agent_run()
+        .id()
+        .find(run_id)
+        .ok_or_else(|| "agent tool run not found".to_string())?;
+    if tool.run_id != run_id
+        || tool.normalized_args_hash != payload_fingerprint
+        || !matches!(
+            tool.state,
+            ToolCallState::Approved | ToolCallState::Executing | ToolCallState::OutcomeUnknown
+        )
+        || !tool_execution_policy_current(ctx, &run, &tool)
+    {
+        return Err("agent tool effect preparation is stale".into());
+    }
+    let mut legacy = ctx
+        .db
+        .effect_ledger()
+        .effect_key()
+        .find(effect_key.to_owned())
+        .ok_or_else(|| "agent tool effect binding not found".to_string())?;
+    tool.state = ToolCallState::Executing;
+    tool.updated_at = ctx.timestamp;
+    legacy.owner_identity = Some(ctx.sender());
+    legacy.owner_generation = owner_generation;
+    legacy.state = EffectLedgerState::Acquired;
+    legacy.updated_at = ctx.timestamp;
+    ctx.db.agent_tool_call().id().update(tool);
+    ctx.db.effect_ledger().effect_key().update(legacy);
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn service_acquire_worker_effect(
+    ctx: &ReducerContext,
+    input: WorkerEffectAcquireInput,
+) -> Result<(), String> {
+    for (value, field, max) in [
+        (&input.effect_key, "effect key", 1_000),
+        (&input.identity_fingerprint, "identity fingerprint", 200),
+        (&input.payload_fingerprint, "payload fingerprint", 200),
+        (&input.owner_id, "effect owner", 1_000),
+    ] {
+        validate_text(value, field, max)?;
+    }
+    let now_millis = u64::try_from(ctx.timestamp.to_micros_since_unix_epoch() / 1_000)
+        .map_err(|_| "invalid database time".to_string())?;
+    if input.lease_expires_at_millis <= now_millis
+        || input.lease_expires_at_millis > now_millis.saturating_add(600_000)
+    {
+        return Err("worker effect lease is invalid".into());
+    }
+    let (workspace_id, authority_kind) = worker_effect_workspace(
+        ctx,
+        input.workspace_id,
+        input.run_id,
+        input.authority_job_id,
+    )?;
+    if let Some(mut existing) = ctx
+        .db
+        .worker_effect_ledger()
+        .effect_key()
+        .find(input.effect_key.clone())
+    {
+        if existing.identity_fingerprint != input.identity_fingerprint
+            || existing.payload_fingerprint != input.payload_fingerprint
+            || existing.workspace_id != workspace_id
+            || existing.authority_kind != authority_kind
+        {
+            return Err("worker effect identity conflict".into());
+        }
+        if matches!(
+            existing.state,
+            WorkerEffectState::Succeeded | WorkerEffectState::FailedPermanent
+        ) {
+            return Ok(());
+        }
+        let same_owner = existing.owner_identity == ctx.sender()
+            && existing.owner_id == input.owner_id
+            && existing.owner_generation == input.owner_generation;
+        let expired = existing.lease_expires_at_millis <= now_millis;
+        let newer_same_owner = existing.owner_identity == ctx.sender()
+            && existing.owner_id == input.owner_id
+            && input.owner_generation > existing.owner_generation;
+        if !crate::policy::worker_effect_takeover_allowed(
+            same_owner,
+            input.allow_takeover,
+            expired,
+            newer_same_owner,
+        ) {
+            return Err("worker effect is busy".into());
+        }
+        existing.owner_identity = ctx.sender();
+        existing.owner_id = input.owner_id;
+        existing.owner_generation = input.owner_generation;
+        existing.lease_expires_at_millis = input.lease_expires_at_millis;
+        existing.state = WorkerEffectState::Started;
+        existing.updated_at = ctx.timestamp;
+        sync_agent_tool_effect_acquired(
+            ctx,
+            &input.effect_key,
+            &input.payload_fingerprint,
+            input.run_id,
+            input.owner_generation,
+        )?;
+        ctx.db.worker_effect_ledger().effect_key().update(existing);
+        return Ok(());
+    }
+    sync_agent_tool_effect_acquired(
+        ctx,
+        &input.effect_key,
+        &input.payload_fingerprint,
+        input.run_id,
+        input.owner_generation,
+    )?;
+    ctx.db.worker_effect_ledger().insert(WorkerEffectLedger {
+        effect_key: input.effect_key,
+        identity_fingerprint: input.identity_fingerprint,
+        payload_fingerprint: input.payload_fingerprint,
+        workspace_id,
+        authority_kind,
+        state: WorkerEffectState::Started,
+        owner_identity: ctx.sender(),
+        owner_id: input.owner_id,
+        owner_generation: input.owner_generation,
+        lease_expires_at_millis: input.lease_expires_at_millis,
+        provider_reference: String::new(),
+        result_json: String::new(),
+        updated_at: ctx.timestamp,
+    });
+    Ok(())
+}
+
+fn update_worker_effect(
+    ctx: &ReducerContext,
+    input: WorkerEffectUpdateInput,
+) -> Result<(), String> {
+    if !input.result_json.is_empty() {
+        validate_json(&input.result_json, "worker effect result", 1_048_576)?;
+    }
+    if input.provider_reference.len() > 500 {
+        return Err("worker effect provider reference exceeds limits".into());
+    }
+    let mut row = ctx
+        .db
+        .worker_effect_ledger()
+        .effect_key()
+        .find(input.effect_key)
+        .ok_or_else(|| "worker effect not found".to_string())?;
+    require_service(ctx, row.workspace_id, &row.authority_kind)?;
+    if row.identity_fingerprint != input.identity_fingerprint
+        || row.owner_identity != ctx.sender()
+        || row.owner_id != input.owner_id
+        || row.owner_generation != input.owner_generation
+        || row.state != WorkerEffectState::Started
+    {
+        return Err("worker effect ownership is stale".into());
+    }
+    let now_millis = u64::try_from(ctx.timestamp.to_micros_since_unix_epoch() / 1_000)
+        .map_err(|_| "invalid database time".to_string())?;
+    if row.lease_expires_at_millis <= now_millis {
+        return Err("worker effect lease expired".into());
+    }
+    if input.outcome == WorkerEffectState::Started {
+        if input.lease_expires_at_millis <= now_millis
+            || input.lease_expires_at_millis > now_millis.saturating_add(600_000)
+            || !input.provider_reference.is_empty()
+            || !input.result_json.is_empty()
+        {
+            return Err("worker effect heartbeat is invalid".into());
+        }
+        row.lease_expires_at_millis = input.lease_expires_at_millis;
+    } else {
+        row.state = input.outcome;
+        row.provider_reference = input.provider_reference;
+        row.result_json = input.result_json;
+        if let Some(mut tool) = ctx
+            .db
+            .agent_tool_call()
+            .effect_key()
+            .find(row.effect_key.clone())
+        {
+            let mut run = ctx
+                .db
+                .agent_run()
+                .id()
+                .find(tool.run_id)
+                .ok_or_else(|| "agent tool run not found".to_string())?;
+            let mut legacy = ctx
+                .db
+                .effect_ledger()
+                .effect_key()
+                .find(row.effect_key.clone())
+                .ok_or_else(|| "agent tool effect binding not found".to_string())?;
+            tool.state = match row.state {
+                WorkerEffectState::Succeeded => ToolCallState::Succeeded,
+                WorkerEffectState::FailedPermanent => ToolCallState::Failed,
+                WorkerEffectState::OutcomeUnknown => ToolCallState::OutcomeUnknown,
+                WorkerEffectState::Started => ToolCallState::Executing,
+            };
+            tool.result_summary = "worker effect result recorded".into();
+            tool.updated_at = ctx.timestamp;
+            legacy.state = match row.state {
+                WorkerEffectState::Succeeded => EffectLedgerState::Succeeded,
+                WorkerEffectState::FailedPermanent => EffectLedgerState::Failed,
+                WorkerEffectState::OutcomeUnknown => EffectLedgerState::OutcomeUnknown,
+                WorkerEffectState::Started => EffectLedgerState::Acquired,
+            };
+            legacy.provider_reference = row.provider_reference.clone();
+            legacy.result_summary = "worker effect result recorded".into();
+            legacy.updated_at = ctx.timestamp;
+            run.state = if row.state == WorkerEffectState::OutcomeUnknown {
+                AgentRunState::ExecutingTool
+            } else {
+                AgentRunState::Running
+            };
+            run.version = run.version.saturating_add(1);
+            run.updated_at = ctx.timestamp;
+            ctx.db.agent_tool_call().id().update(tool);
+            ctx.db.effect_ledger().effect_key().update(legacy);
+            ctx.db.agent_run().id().update(run);
+        }
+    }
+    row.updated_at = ctx.timestamp;
+    ctx.db.worker_effect_ledger().effect_key().update(row);
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn service_update_worker_effect(
+    ctx: &ReducerContext,
+    input: WorkerEffectUpdateInput,
+) -> Result<(), String> {
+    update_worker_effect(ctx, input)
 }
 
 #[spacetimedb::reducer]

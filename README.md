@@ -1,6 +1,9 @@
-# Project Conversation
+# Parrot
 
-`project-conversation` is the neutral internal codename for a post-first, agent-native team communication platform. No public product name has been approved.
+Parrot is a post-first, agent-native team communication platform. `project-conversation` remains
+the internal package, database, and deployment codename so the already-reviewed authority and
+operations identifiers do not change during the first release. The user selected the public name
+Parrot on 2026-07-12; professional trademark clearance remains a pre-marketing legal gate.
 
 The core model is:
 

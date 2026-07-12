@@ -30,6 +30,9 @@ importers:
         specifier: 2.6.1
         version: 2.6.1
     devDependencies:
+      esbuild:
+        specifier: 0.25.12
+        version: 0.25.12
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -57,6 +60,9 @@ importers:
       '@opentelemetry/sdk-node':
         specifier: 0.220.0
         version: 0.220.0(@opentelemetry/api@1.9.1)
+      '@project-conversation/db-bindings':
+        specifier: workspace:*
+        version: link:../../packages/db-bindings
       fastify:
         specifier: 5.10.0
         version: 5.10.0
@@ -81,6 +87,10 @@ importers:
         version: 4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(vite@8.1.4(@types/node@24.13.3)(tsx@4.20.6)(yaml@2.9.0))
 
   services/worker:
+    dependencies:
+      '@project-conversation/db-bindings':
+        specifier: workspace:*
+        version: link:../../packages/db-bindings
     devDependencies:
       '@types/node':
         specifier: 24.10.4

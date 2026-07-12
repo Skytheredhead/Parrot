@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly Parrot %i cold backup timer
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5m
+AccuracySec=1m
+Persistent=true
+Unit=parrot-cold-backup@%i.service
+
+[Install]
+WantedBy=timers.target

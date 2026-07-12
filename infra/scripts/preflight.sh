@@ -8,7 +8,7 @@ while (($#)); do
   case "$1" in
     --env-file) [[ $# -ge 2 ]] || die "--env-file requires a path"; env_file="$2"; shift 2 ;;
     --profile) [[ $# -ge 2 ]] || die "--profile requires a name"; profiles+=("$2"); shift 2 ;;
-    -h|--help) printf 'Usage: %s --env-file PATH [--profile gateway|worker|telemetry]\n' "$0"; exit 0 ;;
+    -h|--help) printf 'Usage: %s --env-file PATH [--profile gateway|edge|worker|scanner|telemetry]\n' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -29,12 +29,18 @@ note "Disk for /srv:"
 df -h /srv
 note "Inodes for /srv:"
 df -i /srv
+note "Backup filesystem on /mnt/bigboi:"
+df -h /mnt/bigboi
+df -i /mnt/bigboi
 
 read -r disk_available_kb disk_used_percent < <(df -Pk /srv | awk 'NR==2 {gsub(/%/,"",$5); print $4, $5}')
 (( disk_available_kb >= 25 * 1024 * 1024 )) || die "less than the provisional 25 GiB free-disk floor remains on /srv"
 (( disk_used_percent < 90 )) || die "/srv filesystem is at or above the provisional 90% usage ceiling"
 inode_used_percent="$(df -Pi /srv | awk 'NR==2 {gsub(/%/,"",$5); print $5}')"
 (( inode_used_percent < 90 )) || die "/srv filesystem is at or above the provisional 90% inode ceiling"
+read -r backup_available_kb backup_used_percent < <(df -Pk /mnt/bigboi | awk 'NR==2 {gsub(/%/,"",$5); print $4, $5}')
+(( backup_available_kb >= 25 * 1024 * 1024 )) || die "less than the provisional 25 GiB backup headroom remains on /mnt/bigboi"
+(( backup_used_percent < 90 )) || die "/mnt/bigboi filesystem is at or above the provisional 90% usage ceiling"
 
 while IFS= read -r id; do
   [[ -z "$id" ]] && continue
@@ -42,7 +48,7 @@ while IFS= read -r id; do
   environment="$(docker inspect --format '{{ index .Config.Labels "com.project-conversation.environment" }}' "$id")"
   role="$(docker inspect --format '{{ index .Config.Labels "com.project-conversation.role" }}' "$id")"
   [[ "$label" == true && "$environment" == "$DEPLOY_ENVIRONMENT" ]] || die "Compose project name is already used by a container outside this environment: $id"
-  case "$role" in spacetimedb|gateway|telemetry|worker) ;; *) die "unrecognized role in approved Compose project: $role" ;; esac
+  case "$role" in spacetimedb|gateway|edge|telemetry|worker|clamav|ollama-loopback) ;; *) die "unrecognized role in approved Compose project: $role" ;; esac
 done < <(docker ps --all --quiet --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")
 
 for network in "${COMPOSE_PROJECT_NAME}_backend" "${COMPOSE_PROJECT_NAME}_telemetry" "${COMPOSE_PROJECT_NAME}_egress"; do
@@ -53,7 +59,17 @@ for network in "${COMPOSE_PROJECT_NAME}_backend" "${COMPOSE_PROJECT_NAME}_teleme
   fi
 done
 
-for port in "$SPACETIMEDB_LOOPBACK_PORT" "$GATEWAY_LOOPBACK_PORT"; do
+
+volume="${COMPOSE_PROJECT_NAME}_clamav-runtime"
+if docker volume inspect "$volume" >/dev/null 2>&1; then
+  label="$(docker volume inspect --format '{{ index .Labels "com.project-conversation.stack" }}' "$volume")"
+  environment="$(docker volume inspect --format '{{ index .Labels "com.project-conversation.environment" }}' "$volume")"
+  role="$(docker volume inspect --format '{{ index .Labels "com.project-conversation.role" }}' "$volume")"
+  [[ "$label" == true && "$environment" == "$DEPLOY_ENVIRONMENT" && "$role" == clamav-runtime ]] \
+    || die "volume name collision outside the approved project: $volume"
+fi
+
+for port in "$SPACETIMEDB_LOOPBACK_PORT" "$GATEWAY_LOOPBACK_PORT" "$EDGE_LOOPBACK_PORT"; do
   if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :$port" | grep -q .; then
     if ! compose ps --format json 2>/dev/null | grep -q "127.0.0.1:$port"; then
       die "loopback port $port is already in use outside the approved Compose project"

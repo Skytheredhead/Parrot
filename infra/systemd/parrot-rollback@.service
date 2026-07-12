@@ -1,0 +1,23 @@
+[Unit]
+Description=Operator-confirmed Parrot %i image rollback
+Documentation=file:/opt/parrot/current/docs/operations/deployment-runbook.md
+ConditionPathExists=/srv/project-conversation/%i/state/ALLOW_IMAGE_ROLLBACK
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=parrot
+Group=parrot
+UMask=0077
+EnvironmentFile=/srv/project-conversation/%i/config/deployment.env
+ExecStart=/opt/parrot/current/infra/scripts/rollback.sh --env-file /srv/project-conversation/%i/config/deployment.env --ack-schema-compatible --apply --confirm project-conversation-%i
+ExecStartPost=/usr/bin/rm -f /srv/project-conversation/%i/state/ALLOW_IMAGE_ROLLBACK
+TimeoutStartSec=15min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/srv/project-conversation/%i
+RestrictSUIDSGID=true
+LockPersonality=true

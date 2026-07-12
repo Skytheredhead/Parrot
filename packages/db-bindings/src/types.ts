@@ -10,6 +10,25 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
+export const AgentApprovalBindingView = __t.object("AgentApprovalBindingView", {
+  approvalId: __t.uuid(),
+  nonceHash: __t.string(),
+  runId: __t.uuid(),
+  callId: __t.string(),
+  toolName: __t.string(),
+  toolVersion: __t.string(),
+  argumentsHash: __t.string(),
+  get effectClass() {
+    return ToolEffectClass;
+  },
+  effectKey: __t.string(),
+  expiresAt: __t.timestamp(),
+  get state() {
+    return ApprovalState;
+  },
+});
+export type AgentApprovalBindingView = __Infer<typeof AgentApprovalBindingView>;
+
 // The tagged union or sum type for the algebraic type `AgentCapability`.
 export const AgentCapability = __t.enum("AgentCapability", {
   ReadSpace: __t.unit(),
@@ -68,6 +87,62 @@ export const AgentContextPostInput = __t.object("AgentContextPostInput", {
 });
 export type AgentContextPostInput = __Infer<typeof AgentContextPostInput>;
 
+export const AgentExecutionCheckpoint = __t.object("AgentExecutionCheckpoint", {
+  key: __t.string(),
+  runId: __t.uuid(),
+  leaseGeneration: __t.u64(),
+  sequence: __t.u64(),
+  get state() {
+    return AgentRunState;
+  },
+  code: __t.string(),
+  detailsJson: __t.string(),
+  createdAtMillis: __t.u64(),
+  recordedAt: __t.timestamp(),
+});
+export type AgentExecutionCheckpoint = __Infer<typeof AgentExecutionCheckpoint>;
+
+export const AgentExecutionPlanView = __t.object("AgentExecutionPlanView", {
+  runId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  get state() {
+    return AgentRunState;
+  },
+  version: __t.u64(),
+  authorizationEpoch: __t.u64(),
+  currentAuthorizationEpoch: __t.u64(),
+  installationEnabled: __t.bool(),
+  cancelRequested: __t.bool(),
+  leaseGeneration: __t.u64(),
+  leaseOwner: __t.option(__t.identity()),
+  leaseUntil: __t.option(__t.timestamp()),
+  executionRequestId: __t.string(),
+  maxContextBytes: __t.u64(),
+  maxOutputTokens: __t.u64(),
+  maxToolCalls: __t.u32(),
+  maxCostMicros: __t.u64(),
+  maxOutputBytes: __t.u64(),
+  maxToolResultBytes: __t.u64(),
+  maxTotalToolResultBytes: __t.u64(),
+  maxProviderInputBytes: __t.u64(),
+  maxTotalProviderInputBytes: __t.u64(),
+});
+export type AgentExecutionPlanView = __Infer<typeof AgentExecutionPlanView>;
+
+export const AgentExecutionProgress = __t.object("AgentExecutionProgress", {
+  runId: __t.uuid(),
+  leaseGeneration: __t.u64(),
+  sequence: __t.u64(),
+  outputTokens: __t.u64(),
+  costMicros: __t.u64(),
+  toolCalls: __t.u32(),
+  toolResultsJson: __t.string(),
+  providerInputBytes: __t.u64(),
+  pendingStepJson: __t.string(),
+  updatedAt: __t.timestamp(),
+});
+export type AgentExecutionProgress = __Infer<typeof AgentExecutionProgress>;
+
 export const AgentInstallation = __t.object("AgentInstallation", {
   id: __t.uuid(),
   workspaceId: __t.uuid(),
@@ -87,6 +162,22 @@ export const AgentInstallation = __t.object("AgentInstallation", {
 });
 export type AgentInstallation = __Infer<typeof AgentInstallation>;
 
+export const AgentProviderDispatch = __t.object("AgentProviderDispatch", {
+  key: __t.string(),
+  runId: __t.uuid(),
+  providerSequence: __t.u64(),
+  leaseGeneration: __t.u64(),
+  authorizationEpoch: __t.u64(),
+  requestId: __t.string(),
+  inputFingerprint: __t.string(),
+  canonicalInput: __t.string(),
+  inputBytes: __t.u64(),
+  contextBindingHash: __t.string(),
+  contextJson: __t.string(),
+  createdAt: __t.timestamp(),
+});
+export type AgentProviderDispatch = __Infer<typeof AgentProviderDispatch>;
+
 export const AgentRun = __t.object("AgentRun", {
   id: __t.uuid(),
   workspaceId: __t.uuid(),
@@ -105,6 +196,7 @@ export const AgentRun = __t.object("AgentRun", {
   leaseOwner: __t.option(__t.identity()),
   leaseUntil: __t.option(__t.timestamp()),
   leaseGeneration: __t.u64(),
+  executionRequestId: __t.string(),
   expiresAt: __t.timestamp(),
   nextEventSequence: __t.u64(),
   promptSummary: __t.string(),
@@ -160,6 +252,8 @@ export type AgentScope = __Infer<typeof AgentScope>;
 export const AgentToolCall = __t.object("AgentToolCall", {
   id: __t.uuid(),
   runId: __t.uuid(),
+  providerCallKey: __t.string(),
+  providerCallId: __t.string(),
   toolName: __t.string(),
   toolVersion: __t.string(),
   policyKey: __t.string(),
@@ -285,6 +379,26 @@ export const BootstrapAuthority = __t.object("BootstrapAuthority", {
 });
 export type BootstrapAuthority = __Infer<typeof BootstrapAuthority>;
 
+export const ClaimAgentExecutionInput = __t.object("ClaimAgentExecutionInput", {
+  runId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  authorityJobId: __t.uuid(),
+  executionRequestId: __t.string(),
+  expectedVersion: __t.u64(),
+  leaseSeconds: __t.u32(),
+});
+export type ClaimAgentExecutionInput = __Infer<typeof ClaimAgentExecutionInput>;
+
+export const ClaimFileDeletionInput = __t.object("ClaimFileDeletionInput", {
+  jobId: __t.uuid(),
+  leaseGeneration: __t.u64(),
+  fileId: __t.uuid(),
+  expectedRevision: __t.u64(),
+  key: __t.string(),
+  objectVersionTag: __t.string(),
+});
+export type ClaimFileDeletionInput = __Infer<typeof ClaimFileDeletionInput>;
+
 export const ClaimNotificationDigestsInput = __t.object("ClaimNotificationDigestsInput", {
   get occurrences() {
     return __t.array(NotificationDigestOccurrenceInput);
@@ -307,6 +421,20 @@ export const CommandReceipt = __t.object("CommandReceipt", {
 });
 export type CommandReceipt = __Infer<typeof CommandReceipt>;
 
+export const CommitAgentFinalInput = __t.object("CommitAgentFinalInput", {
+  runId: __t.uuid(),
+  leaseGeneration: __t.u64(),
+  authorizationEpoch: __t.u64(),
+  text: __t.string(),
+  progressSequence: __t.u64(),
+  outputTokens: __t.u64(),
+  costMicros: __t.u64(),
+  toolCalls: __t.u32(),
+  toolResultsJson: __t.string(),
+  providerInputBytes: __t.u64(),
+});
+export type CommitAgentFinalInput = __Infer<typeof CommitAgentFinalInput>;
+
 export const CompleteAgentRunInput = __t.object("CompleteAgentRunInput", {
   runId: __t.uuid(),
   leaseGeneration: __t.u64(),
@@ -317,6 +445,18 @@ export const CompleteAgentRunInput = __t.object("CompleteAgentRunInput", {
   usedCostMicros: __t.u64(),
 });
 export type CompleteAgentRunInput = __Infer<typeof CompleteAgentRunInput>;
+
+export const CompleteFileUploadInput = __t.object("CompleteFileUploadInput", {
+  uploadId: __t.uuid(),
+  fileId: __t.uuid(),
+  expectedRevision: __t.u64(),
+  observedSizeBytes: __t.u64(),
+  observedType: __t.string(),
+  objectVersion: __t.string(),
+  checksumSha256: __t.string(),
+  clientRequestId: __t.uuid(),
+});
+export type CompleteFileUploadInput = __Infer<typeof CompleteFileUploadInput>;
 
 export const CompleteWorkspaceExportCleanupInput = __t.object("CompleteWorkspaceExportCleanupInput", {
   exportId: __t.uuid(),
@@ -365,6 +505,20 @@ export const ConfigureWorkspaceLifecycleInput = __t.object("ConfigureWorkspaceLi
   clientRequestId: __t.uuid(),
 });
 export type ConfigureWorkspaceLifecycleInput = __Infer<typeof ConfigureWorkspaceLifecycleInput>;
+
+export const ConsumeAgentApprovalInput = __t.object("ConsumeAgentApprovalInput", {
+  runId: __t.uuid(),
+  callId: __t.string(),
+  toolName: __t.string(),
+  toolVersion: __t.string(),
+  normalizedArgsHash: __t.string(),
+  get effectClass() {
+    return ToolEffectClass;
+  },
+  nonceHash: __t.string(),
+  effectKey: __t.string(),
+});
+export type ConsumeAgentApprovalInput = __Infer<typeof ConsumeAgentApprovalInput>;
 
 export const Contribution = __t.object("Contribution", {
   id: __t.uuid(),
@@ -599,6 +753,57 @@ export const EffectLedgerState = __t.enum("EffectLedgerState", {
 });
 export type EffectLedgerState = __Infer<typeof EffectLedgerState>;
 
+export const FileDeletionClaim = __t.object("FileDeletionClaim", {
+  claimId: __t.uuid(),
+  fileKey: __t.string(),
+  workspaceId: __t.uuid(),
+  fileId: __t.uuid(),
+  fileRevision: __t.u64(),
+  jobId: __t.uuid(),
+  serviceIdentity: __t.identity(),
+  leaseGeneration: __t.u64(),
+  generation: __t.u64(),
+  key: __t.string(),
+  objectVersionTag: __t.string(),
+  get state() {
+    return FileDeletionClaimState;
+  },
+  code: __t.string(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type FileDeletionClaim = __Infer<typeof FileDeletionClaim>;
+
+export const FileDeletionClaimInput = __t.object("FileDeletionClaimInput", {
+  claimId: __t.uuid(),
+  generation: __t.u64(),
+  workspaceId: __t.uuid(),
+  fileId: __t.uuid(),
+  fileRevision: __t.u64(),
+  key: __t.string(),
+  objectVersionTag: __t.string(),
+});
+export type FileDeletionClaimInput = __Infer<typeof FileDeletionClaimInput>;
+
+// The tagged union or sum type for the algebraic type `FileDeletionClaimState`.
+export const FileDeletionClaimState = __t.enum("FileDeletionClaimState", {
+  Claimed: __t.unit(),
+  Finalized: __t.unit(),
+  Released: __t.unit(),
+});
+export type FileDeletionClaimState = __Infer<typeof FileDeletionClaimState>;
+
+export const FileDeletionClaimView = __t.object("FileDeletionClaimView", {
+  claimId: __t.uuid(),
+  generation: __t.u64(),
+  workspaceId: __t.uuid(),
+  fileId: __t.uuid(),
+  fileRevision: __t.u64(),
+  key: __t.string(),
+  objectVersionTag: __t.string(),
+});
+export type FileDeletionClaimView = __Infer<typeof FileDeletionClaimView>;
+
 export const FileExtractionInput = __t.object("FileExtractionInput", {
   jobId: __t.uuid(),
   leaseGeneration: __t.u64(),
@@ -608,6 +813,29 @@ export const FileExtractionInput = __t.object("FileExtractionInput", {
 });
 export type FileExtractionInput = __Infer<typeof FileExtractionInput>;
 
+export const FileOrphanDiscrepancy = __t.object("FileOrphanDiscrepancy", {
+  fileKey: __t.string(),
+  workspaceId: __t.uuid(),
+  fileId: __t.uuid(),
+  fileRevision: __t.u64(),
+  key: __t.string(),
+  occurrenceCount: __t.u32(),
+  resolved: __t.bool(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type FileOrphanDiscrepancy = __Infer<typeof FileOrphanDiscrepancy>;
+
+export const FileProcessingOutcomeView = __t.object("FileProcessingOutcomeView", {
+  jobId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  fileId: __t.uuid(),
+  fileRevision: __t.u64(),
+  kind: __t.string(),
+  outcome: __t.string(),
+});
+export type FileProcessingOutcomeView = __Infer<typeof FileProcessingOutcomeView>;
+
 export const FileProcessingPlanView = __t.object("FileProcessingPlanView", {
   jobId: __t.uuid(),
   workspaceId: __t.uuid(),
@@ -616,6 +844,8 @@ export const FileProcessingPlanView = __t.object("FileProcessingPlanView", {
   fileRevision: __t.u64(),
   kind: __t.string(),
   sourceKey: __t.string(),
+  sourceObjectVersion: __t.string(),
+  sourceChecksumSha256: __t.string(),
   cleanDestinationKey: __t.string(),
   cleanupPrefix: __t.string(),
   maxBytes: __t.u64(),
@@ -634,8 +864,13 @@ export const FileRecord = __t.object("FileRecord", {
   spaceId: __t.uuid(),
   ownerIdentity: __t.identity(),
   fileName: __t.string(),
+  declaredType: __t.string(),
   sourceKey: __t.string(),
+  sourceObjectVersion: __t.string(),
+  sourceChecksumSha256: __t.string(),
   cleanKey: __t.string(),
+  cleanObjectVersion: __t.string(),
+  cleanChecksumSha256: __t.string(),
   cleanupPrefix: __t.string(),
   declaredSizeBytes: __t.u64(),
   checksum: __t.string(),
@@ -689,10 +924,13 @@ export const FileUpload = __t.object("FileUpload", {
 export type FileUpload = __Infer<typeof FileUpload>;
 
 export const FileUploadInput = __t.object("FileUploadInput", {
+  reservationId: __t.uuid(),
   spaceId: __t.uuid(),
   fileName: __t.string(),
+  declaredType: __t.string(),
   declaredSizeBytes: __t.u64(),
   checksum: __t.string(),
+  ttlSeconds: __t.u32(),
   clientRequestId: __t.uuid(),
 });
 export type FileUploadInput = __Infer<typeof FileUploadInput>;
@@ -703,7 +941,12 @@ export const FileVersion = __t.object("FileVersion", {
   workspaceId: __t.uuid(),
   contentVersion: __t.u64(),
   sourceKey: __t.string(),
+  declaredType: __t.string(),
+  sourceObjectVersion: __t.string(),
+  sourceChecksumSha256: __t.string(),
   cleanKey: __t.string(),
+  cleanObjectVersion: __t.string(),
+  cleanChecksumSha256: __t.string(),
   declaredSizeBytes: __t.u64(),
   checksum: __t.string(),
   detectedType: __t.string(),
@@ -715,6 +958,78 @@ export const FileVersion = __t.object("FileVersion", {
   updatedAt: __t.timestamp(),
 });
 export type FileVersion = __Infer<typeof FileVersion>;
+
+export const GatewayFileDescriptorView = __t.object("GatewayFileDescriptorView", {
+  fileId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  spaceId: __t.uuid(),
+  ownerIdentity: __t.identity(),
+  fileName: __t.string(),
+  objectKey: __t.string(),
+  objectVersion: __t.string(),
+  checksumSha256: __t.string(),
+  detectedType: __t.string(),
+  sizeBytes: __t.u64(),
+  get state() {
+    return FileSecurityState;
+  },
+  revision: __t.u64(),
+});
+export type GatewayFileDescriptorView = __Infer<typeof GatewayFileDescriptorView>;
+
+export const GatewayPendingUploadView = __t.object("GatewayPendingUploadView", {
+  uploadId: __t.uuid(),
+  fileId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  spaceId: __t.uuid(),
+  uploaderIdentity: __t.identity(),
+  sourceKey: __t.string(),
+  fileName: __t.string(),
+  declaredType: __t.string(),
+  declaredSizeBytes: __t.u64(),
+  checksumSha256: __t.string(),
+  expiresAt: __t.timestamp(),
+  completed: __t.bool(),
+  get fileState() {
+    return FileSecurityState;
+  },
+  fileRevision: __t.u64(),
+});
+export type GatewayPendingUploadView = __Infer<typeof GatewayPendingUploadView>;
+
+export const GatewayPrincipalView = __t.object("GatewayPrincipalView", {
+  identity: __t.identity(),
+  authzEpoch: __t.u64(),
+  disabled: __t.bool(),
+});
+export type GatewayPrincipalView = __Infer<typeof GatewayPrincipalView>;
+
+export const GatewaySpaceGrantView = __t.object("GatewaySpaceGrantView", {
+  workspaceId: __t.uuid(),
+  spaceId: __t.uuid(),
+  membershipEpoch: __t.u64(),
+  canRead: __t.bool(),
+  canWrite: __t.bool(),
+  canRunAgents: __t.bool(),
+});
+export type GatewaySpaceGrantView = __Infer<typeof GatewaySpaceGrantView>;
+
+export const GatewayWorkspaceGrantView = __t.object("GatewayWorkspaceGrantView", {
+  workspaceId: __t.uuid(),
+  get role() {
+    return WorkspaceRole;
+  },
+  membershipEpoch: __t.u64(),
+  userAuthzEpoch: __t.u64(),
+  lifecycleEpoch: __t.u64(),
+  canRead: __t.bool(),
+  canWrite: __t.bool(),
+  canManageMembers: __t.bool(),
+  canManageWorkspace: __t.bool(),
+  canManageAgents: __t.bool(),
+  canRunAgents: __t.bool(),
+});
+export type GatewayWorkspaceGrantView = __Infer<typeof GatewayWorkspaceGrantView>;
 
 export const HeartbeatPresenceInput = __t.object("HeartbeatPresenceInput", {
   workspaceId: __t.uuid(),
@@ -1038,6 +1353,7 @@ export type NotificationGroup = __Infer<typeof NotificationGroup>;
 // The tagged union or sum type for the algebraic type `NotificationKind`.
 export const NotificationKind = __t.enum("NotificationKind", {
   Mention: __t.unit(),
+  Reply: __t.unit(),
   Assignment: __t.unit(),
   Decision: __t.unit(),
   Agent: __t.unit(),
@@ -1345,6 +1661,21 @@ export const PostUserState = __t.object("PostUserState", {
 });
 export type PostUserState = __Infer<typeof PostUserState>;
 
+export const PrepareAgentToolCallInput = __t.object("PrepareAgentToolCallInput", {
+  runId: __t.uuid(),
+  leaseGeneration: __t.u64(),
+  providerCallId: __t.string(),
+  toolName: __t.string(),
+  toolVersion: __t.string(),
+  normalizedArgsHash: __t.string(),
+  get effectClass() {
+    return ToolEffectClass;
+  },
+  effectKey: __t.string(),
+  nonceHash: __t.string(),
+});
+export type PrepareAgentToolCallInput = __Infer<typeof PrepareAgentToolCallInput>;
+
 // The tagged union or sum type for the algebraic type `PresenceDeviceKind`.
 export const PresenceDeviceKind = __t.enum("PresenceDeviceKind", {
   Web: __t.unit(),
@@ -1400,6 +1731,29 @@ export const ProposeDmPromotionInput = __t.object("ProposeDmPromotionInput", {
 });
 export type ProposeDmPromotionInput = __Infer<typeof ProposeDmPromotionInput>;
 
+export const RecordAgentProviderDispatchInput = __t.object("RecordAgentProviderDispatchInput", {
+  runId: __t.uuid(),
+  providerSequence: __t.u64(),
+  leaseGeneration: __t.u64(),
+  authorizationEpoch: __t.u64(),
+  requestId: __t.string(),
+  inputFingerprint: __t.string(),
+  canonicalInput: __t.string(),
+  inputBytes: __t.u64(),
+  contextBindingHash: __t.string(),
+  contextJson: __t.string(),
+});
+export type RecordAgentProviderDispatchInput = __Infer<typeof RecordAgentProviderDispatchInput>;
+
+export const RecordFileOrphanInput = __t.object("RecordFileOrphanInput", {
+  jobId: __t.uuid(),
+  leaseGeneration: __t.u64(),
+  fileId: __t.uuid(),
+  expectedRevision: __t.u64(),
+  key: __t.string(),
+});
+export type RecordFileOrphanInput = __Infer<typeof RecordFileOrphanInput>;
+
 export const RecordNotificationDigestOutcomeInput = __t.object("RecordNotificationDigestOutcomeInput", {
   claimId: __t.uuid(),
   workerSlotId: __t.string(),
@@ -1413,6 +1767,25 @@ export const RecordNotificationDigestOutcomeInput = __t.object("RecordNotificati
   retryAfterSeconds: __t.u32(),
 });
 export type RecordNotificationDigestOutcomeInput = __Infer<typeof RecordNotificationDigestOutcomeInput>;
+
+export const RegisterCleanFileObjectInput = __t.object("RegisterCleanFileObjectInput", {
+  jobId: __t.uuid(),
+  leaseGeneration: __t.u64(),
+  fileId: __t.uuid(),
+  expectedRevision: __t.u64(),
+  cleanKey: __t.string(),
+  objectVersion: __t.string(),
+  checksumSha256: __t.string(),
+});
+export type RegisterCleanFileObjectInput = __Infer<typeof RegisterCleanFileObjectInput>;
+
+export const ReleaseFileDeletionInput = __t.object("ReleaseFileDeletionInput", {
+  get claim() {
+    return FileDeletionClaimInput;
+  },
+  code: __t.string(),
+});
+export type ReleaseFileDeletionInput = __Infer<typeof ReleaseFileDeletionInput>;
 
 export const ReleaseWorkspaceLegalHoldInput = __t.object("ReleaseWorkspaceLegalHoldInput", {
   holdId: __t.uuid(),
@@ -1436,6 +1809,32 @@ export const RequestWorkspaceExportInput = __t.object("RequestWorkspaceExportInp
   clientRequestId: __t.uuid(),
 });
 export type RequestWorkspaceExportInput = __Infer<typeof RequestWorkspaceExportInput>;
+
+export const SaveAgentCheckpointInput = __t.object("SaveAgentCheckpointInput", {
+  runId: __t.uuid(),
+  leaseGeneration: __t.u64(),
+  sequence: __t.u64(),
+  get state() {
+    return AgentRunState;
+  },
+  code: __t.string(),
+  detailsJson: __t.string(),
+  createdAtMillis: __t.u64(),
+});
+export type SaveAgentCheckpointInput = __Infer<typeof SaveAgentCheckpointInput>;
+
+export const SaveAgentProgressInput = __t.object("SaveAgentProgressInput", {
+  runId: __t.uuid(),
+  leaseGeneration: __t.u64(),
+  sequence: __t.u64(),
+  outputTokens: __t.u64(),
+  costMicros: __t.u64(),
+  toolCalls: __t.u32(),
+  toolResultsJson: __t.string(),
+  providerInputBytes: __t.u64(),
+  pendingStepJson: __t.string(),
+});
+export type SaveAgentProgressInput = __Infer<typeof SaveAgentProgressInput>;
 
 export const SearchDocumentSnapshot = __t.object("SearchDocumentSnapshot", {
   effectKey: __t.string(),
@@ -1611,6 +2010,12 @@ export const ToolEffectClass = __t.enum("ToolEffectClass", {
   Destructive: __t.unit(),
 });
 export type ToolEffectClass = __Infer<typeof ToolEffectClass>;
+
+export const TrustedOidcAudience = __t.object("TrustedOidcAudience", {
+  audience: __t.string(),
+  configuredAt: __t.timestamp(),
+});
+export type TrustedOidcAudience = __Infer<typeof TrustedOidcAudience>;
 
 export const TrustedTool = __t.object("TrustedTool", {
   key: __t.string(),
@@ -1862,6 +2267,62 @@ export const VisibleWorkspaceMember = __t.object("VisibleWorkspaceMember", {
   active: __t.bool(),
 });
 export type VisibleWorkspaceMember = __Infer<typeof VisibleWorkspaceMember>;
+
+export const WorkerEffectAcquireInput = __t.object("WorkerEffectAcquireInput", {
+  effectKey: __t.string(),
+  identityFingerprint: __t.string(),
+  payloadFingerprint: __t.string(),
+  ownerId: __t.string(),
+  ownerGeneration: __t.u64(),
+  workspaceId: __t.uuid(),
+  runId: __t.option(__t.uuid()),
+  authorityJobId: __t.option(__t.uuid()),
+  leaseExpiresAtMillis: __t.u64(),
+  allowTakeover: __t.bool(),
+});
+export type WorkerEffectAcquireInput = __Infer<typeof WorkerEffectAcquireInput>;
+
+export const WorkerEffectLedger = __t.object("WorkerEffectLedger", {
+  effectKey: __t.string(),
+  identityFingerprint: __t.string(),
+  payloadFingerprint: __t.string(),
+  workspaceId: __t.uuid(),
+  authorityKind: __t.string(),
+  get state() {
+    return WorkerEffectState;
+  },
+  ownerIdentity: __t.identity(),
+  ownerId: __t.string(),
+  ownerGeneration: __t.u64(),
+  leaseExpiresAtMillis: __t.u64(),
+  providerReference: __t.string(),
+  resultJson: __t.string(),
+  updatedAt: __t.timestamp(),
+});
+export type WorkerEffectLedger = __Infer<typeof WorkerEffectLedger>;
+
+// The tagged union or sum type for the algebraic type `WorkerEffectState`.
+export const WorkerEffectState = __t.enum("WorkerEffectState", {
+  Started: __t.unit(),
+  Succeeded: __t.unit(),
+  OutcomeUnknown: __t.unit(),
+  FailedPermanent: __t.unit(),
+});
+export type WorkerEffectState = __Infer<typeof WorkerEffectState>;
+
+export const WorkerEffectUpdateInput = __t.object("WorkerEffectUpdateInput", {
+  effectKey: __t.string(),
+  identityFingerprint: __t.string(),
+  ownerId: __t.string(),
+  ownerGeneration: __t.u64(),
+  leaseExpiresAtMillis: __t.u64(),
+  get outcome() {
+    return WorkerEffectState;
+  },
+  providerReference: __t.string(),
+  resultJson: __t.string(),
+});
+export type WorkerEffectUpdateInput = __Infer<typeof WorkerEffectUpdateInput>;
 
 export const Workspace = __t.object("Workspace", {
   id: __t.uuid(),

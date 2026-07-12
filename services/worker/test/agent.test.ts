@@ -1341,6 +1341,7 @@ test("AgentRun request claims fence concurrent workers and increment generation 
   const request = {
     runId: "run-1",
     workspaceId: "workspace-1",
+    authorityJobId: "agent-job-1",
     requestId: `effect:${"a".repeat(64)}`,
     leaseMs: 1_000,
   } as const;

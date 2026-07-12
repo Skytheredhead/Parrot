@@ -6,14 +6,25 @@ INFRA_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 COMPOSE_FILE="$INFRA_DIR/compose.yaml"
 EXPECTED_SPACETIMEDB_IMAGE='clockworklabs/spacetime:v2.6.1@sha256:53100591a8bfd62c6e088e801b68e96871a8fc6e68eb4fb031bc6ac76f77a72e'
 EXPECTED_OTEL_IMAGE='otel/opentelemetry-collector-contrib:0.156.0@sha256:125bdbeb7590cc1952c5b3430ecf14063568980c2c93d5b38676cc0446ed8108'
+EXPECTED_EDGE_IMAGE='nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c'
+EXPECTED_CLAMAV_IMAGE='clamav/clamav:1.4.3_base@sha256:be37f82c9cccf6c2559a44b8fb537e6f11e8547b37988650b169c4540c2f298c'
+EXPECTED_SOCAT_IMAGE='alpine/socat:1.8.0.3@sha256:2d83bdac2858b4bcfa57d478ce53ae3c18a1147a68db4f610454a2d60e5c19bc'
 PLACEHOLDER_DIGEST='sha256:0000000000000000000000000000000000000000000000000000000000000000'
 DEPLOYMENT_ENV_KEYS=(
   COMPOSE_PROJECT_NAME DEPLOY_ENVIRONMENT SPACETIMEDB_IMAGE SPACETIMEDB_DATA_DIR
   SPACETIMEDB_LOOPBACK_PORT SPACETIMEDB_DATABASE_NAME SPACETIMEDB_DATABASE_IDENTITY
   RESTORE_EXPECTED_INITIAL_PROGRAM_HASH RESTORE_EXPECTED_MODULE_SCHEMA_SHA256 RESTORE_VERIFIER_DATABASE_OWNER_TOKEN_FILE
-  BACKUP_DIR GATEWAY_IMAGE WORKER_IMAGE GATEWAY_LOOPBACK_PORT
+  BACKUP_DIR GATEWAY_IMAGE WORKER_IMAGE GATEWAY_LOOPBACK_PORT EDGE_IMAGE EDGE_LOOPBACK_PORT
+  EDGE_SERVER_NAME EDGE_CONFIG_TEMPLATE_PATH CLAMAV_IMAGE CLAMAV_DATA_DIR CLAMAV_CONFIG_PATH
+  SOCAT_IMAGE GATEWAY_STATE_DIR WORKER_STATE_DIR OBJECT_DATA_DIR EXPORT_DATA_DIR
+  OLLAMA_BRIDGE_DIR OLLAMA_MODEL OIDC_ALLOW_MISSING_TYP OIDC_ALLOW_CLIENT_ID_AUDIENCE
+  SPACETIMEDB_WORKER_SERVICE_IDENTITY WORKOS_M2M_TOKEN_ENDPOINT WORKOS_M2M_CLIENT_ID
+  WORKOS_M2M_CLIENT_SECRET_FILE WORKOS_M2M_ISSUER WORKOS_M2M_AUDIENCE
+  WORKOS_M2M_EXPECTED_SUBJECT GMAIL_SENDER
+  GMAIL_CLIENT_ID GMAIL_CLIENT_SECRET_FILE GMAIL_REFRESH_TOKEN_FILE GMAIL_MESSAGE_ID_DOMAIN
   GATEWAY_READINESS_TOKEN_FILE BACKUP_EVIDENCE_SIGNING_KEY_FILE BACKUP_EVIDENCE_VERIFY_KEY_FILE
-  GATEWAY_ADAPTER_MODULE GATEWAY_LOG_LEVEL ALLOWED_ORIGINS
+  OBJECT_CAPABILITY_HMAC_SECRET_FILE FILE_CAPABILITY_PUBLIC_ORIGIN
+  GATEWAY_ADAPTER_MODULE GATEWAY_SPACETIMEDB_URI GATEWAY_LOG_LEVEL ALLOWED_ORIGINS
   WORKER_ADAPTER_MODULE WORKER_ID WORKER_LOG_LEVEL WORKER_POLL_INTERVAL_MS
   WORKER_CLAIM_TIMEOUT_MS WORKER_READINESS_TIMEOUT_MS WORKER_LEASE_MS
   WORKER_HEARTBEAT_MS WORKER_HANDLER_TIMEOUT_MS WORKER_HEARTBEAT_TIMEOUT_MS
@@ -27,8 +38,9 @@ DEPLOYMENT_ENV_KEYS=(
   GATEWAY_OTEL_ENABLED GATEWAY_OTEL_TRACES_ENDPOINT OTEL_COLLECTOR_IMAGE OTEL_CONFIG_PATH
   OTEL_EXPORTER_OTLP_ENDPOINT CONTAINER_LOG_MAX_SIZE CONTAINER_LOG_MAX_FILES
   SPACETIMEDB_PIDS_LIMIT SPACETIMEDB_MEMORY_LIMIT SPACETIMEDB_CPU_LIMIT
-  GATEWAY_PIDS_LIMIT GATEWAY_MEMORY_LIMIT GATEWAY_CPU_LIMIT OTEL_PIDS_LIMIT
-  OTEL_MEMORY_LIMIT OTEL_CPU_LIMIT WORKER_PIDS_LIMIT WORKER_MEMORY_LIMIT WORKER_CPU_LIMIT
+  GATEWAY_PIDS_LIMIT GATEWAY_MEMORY_LIMIT GATEWAY_CPU_LIMIT EDGE_PIDS_LIMIT
+  EDGE_MEMORY_LIMIT EDGE_CPU_LIMIT CLAMAV_PIDS_LIMIT CLAMAV_MEMORY_LIMIT CLAMAV_CPU_LIMIT
+  OTEL_PIDS_LIMIT OTEL_MEMORY_LIMIT OTEL_CPU_LIMIT WORKER_PIDS_LIMIT WORKER_MEMORY_LIMIT WORKER_CPU_LIMIT
 )
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -56,7 +68,7 @@ load_env_file() {
     value="${line#*=}"
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "invalid environment key: $key"
     case "$key" in
-      COMPOSE_PROJECT_NAME|DEPLOY_ENVIRONMENT|SPACETIMEDB_IMAGE|SPACETIMEDB_DATA_DIR|SPACETIMEDB_LOOPBACK_PORT|SPACETIMEDB_DATABASE_NAME|SPACETIMEDB_DATABASE_IDENTITY|RESTORE_EXPECTED_INITIAL_PROGRAM_HASH|RESTORE_EXPECTED_MODULE_SCHEMA_SHA256|RESTORE_VERIFIER_DATABASE_OWNER_TOKEN_FILE|BACKUP_DIR|GATEWAY_IMAGE|WORKER_IMAGE|GATEWAY_LOOPBACK_PORT|GATEWAY_READINESS_TOKEN_FILE|BACKUP_EVIDENCE_SIGNING_KEY_FILE|BACKUP_EVIDENCE_VERIFY_KEY_FILE|GATEWAY_ADAPTER_MODULE|GATEWAY_LOG_LEVEL|ALLOWED_ORIGINS|TRUSTED_PROXY_CIDRS|OIDC_ISSUER|OIDC_AUDIENCE|OIDC_JWKS_URI|DB_TOKEN_AUDIENCE|AGENT_STREAM_ORIGINS|FILE_CAPABILITY_ORIGINS|PUBLIC_WSS_REAL_IP_MODE|PUBLIC_WSS_REAL_IP_TRUSTED_CIDRS|GATEWAY_OTEL_ENABLED|GATEWAY_OTEL_TRACES_ENDPOINT|OTEL_COLLECTOR_IMAGE|OTEL_CONFIG_PATH|OTEL_EXPORTER_OTLP_ENDPOINT|CONTAINER_LOG_MAX_SIZE|CONTAINER_LOG_MAX_FILES|SPACETIMEDB_PIDS_LIMIT|SPACETIMEDB_MEMORY_LIMIT|SPACETIMEDB_CPU_LIMIT|GATEWAY_PIDS_LIMIT|GATEWAY_MEMORY_LIMIT|GATEWAY_CPU_LIMIT|OTEL_PIDS_LIMIT|OTEL_MEMORY_LIMIT|OTEL_CPU_LIMIT|WORKER_ADAPTER_MODULE|WORKER_ID|WORKER_LOG_LEVEL|WORKER_POLL_INTERVAL_MS|WORKER_CLAIM_TIMEOUT_MS|WORKER_READINESS_TIMEOUT_MS|WORKER_LEASE_MS|WORKER_HEARTBEAT_MS|WORKER_HANDLER_TIMEOUT_MS|WORKER_HEARTBEAT_TIMEOUT_MS|WORKER_SHUTDOWN_TIMEOUT_MS|WORKER_MAX_ATTEMPTS|WORKER_MAX_JOB_AGE_MS|WORKER_BACKOFF_BASE_MS|WORKER_BACKOFF_CAP_MS|WORKER_BACKOFF_JITTER_RATIO|WORKER_CHECKPOINT_MS|AGENT_MAX_CONTEXT_BYTES|AGENT_MAX_OUTPUT_TOKENS|AGENT_MAX_TOOL_CALLS|AGENT_MAX_RUN_COST_MICROS|WORKER_PIDS_LIMIT|WORKER_MEMORY_LIMIT|WORKER_CPU_LIMIT) ;;
+      COMPOSE_PROJECT_NAME|DEPLOY_ENVIRONMENT|SPACETIMEDB_IMAGE|SPACETIMEDB_DATA_DIR|SPACETIMEDB_LOOPBACK_PORT|SPACETIMEDB_DATABASE_NAME|SPACETIMEDB_DATABASE_IDENTITY|SPACETIMEDB_WORKER_SERVICE_IDENTITY|RESTORE_EXPECTED_INITIAL_PROGRAM_HASH|RESTORE_EXPECTED_MODULE_SCHEMA_SHA256|RESTORE_VERIFIER_DATABASE_OWNER_TOKEN_FILE|BACKUP_DIR|GATEWAY_IMAGE|WORKER_IMAGE|GATEWAY_LOOPBACK_PORT|EDGE_IMAGE|EDGE_LOOPBACK_PORT|EDGE_SERVER_NAME|EDGE_CONFIG_TEMPLATE_PATH|CLAMAV_IMAGE|CLAMAV_DATA_DIR|CLAMAV_CONFIG_PATH|SOCAT_IMAGE|GATEWAY_STATE_DIR|WORKER_STATE_DIR|OBJECT_DATA_DIR|EXPORT_DATA_DIR|OLLAMA_BRIDGE_DIR|OLLAMA_MODEL|WORKOS_M2M_TOKEN_ENDPOINT|WORKOS_M2M_CLIENT_ID|WORKOS_M2M_CLIENT_SECRET_FILE|WORKOS_M2M_ISSUER|WORKOS_M2M_AUDIENCE|WORKOS_M2M_EXPECTED_SUBJECT|GMAIL_SENDER|GMAIL_CLIENT_ID|GMAIL_CLIENT_SECRET_FILE|GMAIL_REFRESH_TOKEN_FILE|GMAIL_MESSAGE_ID_DOMAIN|GATEWAY_READINESS_TOKEN_FILE|OBJECT_CAPABILITY_HMAC_SECRET_FILE|BACKUP_EVIDENCE_SIGNING_KEY_FILE|BACKUP_EVIDENCE_VERIFY_KEY_FILE|GATEWAY_ADAPTER_MODULE|GATEWAY_SPACETIMEDB_URI|GATEWAY_LOG_LEVEL|ALLOWED_ORIGINS|TRUSTED_PROXY_CIDRS|OIDC_ISSUER|OIDC_AUDIENCE|OIDC_JWKS_URI|OIDC_ALLOW_MISSING_TYP|OIDC_ALLOW_CLIENT_ID_AUDIENCE|DB_TOKEN_AUDIENCE|AGENT_STREAM_ORIGINS|FILE_CAPABILITY_ORIGINS|FILE_CAPABILITY_PUBLIC_ORIGIN|PUBLIC_WSS_REAL_IP_MODE|PUBLIC_WSS_REAL_IP_TRUSTED_CIDRS|GATEWAY_OTEL_ENABLED|GATEWAY_OTEL_TRACES_ENDPOINT|OTEL_COLLECTOR_IMAGE|OTEL_CONFIG_PATH|OTEL_EXPORTER_OTLP_ENDPOINT|CONTAINER_LOG_MAX_SIZE|CONTAINER_LOG_MAX_FILES|SPACETIMEDB_PIDS_LIMIT|SPACETIMEDB_MEMORY_LIMIT|SPACETIMEDB_CPU_LIMIT|GATEWAY_PIDS_LIMIT|GATEWAY_MEMORY_LIMIT|GATEWAY_CPU_LIMIT|EDGE_PIDS_LIMIT|EDGE_MEMORY_LIMIT|EDGE_CPU_LIMIT|CLAMAV_PIDS_LIMIT|CLAMAV_MEMORY_LIMIT|CLAMAV_CPU_LIMIT|OTEL_PIDS_LIMIT|OTEL_MEMORY_LIMIT|OTEL_CPU_LIMIT|WORKER_ADAPTER_MODULE|WORKER_ID|WORKER_LOG_LEVEL|WORKER_POLL_INTERVAL_MS|WORKER_CLAIM_TIMEOUT_MS|WORKER_READINESS_TIMEOUT_MS|WORKER_LEASE_MS|WORKER_HEARTBEAT_MS|WORKER_HANDLER_TIMEOUT_MS|WORKER_HEARTBEAT_TIMEOUT_MS|WORKER_SHUTDOWN_TIMEOUT_MS|WORKER_MAX_ATTEMPTS|WORKER_MAX_JOB_AGE_MS|WORKER_BACKOFF_BASE_MS|WORKER_BACKOFF_CAP_MS|WORKER_BACKOFF_JITTER_RATIO|WORKER_CHECKPOINT_MS|AGENT_MAX_CONTEXT_BYTES|AGENT_MAX_OUTPUT_TOKENS|AGENT_MAX_TOOL_CALLS|AGENT_MAX_RUN_COST_MICROS|WORKER_PIDS_LIMIT|WORKER_MEMORY_LIMIT|WORKER_CPU_LIMIT) ;;
       *) die "environment key is not on the deployment allowlist: $key" ;;
     esac
     [[ "$value" != *$'\n'* ]] || die "multiline environment values are not supported"
@@ -77,11 +89,22 @@ require_base_identity() {
   [[ "${GATEWAY_LOOPBACK_PORT:-}" =~ ^[0-9]{4,5}$ ]] || die "invalid gateway loopback port"
   (( GATEWAY_LOOPBACK_PORT >= 1024 && GATEWAY_LOOPBACK_PORT <= 65535 )) || die "gateway loopback port must be 1024-65535"
   (( GATEWAY_LOOPBACK_PORT != 4789 )) || die "port 4789 belongs to the audited unrelated SpacetimeDB service"
-  [[ "$GATEWAY_LOOPBACK_PORT" != "$SPACETIMEDB_LOOPBACK_PORT" ]] || die "gateway and SpacetimeDB ports must differ"
+  [[ "${EDGE_LOOPBACK_PORT:-}" =~ ^[0-9]{4,5}$ ]] || die "invalid edge loopback port"
+  (( EDGE_LOOPBACK_PORT >= 1024 && EDGE_LOOPBACK_PORT <= 65535 && EDGE_LOOPBACK_PORT != 4789 )) \
+    || die "edge loopback port is outside the approved range"
+  [[ "$GATEWAY_LOOPBACK_PORT" != "$SPACETIMEDB_LOOPBACK_PORT" \
+    && "$EDGE_LOOPBACK_PORT" != "$SPACETIMEDB_LOOPBACK_PORT" \
+    && "$EDGE_LOOPBACK_PORT" != "$GATEWAY_LOOPBACK_PORT" ]] || die "loopback ports must be distinct"
+  case "$DEPLOY_ENVIRONMENT:$SPACETIMEDB_LOOPBACK_PORT:$GATEWAY_LOOPBACK_PORT:$EDGE_LOOPBACK_PORT" in
+    production:39000:39080:39090|staging:39100:39180:39190) ;;
+    *) die "loopback ports must match the reserved Parrot environment allocation" ;;
+  esac
   [[ "${SPACETIMEDB_DATABASE_NAME:-}" =~ ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$ ]] \
     || die "SpacetimeDB database name must be a bounded lowercase DNS-style name"
   [[ "${SPACETIMEDB_DATABASE_IDENTITY:-}" =~ ^[a-f0-9]{64}$ ]] \
     || die "SpacetimeDB database identity must be an exact 64-character lowercase hex identity"
+  [[ "${SPACETIMEDB_WORKER_SERVICE_IDENTITY:-}" =~ ^[a-f0-9]{64}$ ]] \
+    || die "SpacetimeDB worker service identity must be exact lowercase hex"
   [[ "${RESTORE_EXPECTED_INITIAL_PROGRAM_HASH:-}" =~ ^[a-f0-9]{64}$ ]] \
     || die "restore expected initial program hash must be an exact 64-character lowercase hex hash"
   [[ "${RESTORE_EXPECTED_MODULE_SCHEMA_SHA256:-}" =~ ^[a-f0-9]{64}$ ]] \
@@ -89,15 +112,47 @@ require_base_identity() {
 
   local expected_root="/srv/project-conversation/$DEPLOY_ENVIRONMENT"
   [[ "${SPACETIMEDB_DATA_DIR:-}" == "$expected_root/spacetime" ]] || die "SpacetimeDB data path must be $expected_root/spacetime"
-  [[ "${BACKUP_DIR:-}" == "$expected_root/backups" ]] || die "backup path must be $expected_root/backups"
+  [[ "${BACKUP_DIR:-}" == "/mnt/bigboi/project-conversation/$DEPLOY_ENVIRONMENT/backups" ]] \
+    || die "backup path must stay on /mnt/bigboi for this environment"
+  [[ "${EDGE_CONFIG_TEMPLATE_PATH:-}" == "$expected_root/config/edge.conf.template" ]] \
+    || die "edge configuration path must stay inside the approved environment"
+  [[ "${CLAMAV_DATA_DIR:-}" == "$expected_root/clamav" ]] \
+    || die "ClamAV signature data path must stay inside the approved environment"
+  [[ "${CLAMAV_CONFIG_PATH:-}" == "$expected_root/config/clamd.conf" ]] \
+    || die "ClamAV configuration path must stay inside the approved environment"
+  [[ "${GATEWAY_STATE_DIR:-}" == "$expected_root/state/gateway" \
+    && "${WORKER_STATE_DIR:-}" == "$expected_root/state/worker" \
+    && "${OBJECT_DATA_DIR:-}" == "$expected_root/state/objects" \
+    && "${EXPORT_DATA_DIR:-}" == "$expected_root/state/exports" \
+    && "${OLLAMA_BRIDGE_DIR:-}" == "$expected_root/state/worker/ollama-bridge" ]] \
+    || die "provider state paths must match the isolated environment allocation"
+  [[ "${OLLAMA_MODEL:-}" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] || die "Ollama model identifier is invalid"
+  [[ "${OIDC_ALLOW_MISSING_TYP:-}" == true || "${OIDC_ALLOW_MISSING_TYP:-}" == false ]] \
+    || die "OIDC_ALLOW_MISSING_TYP must be true or false"
+  [[ "${OIDC_ALLOW_CLIENT_ID_AUDIENCE:-}" == true || "${OIDC_ALLOW_CLIENT_ID_AUDIENCE:-}" == false ]] \
+    || die "OIDC_ALLOW_CLIENT_ID_AUDIENCE must be true or false"
+  [[ "${EDGE_SERVER_NAME:-}" =~ ^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$ \
+    && "$EDGE_SERVER_NAME" == *.* && "$EDGE_SERVER_NAME" != *..* ]] \
+    || die "edge server name must be a bounded lowercase DNS name"
   [[ "${GATEWAY_READINESS_TOKEN_FILE:-}" == "$expected_root/secrets/gateway-readiness-token" ]] \
     || die "gateway readiness secret path must stay inside the approved environment"
+  [[ "${OBJECT_CAPABILITY_HMAC_SECRET_FILE:-}" == "$expected_root/secrets/object-capability-hmac" ]] \
+    || die "object capability secret path must stay inside the approved environment"
   [[ "${BACKUP_EVIDENCE_SIGNING_KEY_FILE:-}" == "$expected_root/secrets/backup-evidence-ed25519-private.pem" ]] \
     || die "backup evidence signing-key path must stay inside the approved environment"
   [[ "${BACKUP_EVIDENCE_VERIFY_KEY_FILE:-}" == "$expected_root/config/backup-evidence-ed25519-public.pem" ]] \
     || die "backup evidence verification-key path must stay inside the approved environment"
   [[ "${RESTORE_VERIFIER_DATABASE_OWNER_TOKEN_FILE:-}" == "$expected_root/secrets/restore-verifier-database-owner-token" ]] \
     || die "restore verifier owner-token path must stay inside the approved environment"
+  [[ "${WORKOS_M2M_CLIENT_SECRET_FILE:-}" == "$expected_root/secrets/workos-m2m-client-secret" ]] \
+    || die "worker WorkOS secret path must stay inside the approved environment"
+  if [[ -n "${GMAIL_CLIENT_SECRET_FILE:-}${GMAIL_REFRESH_TOKEN_FILE:-}" ]]; then
+    [[ "${GMAIL_CLIENT_SECRET_FILE:-}" == "$expected_root/secrets/gmail-client-secret" \
+      && "${GMAIL_REFRESH_TOKEN_FILE:-}" == "$expected_root/secrets/gmail-refresh-token" ]] \
+      || die "optional Gmail secret paths must stay inside the approved environment"
+  fi
+  [[ "${WORKER_ADAPTER_MODULE:-}" == /app/dist/production/parrot.js ]] \
+    || die "worker must use the repository-owned Parrot production composition"
 }
 
 assert_immutable_image() {
@@ -294,6 +349,16 @@ assert_trusted_directory() {
     (( (8#$mode & 022) == 0 )) || die "$label must not be writable by group or other: $directory (mode $mode)"
   fi
   [[ "$owner" == "$(id -u)" || "$owner" == 0 ]] || die "$label must be owned by the runtime operator or root: $directory"
+}
+
+assert_container_state_directory() {
+  local directory="$1" label="$2" expected_uid="${3:-10001}" mode owner logical physical
+  [[ -d "$directory" && ! -L "$directory" ]] || die "$label must be a real directory: $directory"
+  logical="$(cd -L -- "$directory" && pwd -L)"; physical="$(cd -P -- "$directory" && pwd -P)"
+  [[ "$logical" == "$physical" ]] || die "$label path contains a symlink component: $directory"
+  mode="$(file_mode "$directory")"; owner="$(file_uid "$directory")"
+  [[ "$mode" == 700 || "$mode" == 0700 ]] || die "$label must have exact mode 0700: $directory"
+  [[ "$owner" == "$expected_uid" ]] || die "$label must be owned by container uid $expected_uid: $directory"
 }
 
 assert_environment_path_chain() {
@@ -623,10 +688,10 @@ validate_restored_state_verification() {
   [[ "$(metadata_value "$record" module_schema_sha256)" == "$expected_schema_sha256" ]] \
     || die "restored-state module/schema identity differs from the reviewed digest"
   [[ "$(metadata_value "$record" required_private_tables)" == Pass \
-    && "$(metadata_value "$record" required_private_table_count)" == 71 ]] \
+    && "$(metadata_value "$record" required_private_table_count)" == 78 ]] \
     || die "restored-state required private-table verification did not pass"
   [[ "$(metadata_value "$record" domain_invariants)" == Pass \
-    && "$(metadata_value "$record" domain_invariant_count)" == 81 ]] \
+    && "$(metadata_value "$record" domain_invariant_count)" == 90 ]] \
     || die "restored-state domain invariants did not pass"
   [[ "$(metadata_value "$record" outbox_lease_recovery_shape)" == NotVerified ]] \
     || die "restored-state evidence must not claim outbox lease recovery verification"
@@ -681,9 +746,9 @@ validate_restore_marker() {
     && "$(metadata_value "$marker" restored_state_verification)" == Pass ]] \
     || die "restore marker initialization/schema identity evidence is invalid"
   [[ "$(metadata_value "$marker" required_private_tables)" == Pass \
-    && "$(metadata_value "$marker" required_private_table_count)" == 71 \
+    && "$(metadata_value "$marker" required_private_table_count)" == 78 \
     && "$(metadata_value "$marker" domain_invariants)" == Pass \
-    && "$(metadata_value "$marker" domain_invariant_count)" == 81 \
+    && "$(metadata_value "$marker" domain_invariant_count)" == 90 \
     && "$(metadata_value "$marker" outbox_lease_recovery_shape)" == NotVerified ]] \
     || die "restore marker bounded invariant evidence is invalid"
   [[ "$(metadata_value "$marker" audit_continuity)" == BoundedReferentialOnly \

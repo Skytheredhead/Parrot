@@ -63,6 +63,7 @@ pub enum TaskStatus {
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotificationKind {
     Mention,
+    Reply,
     Assignment,
     Decision,
     Agent,
@@ -264,6 +265,21 @@ pub enum WorkspaceExportCleanupOutcome {
     Failed,
 }
 
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerEffectState {
+    Started,
+    Succeeded,
+    OutcomeUnknown,
+    FailedPermanent,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileDeletionClaimState {
+    Claimed,
+    Finalized,
+    Released,
+}
+
 #[derive(SpacetimeType)]
 pub struct CreateTypedPostInput {
     pub space_id: Uuid,
@@ -347,6 +363,166 @@ pub struct CompleteAgentRunInput {
 }
 
 #[derive(SpacetimeType)]
+pub struct ClaimAgentExecutionInput {
+    pub run_id: Uuid,
+    pub workspace_id: Uuid,
+    pub authority_job_id: Uuid,
+    pub execution_request_id: String,
+    pub expected_version: u64,
+    pub lease_seconds: u32,
+}
+
+#[derive(SpacetimeType)]
+pub struct SaveAgentProgressInput {
+    pub run_id: Uuid,
+    pub lease_generation: u64,
+    pub sequence: u64,
+    pub output_tokens: u64,
+    pub cost_micros: u64,
+    pub tool_calls: u32,
+    pub tool_results_json: String,
+    pub provider_input_bytes: u64,
+    pub pending_step_json: String,
+}
+
+#[derive(SpacetimeType)]
+pub struct SaveAgentCheckpointInput {
+    pub run_id: Uuid,
+    pub lease_generation: u64,
+    pub sequence: u64,
+    pub state: AgentRunState,
+    pub code: String,
+    pub details_json: String,
+    pub created_at_millis: u64,
+}
+
+#[derive(SpacetimeType)]
+pub struct RecordAgentProviderDispatchInput {
+    pub run_id: Uuid,
+    pub provider_sequence: u64,
+    pub lease_generation: u64,
+    pub authorization_epoch: u64,
+    pub request_id: String,
+    pub input_fingerprint: String,
+    pub canonical_input: String,
+    pub input_bytes: u64,
+    pub context_binding_hash: String,
+    pub context_json: String,
+}
+
+#[derive(SpacetimeType)]
+pub struct CommitAgentFinalInput {
+    pub run_id: Uuid,
+    pub lease_generation: u64,
+    pub authorization_epoch: u64,
+    pub text: String,
+    pub progress_sequence: u64,
+    pub output_tokens: u64,
+    pub cost_micros: u64,
+    pub tool_calls: u32,
+    pub tool_results_json: String,
+    pub provider_input_bytes: u64,
+}
+
+#[derive(SpacetimeType)]
+pub struct WorkerEffectAcquireInput {
+    pub effect_key: String,
+    pub identity_fingerprint: String,
+    pub payload_fingerprint: String,
+    pub owner_id: String,
+    pub owner_generation: u64,
+    pub workspace_id: Uuid,
+    pub run_id: Option<Uuid>,
+    pub authority_job_id: Option<Uuid>,
+    pub lease_expires_at_millis: u64,
+    pub allow_takeover: bool,
+}
+
+#[derive(SpacetimeType)]
+pub struct WorkerEffectUpdateInput {
+    pub effect_key: String,
+    pub identity_fingerprint: String,
+    pub owner_id: String,
+    pub owner_generation: u64,
+    pub lease_expires_at_millis: u64,
+    pub outcome: WorkerEffectState,
+    pub provider_reference: String,
+    pub result_json: String,
+}
+
+#[derive(SpacetimeType)]
+pub struct ConsumeAgentApprovalInput {
+    pub run_id: Uuid,
+    pub call_id: String,
+    pub tool_name: String,
+    pub tool_version: String,
+    pub normalized_args_hash: String,
+    pub effect_class: ToolEffectClass,
+    pub nonce_hash: String,
+    pub effect_key: String,
+}
+
+#[derive(SpacetimeType)]
+pub struct PrepareAgentToolCallInput {
+    pub run_id: Uuid,
+    pub lease_generation: u64,
+    pub provider_call_id: String,
+    pub tool_name: String,
+    pub tool_version: String,
+    pub normalized_args_hash: String,
+    pub effect_class: ToolEffectClass,
+    pub effect_key: String,
+    pub nonce_hash: String,
+}
+
+#[derive(SpacetimeType)]
+pub struct RegisterCleanFileObjectInput {
+    pub job_id: Uuid,
+    pub lease_generation: u64,
+    pub file_id: Uuid,
+    pub expected_revision: u64,
+    pub clean_key: String,
+    pub object_version: String,
+    pub checksum_sha256: String,
+}
+
+#[derive(SpacetimeType)]
+pub struct ClaimFileDeletionInput {
+    pub job_id: Uuid,
+    pub lease_generation: u64,
+    pub file_id: Uuid,
+    pub expected_revision: u64,
+    pub key: String,
+    pub object_version_tag: String,
+}
+
+#[derive(SpacetimeType)]
+pub struct FileDeletionClaimInput {
+    pub claim_id: Uuid,
+    pub generation: u64,
+    pub workspace_id: Uuid,
+    pub file_id: Uuid,
+    pub file_revision: u64,
+    pub key: String,
+    pub object_version_tag: String,
+}
+
+#[derive(SpacetimeType)]
+pub struct ReleaseFileDeletionInput {
+    pub claim: FileDeletionClaimInput,
+    pub code: String,
+}
+
+#[derive(SpacetimeType)]
+pub struct RecordFileOrphanInput {
+    pub job_id: Uuid,
+    pub lease_generation: u64,
+    pub file_id: Uuid,
+    pub expected_revision: u64,
+    pub key: String,
+}
+
+#[derive(SpacetimeType)]
 pub struct AgentContextPostInput {
     pub run_id: Uuid,
     pub lease_generation: u64,
@@ -370,10 +546,25 @@ pub struct AgentContextContributionInput {
 
 #[derive(SpacetimeType)]
 pub struct FileUploadInput {
+    pub reservation_id: Uuid,
     pub space_id: Uuid,
     pub file_name: String,
+    pub declared_type: String,
     pub declared_size_bytes: u64,
     pub checksum: String,
+    pub ttl_seconds: u32,
+    pub client_request_id: Uuid,
+}
+
+#[derive(SpacetimeType)]
+pub struct CompleteFileUploadInput {
+    pub upload_id: Uuid,
+    pub file_id: Uuid,
+    pub expected_revision: u64,
+    pub observed_size_bytes: u64,
+    pub observed_type: String,
+    pub object_version: String,
+    pub checksum_sha256: String,
     pub client_request_id: Uuid,
 }
 
@@ -608,6 +799,13 @@ pub struct AuthPolicy {
     pub issuer: String,
     pub audience: String,
     pub configured_by: Identity,
+    pub configured_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = trusted_oidc_audience, private)]
+pub struct TrustedOidcAudience {
+    #[primary_key]
+    pub audience: String,
     pub configured_at: Timestamp,
 }
 
@@ -1571,6 +1769,7 @@ pub struct AgentRun {
     pub lease_owner: Option<Identity>,
     pub lease_until: Option<Timestamp>,
     pub lease_generation: u64,
+    pub execution_request_id: String,
     pub expires_at: Timestamp,
     pub next_event_sequence: u64,
     pub prompt_summary: String,
@@ -1580,6 +1779,54 @@ pub struct AgentRun {
     pub final_contribution_id: Option<Uuid>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = agent_execution_progress, private)]
+pub struct AgentExecutionProgress {
+    #[primary_key]
+    pub run_id: Uuid,
+    pub lease_generation: u64,
+    pub sequence: u64,
+    pub output_tokens: u64,
+    pub cost_micros: u64,
+    pub tool_calls: u32,
+    pub tool_results_json: String,
+    pub provider_input_bytes: u64,
+    pub pending_step_json: String,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = agent_execution_checkpoint, private)]
+pub struct AgentExecutionCheckpoint {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub run_id: Uuid,
+    pub lease_generation: u64,
+    pub sequence: u64,
+    pub state: AgentRunState,
+    pub code: String,
+    pub details_json: String,
+    pub created_at_millis: u64,
+    pub recorded_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = agent_provider_dispatch, private)]
+pub struct AgentProviderDispatch {
+    #[primary_key]
+    pub key: String,
+    #[index(btree)]
+    pub run_id: Uuid,
+    pub provider_sequence: u64,
+    pub lease_generation: u64,
+    pub authorization_epoch: u64,
+    pub request_id: String,
+    pub input_fingerprint: String,
+    pub canonical_input: String,
+    pub input_bytes: u64,
+    pub context_binding_hash: String,
+    pub context_json: String,
+    pub created_at: Timestamp,
 }
 
 #[spacetimedb::table(accessor = agent_run_event, private)]
@@ -1624,6 +1871,9 @@ pub struct AgentToolCall {
     pub id: Uuid,
     #[index(btree)]
     pub run_id: Uuid,
+    #[unique]
+    pub provider_call_key: String,
+    pub provider_call_id: String,
     pub tool_name: String,
     pub tool_version: String,
     pub policy_key: String,
@@ -1675,6 +1925,26 @@ pub struct EffectLedger {
     pub state: EffectLedgerState,
     pub provider_reference: String,
     pub result_summary: String,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = worker_effect_ledger, private)]
+#[derive(Clone)]
+pub struct WorkerEffectLedger {
+    #[primary_key]
+    pub effect_key: String,
+    pub identity_fingerprint: String,
+    pub payload_fingerprint: String,
+    pub workspace_id: Uuid,
+    pub authority_kind: String,
+    pub state: WorkerEffectState,
+    #[index(btree)]
+    pub owner_identity: Identity,
+    pub owner_id: String,
+    pub owner_generation: u64,
+    pub lease_expires_at_millis: u64,
+    pub provider_reference: String,
+    pub result_json: String,
     pub updated_at: Timestamp,
 }
 
@@ -1748,8 +2018,13 @@ pub struct FileRecord {
     pub space_id: Uuid,
     pub owner_identity: Identity,
     pub file_name: String,
+    pub declared_type: String,
     pub source_key: String,
+    pub source_object_version: String,
+    pub source_checksum_sha256: String,
     pub clean_key: String,
+    pub clean_object_version: String,
+    pub clean_checksum_sha256: String,
     pub cleanup_prefix: String,
     pub declared_size_bytes: u64,
     pub checksum: String,
@@ -1771,7 +2046,12 @@ pub struct FileVersion {
     pub workspace_id: Uuid,
     pub content_version: u64,
     pub source_key: String,
+    pub declared_type: String,
+    pub source_object_version: String,
+    pub source_checksum_sha256: String,
     pub clean_key: String,
+    pub clean_object_version: String,
+    pub clean_checksum_sha256: String,
     pub declared_size_bytes: u64,
     pub checksum: String,
     pub detected_type: String,
@@ -1797,6 +2077,46 @@ pub struct FileUpload {
     pub completed_at: Option<Timestamp>,
 }
 
+#[spacetimedb::table(accessor = file_deletion_claim, private)]
+#[derive(Clone)]
+pub struct FileDeletionClaim {
+    #[primary_key]
+    pub claim_id: Uuid,
+    #[unique]
+    pub file_key: String,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    #[index(btree)]
+    pub file_id: Uuid,
+    pub file_revision: u64,
+    pub job_id: Uuid,
+    pub service_identity: Identity,
+    pub lease_generation: u64,
+    pub generation: u64,
+    pub key: String,
+    pub object_version_tag: String,
+    pub state: FileDeletionClaimState,
+    pub code: String,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = file_orphan_discrepancy, private)]
+pub struct FileOrphanDiscrepancy {
+    #[primary_key]
+    pub file_key: String,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    #[index(btree)]
+    pub file_id: Uuid,
+    pub file_revision: u64,
+    pub key: String,
+    pub occurrence_count: u32,
+    pub resolved: bool,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
 #[derive(SpacetimeType)]
 pub struct FileProcessingPlanView {
     pub job_id: Uuid,
@@ -1806,6 +2126,8 @@ pub struct FileProcessingPlanView {
     pub file_revision: u64,
     pub kind: String,
     pub source_key: String,
+    pub source_object_version: String,
+    pub source_checksum_sha256: String,
     pub clean_destination_key: String,
     pub cleanup_prefix: String,
     pub max_bytes: u64,

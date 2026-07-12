@@ -20,10 +20,14 @@ describe("loadConfig", () => {
       ALLOWED_ORIGINS: "https://app.test,https://preview.test",
       TRUSTED_PROXY_CIDRS: "127.0.0.1,10.0.0.0/8,::1/128",
       OIDC_ALLOWED_TOKEN_TYPES: "at+jwt,application/at+jwt",
+      OIDC_ALLOW_MISSING_TYP: "true",
+      OIDC_ALLOW_CLIENT_ID_AUDIENCE: "true",
     });
     expect(config.allowedOrigins).toEqual(["https://app.test", "https://preview.test"]);
     expect(config.trustedProxyCidrs).toEqual(["127.0.0.1", "10.0.0.0/8", "::1/128"]);
     expect(config.oidc.allowedTokenTypes).toEqual(["at+jwt", "application/at+jwt"]);
+    expect(config.oidc.allowMissingTokenType).toBe(true);
+    expect(config.oidc.allowClientIdAudience).toBe(true);
   });
 
   it.each([
@@ -81,5 +85,56 @@ describe("loadConfig", () => {
         OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://user:secret@otel.test/v1/traces",
       }),
     ).toThrow(/credentials/);
+  });
+
+  it("binds host-local object capabilities to an approved HTTPS origin and secret files", () => {
+    const production = {
+      ...required,
+      NODE_ENV: "production",
+      READINESS_TOKEN: "a".repeat(32),
+      FILE_CAPABILITY_ORIGINS: "https://parrotapi.skylarenns.com",
+      FILE_CAPABILITY_PUBLIC_ORIGIN: "https://parrotapi.skylarenns.com",
+      LOCAL_OBJECT_ROOT: "/var/lib/parrot/objects",
+      FILE_CAPABILITY_HMAC_SECRET_FILE: "/run/secrets/parrot_object_capability_hmac",
+      WORKOS_API_KEY_FILE: "/run/secrets/parrot_workos_api_key",
+    };
+    expect(loadConfig(production).production).toEqual({
+      fileCapabilityPublicOrigin: "https://parrotapi.skylarenns.com",
+      localObjectRoot: "/var/lib/parrot/objects",
+      fileCapabilityHmacSecretFile: "/run/secrets/parrot_object_capability_hmac",
+      workosApiKeyFile: "/run/secrets/parrot_workos_api_key",
+    });
+    expect(() =>
+      loadConfig({ ...production, FILE_CAPABILITY_PUBLIC_ORIGIN: "https://objects.example" }),
+    ).toThrow(/listed/);
+    expect(() => loadConfig({ ...production, LOCAL_OBJECT_ROOT: "relative/path" })).toThrow(
+      /absolute/,
+    );
+    expect(() =>
+      loadConfig({ ...production, FILE_CAPABILITY_HMAC_SECRET_FILE: undefined }),
+    ).toThrow(/configured together/);
+  });
+
+  it("accepts only exact secure or loopback SpacetimeDB gateway origins", () => {
+    expect(
+      loadConfig({
+        ...required,
+        SPACETIMEDB_URI: "ws://127.0.0.1:3001",
+        SPACETIMEDB_DATABASE_NAME: "parrot-staging",
+      }).production,
+    ).toBeUndefined();
+    expect(() =>
+      loadConfig({
+        ...required,
+        SPACETIMEDB_URI: "ws://remote.example:3001",
+        SPACETIMEDB_DATABASE_NAME: "parrot-staging",
+      }),
+    ).toThrow(/WSS/);
+    expect(() => loadConfig({ ...required, SPACETIMEDB_URI: "wss://database.example" })).toThrow(
+      /configured together/,
+    );
+    expect(() => loadConfig({ ...required, GATEWAY_SQLITE_PATH: "relative.sqlite" })).toThrow(
+      /absolute/,
+    );
   });
 });

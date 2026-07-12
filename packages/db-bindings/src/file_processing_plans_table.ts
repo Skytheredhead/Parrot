@@ -22,6 +22,8 @@ export default __t.row({
   fileRevision: __t.u64().name("file_revision"),
   kind: __t.string(),
   sourceKey: __t.string().name("source_key"),
+  sourceObjectVersion: __t.string().name("source_object_version"),
+  sourceChecksumSha256: __t.string().name("source_checksum_sha_256"),
   cleanDestinationKey: __t.string().name("clean_destination_key"),
   cleanupPrefix: __t.string().name("cleanup_prefix"),
   maxBytes: __t.u64().name("max_bytes"),

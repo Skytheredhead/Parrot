@@ -1,8 +1,8 @@
 # Provider-neutral deployment runbook
 
-Date: 2026-07-11
+Date: 2026-07-12
 
-Status: Candidate runbook. No server mutation, provider provisioning, domain change, or release was performed while preparing it.
+Status: Reviewed deployment runbook. WorkOS staging resources and isolated host directories may be provisioned independently; a public route still requires the private-validation gates below.
 
 ## Non-negotiable boundary
 
@@ -12,7 +12,7 @@ The scripts in `infra/scripts` are local-only. They contain no SSH target and ma
 
 ## Required decisions and evidence
 
-Before any target-host setup, record approval for the shared host and capacity; final backend/frontend domains; OIDC and telemetry providers; secret-management process; alert recipients/on-call owner; maintenance window; RPO/RTO; backup retention/offsite destination; and the SpacetimeDB compatibility/migration plan. The host was observed with 148 GiB free but an 84%-used root disk; repeat disk, inode, swap, port, process, proxy, tunnel, backup, and monitoring inventory immediately before deployment.
+The shared host, `parrot.skylarenns.com` frontend, `parrotapi.skylarenns.com` backend, WorkOS identity provider, one-hour RPO, four-hour RTO, and `/mnt/bigboi` backup target are approved. Credentials never belong in this repository; provision them as private files or through the selected secret mechanism. The host was observed with 148 GiB free but an 84%-used root disk; repeat disk, inode, swap, port, process, proxy, tunnel, backup, and monitoring inventory immediately before deployment.
 
 Gateway activation additionally requires:
 
@@ -37,32 +37,53 @@ The gateway issues short-lived agent stream tickets but does not serve the retur
 route. `AGENT_STREAM_ORIGINS` must name a separately reviewed stream broker; the Nginx template in
 this repository deliberately does not proxy `/v1/agent/runs/<id>/stream`.
 
-The worker process host and non-root image candidate exist, but the service is not release-enabled.
-Its Compose profile is opt-in, has no host port, and no guarded deployment command selects it.
-`WORKER_ADAPTER_MODULE` must supply the complete reviewed durable graph; runtime validation rejects
-the placeholder module/image. Enablement remains blocked until the authority job protocol, provider
-credentials, adapter conformance/readiness, and staging crash-recovery behavior are proven.
+The worker process host and non-root image are opt-in and have no host port. The repository-owned
+production composition uses WorkOS M2M identity, caller-scoped Spacetime authority, SQLite search,
+filesystem objects, ClamAV, and the host-local Ollama bridge. Email, full search rebuild, workspace
+export materialization, and agent tools are deliberately fail-closed until their missing provider or
+authority inputs are configured. Runtime validation rejects another adapter path or placeholder image.
 
 ## One-time target preparation
 
 Use a dedicated, non-login deployment account and the least privileges needed for this Compose project. The operator—not the repository scripts—creates and owns these paths for exactly one environment:
 
 ```text
-/srv/project-conversation/production/{spacetime,backups,state,config,secrets}
-/srv/project-conversation/staging/{spacetime,backups,state,config,secrets}
+/srv/project-conversation/production/{spacetime,clamav,state,config,secrets}
+/srv/project-conversation/staging/{spacetime,clamav,state,config,secrets}
 /srv/project-conversation/restore-drills/{production,staging}/
+/mnt/bigboi/project-conversation/production/backups/
+/mnt/bigboi/project-conversation/staging/backups/
 ```
 
 Production and staging must not share owners where that would grant cross-environment secret access. Directories must be real paths, not symlinks. Keep secrets out of the repository and environment file. Place a random readiness token of at least 32 characters at the configured `GATEWAY_READINESS_TOKEN_FILE` with mode `0400` for the runtime operator. Copy `infra/otel/collector.yaml` to the environment's approved config path. Any telemetry authentication headers must be added through the selected secret mechanism after provider review; do not put them in Git.
 
-Use mode `0700` for each `/srv/project-conversation/<environment>` root, its `spacetime`, `backups`,
-and `state` directories, and the shared restore-drill parent. `/srv` and
+Provision an independent random object-capability HMAC value of at least 32 bytes at
+`OBJECT_CAPABILITY_HMAC_SECRET_FILE`. The Compose secret is mounted read-only, while the gateway
+configuration retains the file path so the object adapter can enforce size/mode checks itself. The
+entrypoint dereferences only `READINESS_TOKEN_FILE`; it deliberately does not convert arbitrary
+`*_FILE` references into environment secret values.
+
+Use mode `0700` for each `/srv/project-conversation/<environment>` root, its `spacetime`, `clamav`, and `state`
+directories, each `/mnt/bigboi/project-conversation/<environment>` root and `backups` directory, and the shared restore-drill parent. `/srv`, `/mnt/bigboi`, and
 `/srv/project-conversation` may be traversable but must not be group/other-writable. Use protected
 operator/root ownership throughout. Runtime validation walks this fixed path chain and rejects
 untrusted owners, symlinks, group/other-accessible private directories, and a gateway readiness secret readable by group/other or owned by
 any identity other than root/the runtime operator. Mode `0400` or `0600` is acceptable for the
 source secret file; confirm the Compose secret mount remains readable by the non-root gateway in the
 staging image before production deployment.
+
+Create `state/gateway`, `state/worker`, `state/objects`, `state/exports`, and
+`state/worker/ollama-bridge` as real mode-`0700` directories owned by numeric UID `10001`, matching
+the immutable gateway/worker images. Runtime validation rejects a symlink, broader mode, or different
+owner. The read-only containers receive only their exact writable bind paths: gateway capability
+state, worker SQLite state, worker objects, and worker exports. They do not receive the environment
+root, configuration directory, secrets directory, or backup tree.
+
+Copy `infra/clamav/clamd.conf` to the configured private config path. ClamAV and the worker share only
+the project-owned `clamav-runtime` volume containing `/run/clamav/clamd.sock`; no ClamAV TCP listener
+is exposed to the host or another Docker network. The socket is world-connectable only inside that
+two-container volume, while both containers otherwise retain dropped capabilities and isolated
+networks.
 
 Provision a dedicated Ed25519 evidence-signing keypair for each environment. Configure
 `BACKUP_EVIDENCE_SIGNING_KEY_FILE` to a mode-`0400`/`0600` private key delivered by the approved
@@ -108,13 +129,13 @@ infra/scripts/validate-config.sh --env-file /protected/path/production.env --run
 infra/scripts/preflight.sh --env-file /protected/path/production.env
 ```
 
-For a future approved gateway or telemetry deployment, add `--profile gateway` or `--profile telemetry` to both commands. Preflight fails on path, image, provider-placeholder, port, or ownership problems. It explicitly reports but never operates port `4789`.
+For the full candidate, add `--profile gateway --profile edge --profile worker --profile scanner --profile telemetry` to both commands. Preflight fails on either filesystem, image, provider-placeholder, reserved-port, ownership, container/network collision, or unsafe edge-config problems. It explicitly reports but never operates port `4789`.
 
 ## Build and identify the gateway candidate
 
-`infra/docker/gateway.Dockerfile` uses the recorded Node digest and a non-root runtime. It loads `*_FILE` secrets before importing the gateway main module. It is only a build reference: the repository currently has no production adapter at `/app/adapter/index.js`, so the base image fails closed.
+`infra/docker/gateway.Dockerfile` uses the recorded Node digest and a non-root runtime. It builds the generated Spacetime bindings and includes the reviewed adapter at `/app/dist/production/parrot.js`. The adapter enables bearer OIDC, caller-scoped authority, files/object capabilities, SQLite rate limits, and HMAC cursors; unsupported provider routes remain explicitly fail-closed.
 
-After adding the reviewed adapter through a derived build, build for the approved target platform, generate an SBOM, scan the result, push it to the approved registry, sign/attest as required, and record the registry-returned immutable digest. Put only `registry/path@sha256:<64 lowercase hex>` in the protected environment file. A Dockerfile base-image digest is not the gateway output-image digest.
+Build for the approved target platform, generate an SBOM, scan the result, push it to the approved registry, sign/attest as required, and record the registry-returned immutable digest. Put only `registry/path@sha256:<64 lowercase hex>` in the protected environment file. A Dockerfile base-image digest is not the gateway output-image digest.
 
 ## Deploy privately
 
@@ -151,6 +172,17 @@ infra/scripts/deploy.sh \
   --confirm project-conversation-production
 ```
 
+The full private candidate adds `--with-edge --with-worker --with-scanner --with-telemetry`. `--with-edge` also selects the gateway. Production reserves loopback ports `39000` (SpacetimeDB), `39080` (gateway diagnostics/origin), and `39090` (the only Cloudflare origin). Staging reserves `39100`, `39180`, and `39190`. The worker, ClamAV, collector, and Ollama loopback relay have no host listeners. ClamAV signatures use the dedicated `/srv` bind directory. All services and the isolated runtime-socket volume carry project/environment ownership labels and bounded PID, memory, CPU, and JSON-log settings.
+
+Ollama remains bound to host loopback. Never widen it to `0.0.0.0`, a LAN address, or a Docker bridge.
+Install `infra/systemd/parrot-ollama-bridge@.service` only after reviewing the host `socat` package and
+the exact `parrot` UID. The native unit converts `127.0.0.1:11434` to a mode-`0600` Unix socket below
+the worker state directory. A tiny pinned sidecar shares only the worker network namespace and converts
+that socket back to container-loopback `127.0.0.1:11434`, satisfying the provider's hard local-only
+endpoint check. Runtime worker validation requires the socket to exist, so the profile fails closed
+when the native bridge is absent. Verify `curl http://127.0.0.1:11434/api/tags` on the host, start
+`parrot-ollama-bridge@production`, then validate the worker profile; do not configure a host TCP proxy.
+
 Telemetry is independently opt-in with `--with-telemetry`; the exporter endpoint and its data residency, retention, cost, authentication, and redaction must be approved first. The collector exposes no host ports and has no console/debug payload exporter.
 
 Every mutating command for an environment uses the same non-blocking `flock` at
@@ -179,15 +211,15 @@ Docker probe remains a configuration/process-start check because the pinned mini
 does not include a separate HTTP probe client. Add an approved external/internal-network probe and
 alert before treating telemetry as monitored.
 
-## Public proxy change, only after approval
+## Cloudflare tunnel change, only after private validation
 
-No deployment script installs `infra/nginx/backend.conf.template`. After domain, certificate, compatibility, rate/size, and existing-host proxy review:
+The Compose edge replaces any host-Nginx change for Parrot. Do not add a host `:80`/`:443` server block and do not edit any unrelated Nginx file. After the private production stack is healthy:
 
-1. Render all `__PLACEHOLDER__` tokens into a new dedicated Nginx file; never edit an unrelated server block. This includes reviewed positive integer values for `__WSS_CONNECTIONS_PER_IP__` and `__WSS_CONNECTIONS_TOTAL__`, sized from capacity and abuse testing, plus exact real-IP directives for the approved tunnel/proxy. Refuse installation while any `__...__` token remains.
-2. Review the final diff. The allowlist exposes only the gateway's current exact `/v1` route shapes and the exact `/v1/database/<approved-database>/subscribe` WSS route to SpacetimeDB.
-3. Leave `/v1/identity` commented unless the compatibility spike proves it necessary.
-4. Confirm detailed readiness, publish, SQL, logs, delete, reducer call, admin, and unmatched `/v1/` routes return `404` externally.
-5. Run `nginx -t`, obtain explicit approval, reload only Nginx, and test TLS/WSS plus denial routes. Do not alter Cloudflare tunnels or firewall rules incidentally.
+1. Make a private timestamped backup of the existing Cloudflare tunnel config and record its checksum, mode, owner, and current service status. Never print the file because it may contain a tunnel credential path or token.
+2. Confirm `cloudflared tunnel ingress validate` succeeds before editing. Add exactly one hostname rule for `parrotapi.skylarenns.com` pointing to `http://127.0.0.1:39090`, immediately before the existing catch-all. Do not reorder, rewrite, or normalize the roughly fifty unrelated ingress entries.
+3. Validate again, inspect the exact diff, and prove every unrelated line is byte-for-byte unchanged. Reload only the existing Cloudflare tunnel unit; never restart Docker, host Nginx, firewall, the unrelated SpacetimeDB service, or another tunnel.
+4. Verify HTTPS and WSS through the public hostname. Confirm readiness, identity, publication, SQL, logs, delete, reducer call, admin, and unmatched routes return `404`; the exact gateway routes and `/v1/database/project-conversation-production/subscribe` are the only positive surface.
+5. On any failure, restore the exact backed-up tunnel config, validate it, reload only the same tunnel unit, and verify all pre-existing hostnames. Keep the failed candidate private until the root cause is understood.
 
 The restricted route shape follows the [official SpacetimeDB self-hosting guidance](https://spacetimedb.com/docs/how-to/deploy/self-hosting/), with a stricter default deny.
 
@@ -199,4 +231,4 @@ Health means only the configured process dependency check passed. It is not laun
 
 ## Staging separation
 
-Staging uses `project-conversation-staging`, ports `39100/39180`, and `/srv/project-conversation/staging`. It must have distinct OIDC identities, provider sandboxes, object prefixes/buckets, telemetry attributes, webhook endpoints, and secrets. Delivery to real email/push/webhooks stays suppressed. Preview clients must never receive production credentials.
+Staging uses `project-conversation-staging`, ports `39100/39180/39190`, `/srv/project-conversation/staging`, and `/mnt/bigboi/project-conversation/staging/backups`. It must have distinct OIDC identities, provider sandboxes, object prefixes/buckets, telemetry attributes, webhook endpoints, and secrets. Delivery to real email/push/webhooks stays suppressed. Preview clients must never receive production credentials.

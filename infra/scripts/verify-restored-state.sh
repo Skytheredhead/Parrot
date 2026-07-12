@@ -173,20 +173,27 @@ agent_scope
 agent_tool_policy
 trusted_tool
 agent_run
+agent_execution_progress
+agent_execution_checkpoint
+agent_provider_dispatch
 agent_run_event
 agent_context_manifest
 agent_tool_call
 approval_request
 effect_ledger
+worker_effect_ledger
 outbox_job
 search_document_snapshot
 file_record
 file_version
 file_upload
+file_deletion_claim
+file_orphan_discrepancy
+trusted_oidc_audience
 audit_log
 command_receipt
 TABLES
-[[ "$required_private_table_count" == 71 ]] || die "internal required private-table inventory drifted"
+[[ "$required_private_table_count" == 78 ]] || die "internal required private-table inventory drifted"
 
 domain_invariant_count=0
 while IFS='|' read -r child parent child_column parent_column; do
@@ -263,11 +270,15 @@ agent_scope|agent_installation|installation_id|id
 agent_tool_policy|agent_installation|installation_id|id
 agent_run|workspace|workspace_id|id
 agent_run|agent_installation|installation_id|id
+agent_execution_progress|agent_run|run_id|id
+agent_execution_checkpoint|agent_run|run_id|id
+agent_provider_dispatch|agent_run|run_id|id
 agent_run_event|agent_run|run_id|id
 agent_context_manifest|agent_run|run_id|id
 agent_tool_call|agent_run|run_id|id
 approval_request|agent_run|run_id|id
 effect_ledger|agent_tool_call|tool_call_id|id
+worker_effect_ledger|workspace|workspace_id|id
 outbox_job|workspace|workspace_id|id
 search_document_snapshot|workspace|workspace_id|id
 search_document_snapshot|space|space_id|id
@@ -277,9 +288,14 @@ file_version|file_record|file_id|id
 file_version|workspace|workspace_id|id
 file_upload|file_record|file_id|id
 file_upload|workspace|workspace_id|id
+file_deletion_claim|workspace|workspace_id|id
+file_deletion_claim|file_record|file_id|id
+file_deletion_claim|outbox_job|job_id|id
+file_orphan_discrepancy|workspace|workspace_id|id
+file_orphan_discrepancy|file_record|file_id|id
 audit_log|workspace|workspace_id|id
 INVARIANTS
-[[ "$domain_invariant_count" == 81 ]] || die "internal restored-state invariant inventory drifted"
+[[ "$domain_invariant_count" == 90 ]] || die "internal restored-state invariant inventory drifted"
 
 umask 077
 {

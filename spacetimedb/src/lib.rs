@@ -18,9 +18,10 @@ pub use model::*;
 mod reducer_contract_tests {
     use crate::policy::{
         PrivateDirectMessageOperation, PrivateDirectMessageTarget, PrivateReplayDisposition,
-        direct_message_replay_gate, direct_message_target_gate,
-        notification_coalesce_binding_valid, notification_delivery_allowed,
-        notification_preference_valid, presence_authorizes, presence_heartbeat_valid,
+        clean_object_identity_valid, direct_message_replay_gate, direct_message_target_gate,
+        file_deletion_reclaim_allowed, notification_coalesce_binding_valid,
+        notification_delivery_allowed, notification_preference_valid, oidc_audience_valid,
+        presence_authorizes, presence_heartbeat_valid, worker_effect_takeover_allowed,
     };
 
     fn assert_private_denial_equivalence(operation: PrivateDirectMessageOperation, expected: &str) {
@@ -81,6 +82,42 @@ mod reducer_contract_tests {
         assert!(presence_heartbeat_valid(60, "Desktop"));
         assert!(!presence_heartbeat_valid(301, "Desktop"));
         assert!(!presence_authorizes(true));
+    }
+
+    #[test]
+    fn worker_effect_takeover_is_exact_and_clean_objects_are_version_bound() {
+        assert!(worker_effect_takeover_allowed(true, false, false, false));
+        assert!(!worker_effect_takeover_allowed(false, false, true, true));
+        assert!(!worker_effect_takeover_allowed(false, true, false, false));
+        assert!(worker_effect_takeover_allowed(false, true, true, false));
+        assert!(worker_effect_takeover_allowed(false, true, false, true));
+
+        let checksum = "a".repeat(64);
+        assert!(clean_object_identity_valid("version-1", &checksum));
+        assert!(!clean_object_identity_valid("", &checksum));
+        assert!(!clean_object_identity_valid("version/1", &checksum));
+        assert!(!clean_object_identity_valid("version-1", &"A".repeat(64)));
+        assert!(!clean_object_identity_valid("version-1", "abc"));
+    }
+
+    #[test]
+    fn oidc_audience_companions_are_exact_bounded_values() {
+        assert!(oidc_audience_valid("client_01KNAKHWDENJZH10KDPEYAMZMN"));
+        assert!(oidc_audience_valid("https://parrot.skylarenns.com"));
+        assert!(!oidc_audience_valid(""));
+        assert!(!oidc_audience_valid(" client"));
+        assert!(!oidc_audience_valid("client one"));
+        assert!(!oidc_audience_valid("client,other"));
+        assert!(!oidc_audience_valid(&"a".repeat(256)));
+    }
+
+    #[test]
+    fn file_deletion_claim_replay_and_crash_takeover_are_generation_fenced() {
+        assert!(file_deletion_reclaim_allowed(false, false, true, false));
+        assert!(!file_deletion_reclaim_allowed(false, false, false, false));
+        assert!(file_deletion_reclaim_allowed(false, false, false, true));
+        assert!(file_deletion_reclaim_allowed(false, true, false, false));
+        assert!(!file_deletion_reclaim_allowed(true, false, true, true));
     }
 
     #[test]

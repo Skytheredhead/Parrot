@@ -105,7 +105,7 @@ const entries = (ports: WorkerProductionPorts): readonly AdapterEntry[] => [
       "commitFinalAndSucceed",
     ],
   ],
-  ["approvals", ports.approvals, ["consumeExact"]],
+  ["approvals", ports.approvals, ["prepareExact", "consumeExact"]],
   [
     "search",
     ports.search,
@@ -309,7 +309,6 @@ const graphIssues = (ports: WorkerProductionPorts): string[] => {
   if (registryBoundary !== ports.agentToolExecutionBoundary) {
     issues.push("tools:boundary_not_bound_to_graph");
   }
-  if (tools.length === 0) issues.push("tools:empty");
   for (const tool of tools) {
     const key = `${tool.name}@${tool.version}`;
     if (tool.adapterKind !== "durable") issues.push(`tools:not_durable:${key}`);

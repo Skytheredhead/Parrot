@@ -7,8 +7,17 @@ export interface OidcVerifierOptions {
   issuer: string;
   audience: string;
   allowedTokenTypes: readonly string[];
+  /** Explicit provider profile for issuers, such as WorkOS, that omit JOSE `typ`. */
+  allowMissingTokenType?: boolean;
+  /** Explicit WorkOS profile: accept the signed `client_id` claim when `aud` is absent. */
+  allowClientIdAudience?: boolean;
   maxTokenAgeSeconds: number;
   maxJwksBytes: number;
+}
+
+/** Exact-object provenance boundary for a verified bearer; the token is never an object property. */
+export interface VerifiedBearerProvenance {
+  bearerFor(identity: VerifiedIdentity): string | undefined;
 }
 
 async function boundedFetch(
@@ -48,11 +57,12 @@ async function boundedFetch(
   });
 }
 
-export class OidcJwtVerifier implements TokenVerifier {
+export class OidcJwtVerifier implements TokenVerifier, VerifiedBearerProvenance {
   readonly adapterKind = "durable" as const;
   readonly adapterName = "oidc-jwks";
   private readonly jwks;
   private readonly allowedTokenTypes: ReadonlySet<string>;
+  readonly #verifiedBearers = new WeakMap<VerifiedIdentity, string>();
 
   constructor(private readonly options: OidcVerifierOptions) {
     this.allowedTokenTypes = new Set(options.allowedTokenTypes.map((value) => value.toLowerCase()));
@@ -67,14 +77,31 @@ export class OidcJwtVerifier implements TokenVerifier {
     try {
       const { payload, protectedHeader } = await jwtVerify(token, this.jwks, {
         issuer: this.options.issuer,
-        audience: this.options.audience,
+        ...(this.options.allowClientIdAudience === true ? {} : { audience: this.options.audience }),
         algorithms: ["RS256", "ES256", "EdDSA"],
         clockTolerance: 5,
         maxTokenAge: this.options.maxTokenAgeSeconds,
         requiredClaims: ["sub", "iat", "exp"],
       });
+      if (this.options.allowClientIdAudience === true) {
+        const audiences =
+          typeof payload.aud === "string"
+            ? [payload.aud]
+            : Array.isArray(payload.aud) && payload.aud.every((value) => typeof value === "string")
+              ? payload.aud
+              : [];
+        if (
+          !audiences.includes(this.options.audience) &&
+          payload.client_id !== this.options.audience
+        ) {
+          throw unauthorized("The token audience is not accepted");
+        }
+      }
       const tokenType = protectedHeader.typ?.toLowerCase();
-      if (!tokenType || !this.allowedTokenTypes.has(tokenType))
+      if (
+        (tokenType === undefined && this.options.allowMissingTokenType !== true) ||
+        (tokenType !== undefined && !this.allowedTokenTypes.has(tokenType))
+      )
         throw unauthorized("The token profile is not accepted");
       if (
         !payload.sub ||
@@ -96,7 +123,7 @@ export class OidcJwtVerifier implements TokenVerifier {
       ) {
         throw unauthorized("The authentication-time claim is invalid");
       }
-      return {
+      const identity: VerifiedIdentity = Object.freeze({
         issuer: payload.iss,
         subject: payload.sub,
         issuedAt: payload.iat,
@@ -104,11 +131,17 @@ export class OidcJwtVerifier implements TokenVerifier {
         tokenType: "access",
         ...(typeof sid === "string" ? { sessionId: sid } : {}),
         ...(typeof authenticatedAt === "number" ? { authenticatedAt } : {}),
-      };
+      });
+      this.#verifiedBearers.set(identity, token);
+      return identity;
     } catch (error) {
       if (error instanceof Error && error.name === "GatewayError") throw error;
       throw unauthorized("The access token is invalid or expired");
     }
+  }
+
+  bearerFor(identity: VerifiedIdentity): string | undefined {
+    return this.#verifiedBearers.get(identity);
   }
 
   async ready(signal: AbortSignal): Promise<boolean> {

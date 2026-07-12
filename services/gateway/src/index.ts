@@ -1,5 +1,6 @@
 export * from "./agent-tools/secure-egress.js";
 export { buildGateway } from "./app.js";
+export type { VerifiedBearerProvenance } from "./auth/oidc.js";
 export { OidcJwtVerifier } from "./auth/oidc.js";
 export type { GatewayConfig } from "./config.js";
 export { loadConfig } from "./config.js";
@@ -9,6 +10,8 @@ export { FileCapabilityService } from "./files/service.js";
 export { InvitationService, normalizeInvitationEmail } from "./invitations/service.js";
 export type { InvitationHashKey } from "./invitations/token.js";
 export { HmacInvitationTokenHasher } from "./invitations/token.js";
+export { LocalCapabilityObjectStore } from "./production/local-object-store.js";
+export { SpacetimeGatewayAuthority } from "./production/spacetime-authority.js";
 export { HmacSearchCursorCodec } from "./search/cursor.js";
 export { PermissionSafeSearchService } from "./search/service.js";
 export { SessionAdministrationService } from "./sessions/service.js";

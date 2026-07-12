@@ -40,6 +40,16 @@ export interface SessionVerifier extends ReadyDependency {
 
 export interface PrincipalResolver extends ReadyDependency {
   resolve(identity: VerifiedIdentity): Promise<Principal>;
+  /**
+   * Rebinds module-private credential provenance from the exact resolver result to the checked,
+   * frozen principal that downstream authorization receives. Implementations must reject a
+   * `resolved` object they did not themselves attest during `resolve`.
+   */
+  bindCheckedPrincipal?(input: {
+    identity: VerifiedIdentity;
+    resolved: Principal;
+    checked: Principal;
+  }): void;
 }
 
 export interface CsrfVerifier extends ReadyDependency {
@@ -126,9 +136,21 @@ export interface StoredFile {
 }
 
 export interface FileMetadataStore extends ReadyDependency {
-  createPending(upload: PendingUpload): Promise<void>;
-  getPending(id: string): Promise<PendingUpload | null>;
+  /** Atomically reserves canonical authority-owned upload/file IDs and an object key. */
+  createPending(input: {
+    principal: Principal;
+    reservationId: string;
+    workspaceId: string;
+    spaceId: string;
+    displayName: string;
+    declaredContentType: string;
+    expectedBytes: number;
+    checksumSha256: string;
+    maximumExpiresAt: string;
+  }): Promise<PendingUpload>;
+  getPending(principal: Principal, id: string): Promise<PendingUpload | null>;
   markQuarantined(
+    principal: Principal,
     id: string,
     observed: {
       sizeBytes: number;
@@ -137,7 +159,7 @@ export interface FileMetadataStore extends ReadyDependency {
       checksumSha256: string;
     },
   ): Promise<void>;
-  getFile(id: string): Promise<StoredFile | null>;
+  getFile(principal: Principal, id: string): Promise<StoredFile | null>;
 }
 
 export interface UploadConstraints {
@@ -173,6 +195,54 @@ export interface ObjectStore extends ReadyDependency {
     contentType: string;
     ttlSeconds: number;
   }): Promise<{ url: string; expiresAt: string; objectVersion: string }>;
+}
+
+/**
+ * The authenticated, bounded data-plane paired with an ObjectStore signer.
+ * Implementations must treat capability tokens as bearer secrets and never log them.
+ */
+export interface ObjectCapabilityIngress extends ReadyDependency {
+  authorizeUpload(input: {
+    token: string;
+    method: string;
+    headers: Readonly<Record<string, string | readonly string[] | undefined>>;
+  }): Promise<ObjectCapabilityUploadGrant>;
+  consumeUpload(input: {
+    grant: ObjectCapabilityUploadGrant;
+    body: AsyncIterable<Uint8Array>;
+  }): Promise<{ objectVersion: string; checksumSha256: string; sizeBytes: number }>;
+  authorizeDownload(input: {
+    token: string;
+    method: string;
+  }): Promise<ObjectCapabilityDownloadGrant>;
+  openDownload(input: { grant: ObjectCapabilityDownloadGrant }): Promise<{
+    body: AsyncIterable<Uint8Array>;
+    sizeBytes: number;
+    checksumSha256: string;
+    contentType: string;
+    displayName: string;
+    objectVersion: string;
+  }>;
+}
+
+export interface ObjectCapabilityUploadGrant {
+  readonly capabilityId: string;
+  readonly objectKey: string;
+  readonly objectVersion: string;
+  readonly contentType: string;
+  readonly sizeBytes: number;
+  readonly checksumSha256: string;
+  readonly expiresAtEpochSeconds: number;
+}
+
+export interface ObjectCapabilityDownloadGrant {
+  readonly capabilityId: string;
+  readonly objectKey: string;
+  readonly objectVersion: string;
+  readonly contentType: string;
+  readonly checksumSha256: string;
+  readonly displayName: string;
+  readonly expiresAtEpochSeconds: number;
 }
 
 export interface SearchCandidate {
@@ -400,6 +470,7 @@ export interface GatewayDependencies {
   dbTokenBroker: DbTokenBroker;
   files: FileMetadataStore;
   objects: ObjectStore;
+  objectCapabilities?: ObjectCapabilityIngress;
   search: SearchAdapter;
   searchCursors: SearchCursorCodec;
   rateLimits: RateLimitClient;

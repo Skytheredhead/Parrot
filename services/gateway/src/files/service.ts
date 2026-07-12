@@ -3,7 +3,6 @@ import type {
   AuthorizationClient,
   FileMetadataStore,
   ObjectStore,
-  PendingUpload,
   Principal,
   UploadConstraints,
 } from "../contracts.js";
@@ -109,24 +108,40 @@ export class FileCapabilityService {
       Math.max(1, Math.ceil(input.sizeBytes / 10_000_000)),
     );
 
-    const id = randomUUID();
-    const objectKey = `quarantine/${id}`;
     const nowMs = this.now().getTime();
     const expiresAt = new Date(nowMs + this.config.uploadTtlSeconds * 1_000).toISOString();
-    const pending: PendingUpload = {
-      id,
-      objectKey,
+    const pending = await this.metadata.createPending({
+      principal,
+      reservationId: randomUUID(),
       workspaceId: input.workspaceId,
       spaceId: input.spaceId,
-      uploaderId: principal.id,
       displayName: input.displayName,
       declaredContentType: input.declaredContentType,
       expectedBytes: input.sizeBytes,
       checksumSha256: input.checksumSha256.toLowerCase(),
-      expiresAt,
-      lifecycle: "pending",
-    };
-    await this.metadata.createPending(pending);
+      maximumExpiresAt: expiresAt,
+    });
+    if (
+      !/^[A-Za-z0-9_-]{1,128}$/.test(pending.id) ||
+      !/^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127})(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){1,7}$/.test(
+        pending.objectKey,
+      ) ||
+      pending.workspaceId !== input.workspaceId ||
+      pending.spaceId !== input.spaceId ||
+      pending.uploaderId !== principal.id ||
+      pending.displayName !== input.displayName ||
+      pending.declaredContentType !== input.declaredContentType ||
+      pending.expectedBytes !== input.sizeBytes ||
+      pending.checksumSha256 !== input.checksumSha256.toLowerCase() ||
+      pending.lifecycle !== "pending"
+    ) {
+      throw unavailable("File authority returned an invalid upload reservation");
+    }
+    const authoritativeExpiresAt = validatedExpiry(pending.expiresAt, nowMs, Date.parse(expiresAt));
+    const capabilityTtlSeconds = Math.max(
+      1,
+      Math.floor((Date.parse(authoritativeExpiresAt) - nowMs) / 1_000),
+    );
     const constraints: UploadConstraints = {
       contentType: input.declaredContentType,
       sizeBytes: input.sizeBytes,
@@ -134,20 +149,20 @@ export class FileCapabilityService {
       singleWrite: true,
     };
     const capability = await this.objects.signQuarantineUpload({
-      objectKey,
+      objectKey: pending.objectKey,
       constraints,
-      ttlSeconds: this.config.uploadTtlSeconds,
+      ttlSeconds: Math.min(this.config.uploadTtlSeconds, capabilityTtlSeconds),
     });
     assertHttpsCapability(capability.url, this.config.capabilityOrigins);
-    validatedExpiry(capability.expiresAt, nowMs, Date.parse(expiresAt));
+    validatedExpiry(capability.expiresAt, nowMs, Date.parse(authoritativeExpiresAt));
     if (capability.method !== "PUT" || !sameConstraints(constraints, capability.constraints))
       throw unavailable("Capability signer did not bind all upload constraints");
     assertUploadHeaders(capability.requiredHeaders, constraints);
-    return { uploadId: id, lifecycle: "pending" as const, capability };
+    return { uploadId: pending.id, lifecycle: "pending" as const, capability };
   }
 
   async completeUpload(principal: Principal, uploadId: string) {
-    const pending = await this.metadata.getPending(uploadId);
+    const pending = await this.metadata.getPending(principal, uploadId);
     if (!pending || pending.uploaderId !== principal.id) throw notFound("Upload ticket not found");
     const allowed = await this.authorization.authorize({
       principal,
@@ -169,7 +184,7 @@ export class FileCapabilityService {
     ) {
       throw conflict("Uploaded object does not match the ticket");
     }
-    await this.metadata.markQuarantined(uploadId, {
+    await this.metadata.markQuarantined(principal, uploadId, {
       ...observed,
       checksumSha256: observed.checksumSha256.toLowerCase(),
     });
@@ -177,7 +192,7 @@ export class FileCapabilityService {
   }
 
   async createDownload(principal: Principal, fileId: string) {
-    const file = await this.metadata.getFile(fileId);
+    const file = await this.metadata.getFile(principal, fileId);
     if (!file || file.lifecycle === "deleted") throw notFound("File not found");
     const allowed = await this.authorization.authorize({
       principal,

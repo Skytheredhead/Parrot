@@ -20,6 +20,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts"
   },
+  "dependencies": {
+    "@project-conversation/db-bindings": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "24.10.4",
     "tsx": "4.20.6",

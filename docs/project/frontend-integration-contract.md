@@ -76,6 +76,14 @@ per visible space. Local mute and digest minutes use an IANA-style timezone iden
 digest authority applies a once-per-local-date cursor, while the worker performs daylight-saving
 conversion and reconciles ambiguous provider outcomes before any retry.
 
+Mentions, task assignments, and replies are `Direct` notification events. A thread contribution
+notifies the parent contribution author, or the root-post author for a top-level contribution; a
+direct-message reply notifies the parent-message author. The UI may play a short sound only after a
+user gesture has unlocked browser audio, only for a newly inserted unread Direct event that was not
+authored by the current user, and only when mute/preferences allow it. Persist a notification-ID
+watermark so reconnect/replay never repeats the sound. This is active-browser behavior, not Web Push
+and not a guarantee when the tab or browser is closed.
+
 Workspace owners configure explicit retention/grace inputs with `configure_workspace_lifecycle`.
 `request_workspace_deletion` immediately removes the workspace from human and service views and
 starts the configured grace window. Epoch-bound scheduler batches clear ephemeral notification

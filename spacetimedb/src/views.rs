@@ -12,6 +12,118 @@ pub struct VisibleUser {
     pub display_name: String,
 }
 
+#[derive(SpacetimeType)]
+pub struct GatewayPrincipalView {
+    pub identity: Identity,
+    pub authz_epoch: u64,
+    pub disabled: bool,
+}
+
+#[derive(SpacetimeType)]
+pub struct GatewayWorkspaceGrantView {
+    pub workspace_id: Uuid,
+    pub role: WorkspaceRole,
+    pub membership_epoch: u64,
+    pub user_authz_epoch: u64,
+    pub lifecycle_epoch: u64,
+    pub can_read: bool,
+    pub can_write: bool,
+    pub can_manage_members: bool,
+    pub can_manage_workspace: bool,
+    pub can_manage_agents: bool,
+    pub can_run_agents: bool,
+}
+
+#[derive(SpacetimeType)]
+pub struct GatewaySpaceGrantView {
+    pub workspace_id: Uuid,
+    pub space_id: Uuid,
+    pub membership_epoch: u64,
+    pub can_read: bool,
+    pub can_write: bool,
+    pub can_run_agents: bool,
+}
+
+#[derive(SpacetimeType)]
+pub struct GatewayFileDescriptorView {
+    pub file_id: Uuid,
+    pub workspace_id: Uuid,
+    pub space_id: Uuid,
+    pub owner_identity: Identity,
+    pub file_name: String,
+    pub object_key: String,
+    pub object_version: String,
+    pub checksum_sha256: String,
+    pub detected_type: String,
+    pub size_bytes: u64,
+    pub state: FileSecurityState,
+    pub revision: u64,
+}
+
+#[derive(SpacetimeType)]
+pub struct GatewayPendingUploadView {
+    pub upload_id: Uuid,
+    pub file_id: Uuid,
+    pub workspace_id: Uuid,
+    pub space_id: Uuid,
+    pub uploader_identity: Identity,
+    pub source_key: String,
+    pub file_name: String,
+    pub declared_type: String,
+    pub declared_size_bytes: u64,
+    pub checksum_sha256: String,
+    pub expires_at: Timestamp,
+    pub completed: bool,
+    pub file_state: FileSecurityState,
+    pub file_revision: u64,
+}
+
+#[derive(SpacetimeType)]
+pub struct FileDeletionClaimView {
+    pub claim_id: Uuid,
+    pub generation: u64,
+    pub workspace_id: Uuid,
+    pub file_id: Uuid,
+    pub file_revision: u64,
+    pub key: String,
+    pub object_version_tag: String,
+}
+
+#[derive(SpacetimeType)]
+pub struct FileProcessingOutcomeView {
+    pub job_id: Uuid,
+    pub workspace_id: Uuid,
+    pub file_id: Uuid,
+    pub file_revision: u64,
+    pub kind: String,
+    pub outcome: String,
+}
+
+#[derive(SpacetimeType)]
+pub struct AgentExecutionPlanView {
+    pub run_id: Uuid,
+    pub workspace_id: Uuid,
+    pub state: AgentRunState,
+    pub version: u64,
+    pub authorization_epoch: u64,
+    pub current_authorization_epoch: u64,
+    pub installation_enabled: bool,
+    pub cancel_requested: bool,
+    pub lease_generation: u64,
+    pub lease_owner: Option<Identity>,
+    pub lease_until: Option<Timestamp>,
+    pub execution_request_id: String,
+    pub max_context_bytes: u64,
+    pub max_output_tokens: u64,
+    pub max_tool_calls: u32,
+    pub max_cost_micros: u64,
+    pub max_output_bytes: u64,
+    pub max_tool_result_bytes: u64,
+    pub max_total_tool_result_bytes: u64,
+    pub max_provider_input_bytes: u64,
+    pub max_total_provider_input_bytes: u64,
+}
+
 impl From<User> for VisibleUser {
     fn from(row: User) -> Self {
         Self {
@@ -347,6 +459,21 @@ pub struct VisibleApproval {
 }
 
 #[derive(SpacetimeType)]
+pub struct AgentApprovalBindingView {
+    pub approval_id: Uuid,
+    pub nonce_hash: String,
+    pub run_id: Uuid,
+    pub call_id: String,
+    pub tool_name: String,
+    pub tool_version: String,
+    pub arguments_hash: String,
+    pub effect_class: ToolEffectClass,
+    pub effect_key: String,
+    pub expires_at: Timestamp,
+    pub state: ApprovalState,
+}
+
+#[derive(SpacetimeType)]
 pub struct VisibleFile {
     pub id: Uuid,
     pub workspace_id: Uuid,
@@ -548,6 +675,107 @@ pub fn current_user(ctx: &ViewContext) -> Option<VisibleUser> {
         .identity()
         .find(ctx.sender())
         .map(VisibleUser::from)
+}
+
+#[spacetimedb::view(accessor = current_gateway_principal, public)]
+pub fn current_gateway_principal(ctx: &ViewContext) -> Option<GatewayPrincipalView> {
+    let user = ctx.db.user().identity().find(ctx.sender())?;
+    Some(GatewayPrincipalView {
+        identity: user.identity,
+        authz_epoch: user.authz_epoch,
+        disabled: user.disabled,
+    })
+}
+
+#[spacetimedb::view(accessor = my_gateway_workspace_grants, public)]
+pub fn my_gateway_workspace_grants(ctx: &ViewContext) -> Vec<GatewayWorkspaceGrantView> {
+    let Some(user) = ctx.db.user().identity().find(ctx.sender()) else {
+        return vec![];
+    };
+    if user.disabled {
+        return vec![];
+    }
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| member.active && workspace_is_active(ctx, member.workspace_id))
+        .filter_map(|member| {
+            let lifecycle = ctx
+                .db
+                .workspace_lifecycle()
+                .workspace_id()
+                .find(member.workspace_id)?;
+            Some(GatewayWorkspaceGrantView {
+                workspace_id: member.workspace_id,
+                role: member.role,
+                membership_epoch: member.authz_epoch,
+                user_authz_epoch: user.authz_epoch,
+                lifecycle_epoch: lifecycle.lifecycle_epoch,
+                can_read: role_allows(member.role, Action::Read),
+                can_write: role_allows(member.role, Action::Write),
+                can_manage_members: role_allows(member.role, Action::ManageMembers),
+                can_manage_workspace: role_allows(member.role, Action::ManageWorkspace),
+                can_manage_agents: role_allows(member.role, Action::ManageAgents),
+                can_run_agents: role_allows(member.role, Action::RunAgent),
+            })
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_gateway_space_grants, public)]
+pub fn my_gateway_space_grants(ctx: &ViewContext) -> Vec<GatewaySpaceGrantView> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| member.active && workspace_is_active(ctx, member.workspace_id))
+        .flat_map(|member| {
+            ctx.db
+                .space()
+                .workspace_id()
+                .filter(member.workspace_id)
+                .filter(|space| can_read_space(ctx, space, ctx.sender()))
+                .map(move |space| GatewaySpaceGrantView {
+                    workspace_id: member.workspace_id,
+                    space_id: space.id,
+                    membership_epoch: member.authz_epoch,
+                    can_read: true,
+                    can_write: role_allows(member.role, Action::Write),
+                    can_run_agents: role_allows(member.role, Action::RunAgent),
+                })
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_gateway_file_descriptors, public)]
+pub fn my_gateway_file_descriptors(ctx: &ViewContext) -> Vec<GatewayFileDescriptorView> {
+    accessible_spaces(ctx)
+        .into_iter()
+        .flat_map(|space| ctx.db.file_record().space_id().filter(space.id))
+        .filter(|file| {
+            matches!(
+                file.state,
+                FileSecurityState::Clean | FileSecurityState::Extracted
+            ) && !file.clean_key.is_empty()
+                && !file.clean_object_version.is_empty()
+                && !file.clean_checksum_sha256.is_empty()
+        })
+        .map(|file| GatewayFileDescriptorView {
+            file_id: file.id,
+            workspace_id: file.workspace_id,
+            space_id: file.space_id,
+            owner_identity: file.owner_identity,
+            file_name: file.file_name,
+            object_key: file.clean_key,
+            object_version: file.clean_object_version,
+            checksum_sha256: file.clean_checksum_sha256,
+            detected_type: file.detected_type,
+            size_bytes: file.declared_size_bytes,
+            state: file.state,
+            revision: file.revision,
+        })
+        .collect()
 }
 
 #[spacetimedb::view(accessor = my_workspace_memberships, public)]
@@ -1037,6 +1265,38 @@ pub fn my_file_uploads(ctx: &ViewContext) -> Vec<FileUpload> {
         .collect()
 }
 
+#[spacetimedb::view(accessor = my_gateway_pending_uploads, public)]
+pub fn my_gateway_pending_uploads(ctx: &ViewContext) -> Vec<GatewayPendingUploadView> {
+    ctx.db
+        .file_upload()
+        .owner_identity()
+        .filter(ctx.sender())
+        .filter(|upload| can_read_workspace(ctx, upload.workspace_id, ctx.sender()))
+        .filter_map(|upload| {
+            let file = ctx.db.file_record().id().find(upload.file_id)?;
+            if file.workspace_id != upload.workspace_id || file.owner_identity != ctx.sender() {
+                return None;
+            }
+            Some(GatewayPendingUploadView {
+                upload_id: upload.id,
+                file_id: upload.file_id,
+                workspace_id: upload.workspace_id,
+                space_id: file.space_id,
+                uploader_identity: upload.owner_identity,
+                source_key: upload.source_key,
+                file_name: file.file_name,
+                declared_type: file.declared_type,
+                declared_size_bytes: file.declared_size_bytes,
+                checksum_sha256: file.checksum,
+                expires_at: upload.expires_at,
+                completed: upload.completed,
+                file_state: file.state,
+                file_revision: file.revision,
+            })
+        })
+        .collect()
+}
+
 #[spacetimedb::view(accessor = my_notifications, public)]
 pub fn my_notifications(ctx: &ViewContext) -> Vec<Notification> {
     ctx.db
@@ -1272,6 +1532,151 @@ pub fn agent_work_queue(ctx: &ViewContext) -> Vec<AgentRun> {
                     | AgentRunState::Expired
                     | AgentRunState::Revoked
             )
+        })
+        .collect()
+}
+
+fn agent_service_enabled(ctx: &ViewContext) -> bool {
+    ctx.db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_run_agents)
+}
+
+fn service_can_read_effect(ctx: &ViewContext, effect: &WorkerEffectLedger) -> bool {
+    let capable = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| {
+            service.enabled
+                && ((effect.authority_kind == "agent.run" && service.can_run_agents)
+                    || (effect.authority_kind != "agent.run" && service.can_process_outbox))
+        });
+    capable
+        && ctx
+            .db
+            .service_grant()
+            .service_identity()
+            .filter(ctx.sender())
+            .any(|grant| {
+                grant.enabled
+                    && grant.workspace_id == effect.workspace_id
+                    && grant.kind == effect.authority_kind
+            })
+}
+
+#[spacetimedb::view(accessor = service_agent_execution_plans, public)]
+pub fn service_agent_execution_plans(ctx: &ViewContext) -> Vec<AgentExecutionPlanView> {
+    if !agent_service_enabled(ctx) {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| grant.enabled && grant.kind == "agent.run")
+        .flat_map(|grant| ctx.db.agent_run().workspace_id().filter(grant.workspace_id))
+        .filter_map(|run| {
+            let installation = ctx.db.agent_installation().id().find(run.installation_id)?;
+            let membership = find_membership(ctx, run.workspace_id, run.initiated_by)?;
+            Some(AgentExecutionPlanView {
+                run_id: run.id,
+                workspace_id: run.workspace_id,
+                state: run.state,
+                version: run.version,
+                authorization_epoch: run.membership_epoch,
+                current_authorization_epoch: membership.authz_epoch,
+                installation_enabled: installation.enabled
+                    && installation.authz_epoch == run.installation_epoch,
+                cancel_requested: run.cancel_requested,
+                lease_generation: run.lease_generation,
+                lease_owner: run.lease_owner,
+                lease_until: run.lease_until,
+                execution_request_id: run.execution_request_id,
+                max_context_bytes: 1_048_576,
+                max_output_tokens: installation.max_run_tokens,
+                max_tool_calls: 32,
+                max_cost_micros: installation.max_run_cost_micros,
+                max_output_bytes: 1_048_576,
+                max_tool_result_bytes: 262_144,
+                max_total_tool_result_bytes: 1_048_576,
+                max_provider_input_bytes: 2_097_152,
+                max_total_provider_input_bytes: 8_388_608,
+            })
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = service_agent_run_progress, public)]
+pub fn service_agent_run_progress(ctx: &ViewContext) -> Vec<AgentExecutionProgress> {
+    if !agent_service_enabled(ctx) {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| grant.enabled && grant.kind == "agent.run")
+        .flat_map(|grant| ctx.db.agent_run().workspace_id().filter(grant.workspace_id))
+        .filter_map(|run| ctx.db.agent_execution_progress().run_id().find(run.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = service_agent_provider_dispatches, public)]
+pub fn service_agent_provider_dispatches(ctx: &ViewContext) -> Vec<AgentProviderDispatch> {
+    if !agent_service_enabled(ctx) {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| grant.enabled && grant.kind == "agent.run")
+        .flat_map(|grant| ctx.db.agent_run().workspace_id().filter(grant.workspace_id))
+        .flat_map(|run| ctx.db.agent_provider_dispatch().run_id().filter(run.id))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = service_worker_effects, public)]
+pub fn service_worker_effects(ctx: &ViewContext) -> Vec<WorkerEffectLedger> {
+    ctx.db
+        .worker_effect_ledger()
+        .owner_identity()
+        .filter(ctx.sender())
+        .filter(|effect| service_can_read_effect(ctx, effect))
+        .collect()
+}
+
+#[spacetimedb::view(accessor = service_agent_approval_bindings, public)]
+pub fn service_agent_approval_bindings(ctx: &ViewContext) -> Vec<AgentApprovalBindingView> {
+    if !agent_service_enabled(ctx) {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| grant.enabled && grant.kind == "agent.run")
+        .flat_map(|grant| ctx.db.agent_run().workspace_id().filter(grant.workspace_id))
+        .flat_map(|run| ctx.db.approval_request().run_id().filter(run.id))
+        .filter_map(|approval| {
+            let tool = ctx.db.agent_tool_call().id().find(approval.tool_call_id)?;
+            Some(AgentApprovalBindingView {
+                approval_id: approval.id,
+                nonce_hash: approval.nonce_hash,
+                run_id: approval.run_id,
+                call_id: tool.provider_call_id,
+                tool_name: tool.tool_name,
+                tool_version: tool.tool_version,
+                arguments_hash: approval.normalized_args_hash,
+                effect_class: approval.effect_class,
+                effect_key: tool.effect_key,
+                expires_at: approval.expires_at,
+                state: approval.state,
+            })
         })
         .collect()
 }
@@ -1961,7 +2366,17 @@ pub fn file_processing_plans(ctx: &ViewContext) -> Vec<FileProcessingPlanView> {
                     } else {
                         file.clean_key.clone()
                     },
-                    clean_destination_key: format!("clean/{}/{}/1", file.workspace_id, file.id),
+                    source_object_version: if file.clean_key.is_empty() {
+                        file.source_object_version.clone()
+                    } else {
+                        file.clean_object_version.clone()
+                    },
+                    source_checksum_sha256: if file.clean_key.is_empty() {
+                        file.source_checksum_sha256.clone()
+                    } else {
+                        file.clean_checksum_sha256.clone()
+                    },
+                    clean_destination_key: format!("{}clean/1", file.cleanup_prefix),
                     cleanup_prefix: file.cleanup_prefix,
                     max_bytes: file.declared_size_bytes,
                     max_extracted_characters: 100_000,
@@ -1974,6 +2389,122 @@ pub fn file_processing_plans(ctx: &ViewContext) -> Vec<FileProcessingPlanView> {
                     state: file.state,
                     lease_generation: job.lease_generation,
                 })
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = service_file_deletion_claims, public)]
+pub fn service_file_deletion_claims(ctx: &ViewContext) -> Vec<FileDeletionClaimView> {
+    let enabled = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_process_outbox);
+    if !enabled {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| grant.enabled && grant.kind == "file.cleanup")
+        .flat_map(|grant| {
+            ctx.db
+                .file_deletion_claim()
+                .workspace_id()
+                .filter(grant.workspace_id)
+        })
+        .filter(|claim| {
+            claim.service_identity == ctx.sender() && claim.state == FileDeletionClaimState::Claimed
+        })
+        .map(|claim| FileDeletionClaimView {
+            claim_id: claim.claim_id,
+            generation: claim.generation,
+            workspace_id: claim.workspace_id,
+            file_id: claim.file_id,
+            file_revision: claim.file_revision,
+            key: claim.key,
+            object_version_tag: claim.object_version_tag,
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = service_file_processing_outcomes, public)]
+pub fn service_file_processing_outcomes(ctx: &ViewContext) -> Vec<FileProcessingOutcomeView> {
+    let enabled = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_process_outbox);
+    if !enabled {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| {
+            grant.enabled
+                && matches!(
+                    grant.kind.as_str(),
+                    "file.scan" | "file.extract" | "file.cleanup"
+                )
+        })
+        .flat_map(|grant| {
+            ctx.db
+                .outbox_job()
+                .workspace_id()
+                .filter(grant.workspace_id)
+                .filter(move |job| job.kind == grant.kind)
+        })
+        .filter_map(|job| {
+            let file = ctx.db.file_record().id().find(job.resource_id)?;
+            if file.workspace_id != job.workspace_id {
+                return None;
+            }
+            let unresolved_cleanup = job.kind == "file.cleanup"
+                && (ctx
+                    .db
+                    .file_deletion_claim()
+                    .file_id()
+                    .filter(file.id)
+                    .any(|claim| claim.state == FileDeletionClaimState::Claimed)
+                    || ctx
+                        .db
+                        .file_orphan_discrepancy()
+                        .file_id()
+                        .filter(file.id)
+                        .any(|row| !row.resolved));
+            let outcome = match job.kind.as_str() {
+                "file.scan"
+                    if matches!(
+                        file.state,
+                        FileSecurityState::Clean | FileSecurityState::Extracted
+                    ) =>
+                {
+                    "succeeded"
+                }
+                "file.extract" if file.state == FileSecurityState::Extracted => "succeeded",
+                "file.cleanup"
+                    if file.state == FileSecurityState::Deleted && !unresolved_cleanup =>
+                {
+                    "succeeded"
+                }
+                _ if file.state == FileSecurityState::Deleted && job.kind != "file.cleanup" => {
+                    "not_found"
+                }
+                _ => "unknown",
+            };
+            Some(FileProcessingOutcomeView {
+                job_id: job.id,
+                workspace_id: file.workspace_id,
+                file_id: file.id,
+                file_revision: file.revision,
+                kind: job.kind,
+                outcome: outcome.into(),
+            })
         })
         .collect()
 }

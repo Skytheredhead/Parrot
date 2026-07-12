@@ -32,6 +32,7 @@ export default __t.row({
   leaseOwner: __t.option(__t.identity()).name("lease_owner"),
   leaseUntil: __t.option(__t.timestamp()).name("lease_until"),
   leaseGeneration: __t.u64().name("lease_generation"),
+  executionRequestId: __t.string().name("execution_request_id"),
   expiresAt: __t.timestamp().name("expires_at"),
   nextEventSequence: __t.u64().name("next_event_sequence"),
   promptSummary: __t.string().name("prompt_summary"),

@@ -494,6 +494,12 @@ export class InMemoryTransactionalOutbox implements OutboxStore {
 export interface EffectAcquireInput extends EffectClaim {
   readonly payloadFingerprint: string;
   readonly leaseExpiresAt: number;
+  /** Exact durable authority fence. Production ledgers must reject an absent or mismatched binding. */
+  readonly authority?: {
+    readonly workspaceId: string;
+    readonly runId?: string;
+    readonly authorityJobId?: string;
+  };
   /**
    * Allows takeover after expiry or immediately when the same durable owner presents a strictly
    * newer authoritative generation. The latter fences a still-running pre-recovery process.
@@ -1089,6 +1095,14 @@ export class OutboxConsumer {
     }
 
     const handler = this.handlers.get(job.kind);
+    const authorityRunId =
+      job.kind === "agent.run" &&
+      typeof job.payload === "object" &&
+      job.payload !== null &&
+      !Array.isArray(job.payload) &&
+      typeof (job.payload as Readonly<Record<string, JsonValue>>).runId === "string"
+        ? ((job.payload as Readonly<Record<string, JsonValue>>).runId as string)
+        : undefined;
     let acquisition: EffectAcquireResult;
     try {
       acquisition = await this.ledger.acquire({
@@ -1098,6 +1112,11 @@ export class OutboxConsumer {
         ownerId: job.id,
         ownerGeneration: controller.lease().generation,
         leaseExpiresAt: controller.lease().expiresAt,
+        authority: {
+          workspaceId: job.workspaceId,
+          authorityJobId: job.id,
+          ...(authorityRunId === undefined ? {} : { runId: authorityRunId }),
+        },
         allowTakeover: true,
       });
     } catch (error) {

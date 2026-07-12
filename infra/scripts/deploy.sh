@@ -2,19 +2,23 @@
 set -Eeuo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/common.sh"
 
-env_file=""; apply=false; confirmation=""; with_gateway=false; with_telemetry=false
+env_file=""; apply=false; confirmation=""; with_gateway=false; with_edge=false
+with_worker=false; with_scanner=false; with_telemetry=false
 reconcile_gateway=false; accept_current_gateway_config=false
 while (($#)); do
   case "$1" in
     --env-file) [[ $# -ge 2 ]] || die "--env-file requires a path"; env_file="$2"; shift 2 ;;
     --with-gateway) with_gateway=true; shift ;;
+    --with-edge) with_edge=true; with_gateway=true; shift ;;
+    --with-worker) with_worker=true; shift ;;
+    --with-scanner) with_scanner=true; shift ;;
     --with-telemetry) with_telemetry=true; shift ;;
     --reconcile-gateway) reconcile_gateway=true; with_gateway=true; shift ;;
     --accept-current-gateway-config) accept_current_gateway_config=true; shift ;;
     --apply) apply=true; shift ;;
     --confirm) [[ $# -ge 2 ]] || die "--confirm requires a value"; confirmation="$2"; shift 2 ;;
     -h|--help)
-      printf 'Usage: %s --env-file PATH [--with-gateway] [--with-telemetry] [--reconcile-gateway --accept-current-gateway-config] [--apply --confirm PROJECT]\n' "$0"
+      printf 'Usage: %s --env-file PATH [--with-gateway] [--with-edge] [--with-worker] [--with-scanner] [--with-telemetry] [--reconcile-gateway --accept-current-gateway-config] [--apply --confirm PROJECT]\n' "$0"
       exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -24,6 +28,14 @@ load_env_file "$env_file" true
 require_base_identity
 profiles=(); services=(spacetimedb)
 $with_gateway && profiles+=(gateway) && services+=(gateway)
+$with_edge && profiles+=(edge) && services+=(edge)
+if $with_worker; then
+  profiles+=(worker)
+  services+=(clamav worker ollama-loopback)
+elif $with_scanner; then
+  profiles+=(scanner)
+  services+=(clamav)
+fi
 $with_telemetry && profiles+=(telemetry) && services+=(otel-collector)
 
 if [[ "$reconcile_gateway" == true ]]; then
@@ -31,7 +43,7 @@ if [[ "$reconcile_gateway" == true ]]; then
 else
   note "Plan: deploy only ${services[*]} in Compose project $COMPOSE_PROJECT_NAME."
 fi
-note "No worker, module publication, Nginx, tunnel, firewall, DNS, or unrelated service is in scope."
+note "No module publication, host Nginx, Cloudflare tunnel, firewall, DNS, or unrelated service is in scope."
 require_apply_confirmation "$apply" "$confirmation" || exit 0
 acquire_operations_lock
 
@@ -159,6 +171,9 @@ if [[ "$pin_was_present" != true ]]; then
   record_reviewed_spacetimedb_image_pin "$SPACETIMEDB_IMAGE" initial-deploy "initial-$(date -u +%Y%m%dT%H%M%SZ)"
 fi
 $with_gateway && wait_healthy gateway
+$with_edge && wait_healthy edge
+$with_worker && wait_healthy worker
+$with_scanner && wait_healthy clamav
 $with_telemetry && wait_healthy otel-collector
 if [[ "$with_gateway" == true ]]; then write_gateway_state committed; fi
 note "Requested services are healthy on loopback. Public release readiness is not implied."

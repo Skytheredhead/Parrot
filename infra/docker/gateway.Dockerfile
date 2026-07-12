@@ -5,6 +5,7 @@ WORKDIR /workspace
 RUN corepack enable && corepack prepare pnpm@10.10.0 --activate
 COPY . .
 RUN pnpm install --frozen-lockfile \
+    && pnpm --filter @project-conversation/db-bindings build \
     && pnpm --filter @project-conversation/gateway build \
     && pnpm --filter @project-conversation/gateway deploy --prod --legacy /out
 
@@ -12,7 +13,8 @@ FROM ${NODE_IMAGE} AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 RUN groupadd --system --gid 10001 app \
-    && useradd --system --uid 10001 --gid app --home-dir /nonexistent --shell /usr/sbin/nologin app
+    && useradd --system --uid 10001 --gid app --home-dir /nonexistent --shell /usr/sbin/nologin app \
+    && install -d -o 10001 -g 10001 -m 0700 /var/lib/parrot/gateway
 COPY --from=build --chown=10001:10001 /out/ /app/
 COPY --chown=10001:10001 infra/docker/gateway-entrypoint.mjs /usr/local/libexec/gateway-entrypoint.mjs
 COPY --chown=10001:10001 infra/healthchecks/gateway-readiness.mjs /usr/local/libexec/gateway-readiness.mjs

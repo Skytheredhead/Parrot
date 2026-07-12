@@ -67,7 +67,12 @@ export interface SpacetimeWorkspaceExportCleanupPlan {
 }
 
 const identifier = (value: unknown, field: string): string => {
-  const normalized = String(value ?? "");
+  const toHexString =
+    typeof value === "object" && value !== null
+      ? (value as { readonly toHexString?: unknown }).toHexString
+      : undefined;
+  const normalized =
+    typeof toHexString === "function" ? String(toHexString.call(value)) : String(value ?? "");
   if (!/^[A-Za-z0-9._:-]{1,256}$/.test(normalized)) throw new Error(`invalid_${field}`);
   return normalized;
 };

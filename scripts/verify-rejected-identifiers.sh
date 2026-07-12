@@ -18,8 +18,8 @@ if rg -n -I --hidden \
   --glob '!target/**' \
   --glob '!node_modules/**' \
   --glob '!dist/**' \
-  '(?i)(@slic/|\bslic[-_]|\bslick\b|\bparrot\b)' \
+  '(?i)(@slic/|\bslic[-_]|\bslick\b)' \
   "${existing[@]}"; then
-  echo "Rejected product identifiers found. Use project-conversation until a name is approved." >&2
+  echo "Rejected legacy product identifiers found. Use Parrot publicly or project-conversation internally." >&2
   exit 1
 fi

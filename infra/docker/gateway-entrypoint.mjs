@@ -2,9 +2,10 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-for (const [name, file] of Object.entries(process.env)) {
-  if (!name.endsWith("_FILE") || !file) continue;
-  const target = name.slice(0, -5);
+const valueSecretFiles = new Map([["READINESS_TOKEN_FILE", "READINESS_TOKEN"]]);
+for (const [name, target] of valueSecretFiles) {
+  const file = process.env[name];
+  if (!file) continue;
   if (process.env[target]) throw new Error(`${target} and ${name} cannot both be set`);
   const value = (await readFile(file, "utf8")).trimEnd();
   if (!value) throw new Error(`${name} points to an empty secret`);

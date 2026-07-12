@@ -190,6 +190,8 @@ export interface AgentRunRepository extends RuntimeAdapter {
   claimExecution(input: {
     readonly runId: string;
     readonly workspaceId: string;
+    /** Exact authority outbox row; distinct from the derived provider/effect request identity. */
+    readonly authorityJobId: string;
     readonly requestId: string;
     readonly leaseMs: number;
   }): Promise<
@@ -244,6 +246,13 @@ export interface ApprovalRecord {
 }
 
 export interface ApprovalStore extends RuntimeAdapter {
+  prepareExact(
+    expected: Omit<ApprovalRecord, "expiresAt" | "approved" | "used">,
+    effectKey: string,
+    leaseGeneration: number,
+    requiresApproval: boolean,
+    now: number,
+  ): Promise<"not_required" | "pending" | "approved" | "invalid">;
   consumeExact(
     expected: Omit<ApprovalRecord, "expiresAt" | "approved" | "used">,
     effectKey: string,
@@ -412,6 +421,31 @@ export class InMemoryApprovalStore implements ApprovalStore {
     this.approvals.set(record.nonce, structuredClone(record));
   }
 
+  async prepareExact(
+    expected: Omit<ApprovalRecord, "expiresAt" | "approved" | "used">,
+    effectKey: string,
+    _leaseGeneration: number,
+    requiresApproval: boolean,
+    now: number,
+  ): Promise<"not_required" | "pending" | "approved" | "invalid"> {
+    if (!requiresApproval) return "not_required";
+    const existing = this.approvals.get(expected.nonce);
+    if (!existing) {
+      this.add({ ...expected, expiresAt: now + 300_000, approved: false, used: false });
+      return "pending";
+    }
+    const exact =
+      existing.runId === expected.runId &&
+      existing.callId === expected.callId &&
+      existing.toolName === expected.toolName &&
+      existing.toolVersion === expected.toolVersion &&
+      existing.argumentsHash === expected.argumentsHash &&
+      existing.effectClass === expected.effectClass &&
+      (!existing.used || this.consumedByEffect.get(existing.nonce) === effectKey);
+    if (!exact || existing.expiresAt <= now) return "invalid";
+    return existing.approved ? "approved" : "pending";
+  }
+
   async consumeExact(
     expected: Omit<ApprovalRecord, "expiresAt" | "approved" | "used">,
     effectKey: string,
@@ -474,6 +508,13 @@ class UnknownToolOutcomeError extends AgentError {
   constructor() {
     super("tool_effect_outcome_unknown");
     this.name = "UnknownToolOutcomeError";
+  }
+}
+
+class ToolApprovalPendingError extends AgentError {
+  constructor() {
+    super("tool_approval_pending");
+    this.name = "ToolApprovalPendingError";
   }
 }
 
@@ -564,7 +605,14 @@ export class AgentRunLoop {
       async (span) => {
         try {
           await this.assertCurrent(initial, leaseGeneration);
-          await this.repository.transition(runId, leaseGeneration, "authorizing", "worker_claimed");
+          if (initial.state !== "awaiting_approval" && initial.state !== "executing_tool") {
+            await this.repository.transition(
+              runId,
+              leaseGeneration,
+              "authorizing",
+              "worker_claimed",
+            );
+          }
           await this.assertCurrent(initial, leaseGeneration);
           const recoveredDispatch = await this.repository.providerDispatch(
             runId,
@@ -703,6 +751,16 @@ export class AgentRunLoop {
             );
           }
         } catch (error) {
+          if (error instanceof ToolApprovalPendingError) {
+            this.logger.log("info", "agent.run.awaiting_approval", {
+              traceId: span.traceId,
+              spanId: span.spanId,
+              workspaceId: initial.workspaceId,
+              runId,
+              outcome: "awaiting_approval",
+            });
+            return;
+          }
           await this.cancelProvider(runId);
           if (error instanceof StaleRunLeaseError) {
             this.logger.log("warn", "agent.run.lease_lost", {
@@ -895,28 +953,45 @@ export class AgentRunLoop {
     if (existing?.state === "succeeded") return existing.result ?? null;
     if (existing?.state === "failed_permanent") throw new AgentError("tool_failed_permanent");
 
+    if (tool.approvalPolicy === "required" && !step.approvalNonce) {
+      throw new AgentError("approval_missing");
+    }
+    const approvalBinding = {
+      nonce: step.approvalNonce ?? `not-required:${effectKey}`,
+      runId: initial.runId,
+      callId: step.callId,
+      toolName: tool.name,
+      toolVersion: tool.version,
+      argumentsHash: hash,
+      effectClass: tool.effectClass,
+    };
+    const preparation = await this.approvals.prepareExact(
+      approvalBinding,
+      effectKey,
+      leaseGeneration,
+      tool.approvalPolicy === "required",
+      this.clock.now(),
+    );
     if (tool.approvalPolicy === "required") {
-      await this.repository.transition(
-        initial.runId,
-        leaseGeneration,
-        "awaiting_approval",
-        "approval_required",
-      );
-      if (!step.approvalNonce) throw new AgentError("approval_missing");
+      if (preparation === "pending") {
+        await this.repository.transition(
+          initial.runId,
+          leaseGeneration,
+          "awaiting_approval",
+          "approval_required",
+        );
+        throw new ToolApprovalPendingError();
+      }
+      if (preparation === "invalid") throw new AgentError("approval_binding_invalid");
+      if (preparation !== "approved") throw new AgentError("approval_binding_invalid");
       const approved = await this.approvals.consumeExact(
-        {
-          nonce: step.approvalNonce,
-          runId: initial.runId,
-          callId: step.callId,
-          toolName: tool.name,
-          toolVersion: tool.version,
-          argumentsHash: hash,
-          effectClass: tool.effectClass,
-        },
+        approvalBinding,
         effectKey,
         this.clock.now(),
       );
       if (!approved) throw new AgentError("approval_invalid_or_expired");
+    } else if (preparation !== "not_required") {
+      throw new AgentError("approval_binding_invalid");
     }
     await this.assertCurrent(initial, leaseGeneration);
     const allowed = await this.authorization.canPerform({
@@ -942,6 +1017,7 @@ export class AgentRunLoop {
       leaseExpiresAt:
         this.clock.now() +
         this.effectLeaseMs(this.options.toolTimeoutMs ?? this.options.providerTimeoutMs),
+      authority: { workspaceId: initial.workspaceId, runId: initial.runId },
       allowTakeover: true,
     });
     if (!acquisition.acquired) {
@@ -1100,6 +1176,7 @@ export class AgentRunLoop {
       ownerId: requestId,
       ownerGeneration: leaseGeneration,
       leaseExpiresAt: this.clock.now() + this.effectLeaseMs(this.options.providerTimeoutMs),
+      authority: { workspaceId: initial.workspaceId, runId: initial.runId },
       allowTakeover: true,
     });
     if (!acquisition.acquired) {
@@ -1488,7 +1565,7 @@ export class AgentRunLoop {
       leaseGeneration,
       targetExpiry,
     );
-    if (renewedExpiry !== targetExpiry) throw new StaleRunLeaseError();
+    if (renewedExpiry < targetExpiry) throw new StaleRunLeaseError();
   }
 
   private runLeaseMs(): number {
@@ -1547,6 +1624,7 @@ export class AgentRunJobHandler implements JobHandler {
     const claim = await this.repository.claimExecution({
       runId,
       workspaceId: job.workspaceId,
+      authorityJobId: job.id,
       requestId: effectKey,
       leaseMs: this.loop.executionLeaseMs(),
     });
@@ -1634,6 +1712,7 @@ export class InMemoryAgentRunRepository implements AgentRunRepository {
   async claimExecution(input: {
     readonly runId: string;
     readonly workspaceId: string;
+    readonly authorityJobId: string;
     readonly requestId: string;
     readonly leaseMs: number;
   }): Promise<
@@ -1644,6 +1723,7 @@ export class InMemoryAgentRunRepository implements AgentRunRepository {
     const run = this.mustGet(input.runId);
     if (
       run.workspaceId !== input.workspaceId ||
+      !/^[A-Za-z0-9._:-]{1,256}$/.test(input.authorityJobId) ||
       !/^effect:[a-f0-9]{64}$/.test(input.requestId) ||
       !Number.isSafeInteger(input.leaseMs) ||
       input.leaseMs < 1_000 ||

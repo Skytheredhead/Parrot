@@ -46,7 +46,7 @@ services:
       com.project-conversation.role: spacetimedb
 
   gateway:
-    profiles: [gateway]
+    profiles: [gateway, edge]
     image: ${GATEWAY_IMAGE:?set GATEWAY_IMAGE to an immutable digest or the documented placeholder}
     restart: unless-stopped
     stop_grace_period: 30s
@@ -66,16 +66,31 @@ services:
       OIDC_ISSUER: ${OIDC_ISSUER:?set OIDC_ISSUER}
       OIDC_AUDIENCE: ${OIDC_AUDIENCE:?set OIDC_AUDIENCE}
       OIDC_JWKS_URI: ${OIDC_JWKS_URI:?set OIDC_JWKS_URI}
+      OIDC_ALLOW_MISSING_TYP: ${OIDC_ALLOW_MISSING_TYP:-false}
+      OIDC_ALLOW_CLIENT_ID_AUDIENCE: ${OIDC_ALLOW_CLIENT_ID_AUDIENCE:-false}
       DB_TOKEN_AUDIENCE: ${DB_TOKEN_AUDIENCE:?set DB_TOKEN_AUDIENCE}
       AGENT_STREAM_ORIGINS: ${AGENT_STREAM_ORIGINS:?set AGENT_STREAM_ORIGINS}
       FILE_CAPABILITY_ORIGINS: ${FILE_CAPABILITY_ORIGINS:?set FILE_CAPABILITY_ORIGINS}
+      FILE_CAPABILITY_PUBLIC_ORIGIN: ${FILE_CAPABILITY_PUBLIC_ORIGIN:?set FILE_CAPABILITY_PUBLIC_ORIGIN}
+      FILE_CAPABILITY_HMAC_SECRET_FILE: /run/secrets/parrot_object_capability_hmac
       GATEWAY_ADAPTER_MODULE: ${GATEWAY_ADAPTER_MODULE:?set GATEWAY_ADAPTER_MODULE}
+      SPACETIMEDB_URI: ${GATEWAY_SPACETIMEDB_URI:-ws://spacetimedb:3000}
+      SPACETIMEDB_DATABASE_NAME: ${SPACETIMEDB_DATABASE_NAME:?set SPACETIMEDB_DATABASE_NAME}
+      GATEWAY_SQLITE_PATH: /var/lib/parrot/gateway/gateway.sqlite
+      LOCAL_OBJECT_ROOT: /var/lib/parrot/gateway
       READINESS_TOKEN_FILE: /run/secrets/gateway_readiness_token
       OTEL_ENABLED: ${GATEWAY_OTEL_ENABLED:-false}
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${GATEWAY_OTEL_TRACES_ENDPOINT:-http://otel-collector:4318/v1/traces}
       OTEL_SERVICE_NAME: project-conversation-gateway
     secrets:
       - gateway_readiness_token
+      - parrot_object_capability_hmac
+    volumes:
+      - type: bind
+        source: ${GATEWAY_STATE_DIR:?set GATEWAY_STATE_DIR}
+        target: /var/lib/parrot/gateway
+        bind:
+          create_host_path: false
     networks:
       - backend
       - telemetry
@@ -105,6 +120,60 @@ services:
       com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
       com.project-conversation.role: gateway
 
+  edge:
+    profiles: [edge]
+    image: ${EDGE_IMAGE:-nginx:1.28.0-alpine@sha256:09ab424a8c788f8d0fe3a64429f6d19dfa526885c8609b748d0943a75dcb9f8c}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    init: true
+    depends_on:
+      gateway:
+        condition: service_healthy
+      spacetimedb:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:${EDGE_LOOPBACK_PORT:?set EDGE_LOOPBACK_PORT}:8082
+    environment:
+      NGINX_ENVSUBST_FILTER: ^(EDGE_SERVER_NAME|SPACETIMEDB_DATABASE_NAME)$$
+      EDGE_SERVER_NAME: ${EDGE_SERVER_NAME:?set EDGE_SERVER_NAME}
+      SPACETIMEDB_DATABASE_NAME: ${SPACETIMEDB_DATABASE_NAME:?set SPACETIMEDB_DATABASE_NAME}
+    volumes:
+      - type: bind
+        source: ${EDGE_CONFIG_TEMPLATE_PATH:?set EDGE_CONFIG_TEMPLATE_PATH}
+        target: /etc/nginx/templates/default.conf.template
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - backend
+    healthcheck:
+      test: [CMD, wget, --quiet, --tries=1, --spider, http://127.0.0.1:8082/_edge/health]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /etc/nginx/conf.d:rw,noexec,nosuid,size=1m
+      - /var/cache/nginx:rw,noexec,nosuid,size=16m
+      - /var/run:rw,noexec,nosuid,size=1m
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: ${EDGE_PIDS_LIMIT:-64}
+    mem_limit: ${EDGE_MEMORY_LIMIT:-128m}
+    cpus: ${EDGE_CPU_LIMIT:-0.50}
+    logging:
+      driver: json-file
+      options:
+        max-size: ${CONTAINER_LOG_MAX_SIZE:-20m}
+        max-file: ${CONTAINER_LOG_MAX_FILES:-5}
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+      com.project-conversation.role: edge
+
   worker:
     profiles: [worker]
     image: ${WORKER_IMAGE:?set WORKER_IMAGE to an immutable digest or the documented placeholder}
@@ -114,10 +183,12 @@ services:
     depends_on:
       spacetimedb:
         condition: service_healthy
+      clamav:
+        condition: service_healthy
     environment:
       WORKER_ENVIRONMENT: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
       WORKER_ID: ${WORKER_ID:-project-conversation-worker-1}
-      WORKER_ADAPTER_MODULE: ${WORKER_ADAPTER_MODULE:?set WORKER_ADAPTER_MODULE}
+      WORKER_ADAPTER_MODULE: /app/dist/production/parrot.js
       WORKER_HEALTH_HOST: 0.0.0.0
       WORKER_HEALTH_PORT: "8081"
       WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-500}
@@ -140,6 +211,39 @@ services:
       AGENT_MAX_RUN_COST_MICROS: ${AGENT_MAX_RUN_COST_MICROS:-5000000}
       WORKER_LOG_LEVEL: ${WORKER_LOG_LEVEL:-info}
       OTEL_SERVICE_NAME: project-conversation-worker
+      PARROT_STATE_ROOT: /var/lib/parrot/state
+      PARROT_BIG_ROOT: /var/lib/parrot/data
+      CLAMAV_SOCKET: /run/clamav/clamd.sock
+      OLLAMA_ENDPOINT: http://127.0.0.1:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:?set OLLAMA_MODEL}
+      SPACETIMEDB_WORKER_URI: ws://spacetimedb:3000
+      SPACETIMEDB_DATABASE_NAME: ${SPACETIMEDB_DATABASE_NAME:?set SPACETIMEDB_DATABASE_NAME}
+      SPACETIMEDB_WORKER_SERVICE_IDENTITY: ${SPACETIMEDB_WORKER_SERVICE_IDENTITY:?set SPACETIMEDB_WORKER_SERVICE_IDENTITY}
+      WORKOS_M2M_TOKEN_ENDPOINT: ${WORKOS_M2M_TOKEN_ENDPOINT:?set WORKOS_M2M_TOKEN_ENDPOINT}
+      WORKOS_M2M_CLIENT_ID: ${WORKOS_M2M_CLIENT_ID:?set WORKOS_M2M_CLIENT_ID}
+      WORKOS_M2M_CLIENT_SECRET_FILE: /run/secrets/parrot_workos_m2m_client_secret
+      WORKOS_M2M_ISSUER: ${WORKOS_M2M_ISSUER:?set WORKOS_M2M_ISSUER}
+      WORKOS_M2M_AUDIENCE: ${WORKOS_M2M_AUDIENCE:?set WORKOS_M2M_AUDIENCE}
+      WORKOS_M2M_EXPECTED_SUBJECT: ${WORKOS_M2M_EXPECTED_SUBJECT:?set WORKOS_M2M_EXPECTED_SUBJECT}
+    secrets:
+      - parrot_workos_m2m_client_secret
+    volumes:
+      - type: bind
+        source: ${WORKER_STATE_DIR:?set WORKER_STATE_DIR}
+        target: /var/lib/parrot/state
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OBJECT_DATA_DIR:?set OBJECT_DATA_DIR}
+        target: /var/lib/parrot/data/objects
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${EXPORT_DATA_DIR:?set EXPORT_DATA_DIR}
+        target: /var/lib/parrot/data/exports
+        bind:
+          create_host_path: false
+      - clamav-runtime:/run/clamav
     healthcheck:
       test: [CMD, node, /usr/local/libexec/worker-readiness.mjs]
       interval: 15s
@@ -168,6 +272,88 @@ services:
       com.project-conversation.stack: "true"
       com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
       com.project-conversation.role: worker
+
+  clamav:
+    profiles: [scanner, worker]
+    image: ${CLAMAV_IMAGE:-clamav/clamav:1.4.3_base@sha256:be37f82c9cccf6c2559a44b8fb537e6f11e8547b37988650b169c4540c2f298c}
+    restart: unless-stopped
+    stop_grace_period: 2m
+    init: true
+    volumes:
+      - type: bind
+        source: ${CLAMAV_DATA_DIR:?set CLAMAV_DATA_DIR}
+        target: /var/lib/clamav
+        bind:
+          create_host_path: false
+      - clamav-runtime:/run/clamav
+      - type: bind
+        source: ${CLAMAV_CONFIG_PATH:?set CLAMAV_CONFIG_PATH}
+        target: /etc/clamav/clamd.conf
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - backend
+      - egress
+    healthcheck:
+      test: [CMD-SHELL, "test -S /run/clamav/clamd.sock && clamdscan --config-file=/etc/clamav/clamd.conf --ping=1"]
+      interval: 30s
+      timeout: 10s
+      retries: 12
+      start_period: 2m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: ${CLAMAV_PIDS_LIMIT:-128}
+    mem_limit: ${CLAMAV_MEMORY_LIMIT:-2g}
+    cpus: ${CLAMAV_CPU_LIMIT:-1.5}
+    logging:
+      driver: json-file
+      options:
+        max-size: ${CONTAINER_LOG_MAX_SIZE:-20m}
+        max-file: ${CONTAINER_LOG_MAX_FILES:-5}
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+      com.project-conversation.role: clamav
+
+  ollama-loopback:
+    profiles: [worker]
+    image: ${SOCAT_IMAGE:-alpine/socat:1.8.0.3@sha256:2d83bdac2858b4bcfa57d478ce53ae3c18a1147a68db4f610454a2d60e5c19bc}
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    network_mode: service:worker
+    command:
+      - TCP4-LISTEN:11434,bind=127.0.0.1,reuseaddr,fork
+      - UNIX-CONNECT:/run/parrot-ollama/ollama.sock
+    volumes:
+      - type: bind
+        source: ${OLLAMA_BRIDGE_DIR:?set OLLAMA_BRIDGE_DIR}
+        target: /run/parrot-ollama
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=8m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 32m
+    cpus: 0.25
+    logging:
+      driver: json-file
+      options:
+        max-size: ${CONTAINER_LOG_MAX_SIZE:-20m}
+        max-file: ${CONTAINER_LOG_MAX_FILES:-5}
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+      com.project-conversation.role: ollama-loopback
 
   otel-collector:
     profiles: [telemetry]
@@ -214,6 +400,17 @@ services:
 secrets:
   gateway_readiness_token:
     file: ${GATEWAY_READINESS_TOKEN_FILE:?set GATEWAY_READINESS_TOKEN_FILE}
+  parrot_object_capability_hmac:
+    file: ${OBJECT_CAPABILITY_HMAC_SECRET_FILE:?set OBJECT_CAPABILITY_HMAC_SECRET_FILE}
+  parrot_workos_m2m_client_secret:
+    file: ${WORKOS_M2M_CLIENT_SECRET_FILE:?set WORKOS_M2M_CLIENT_SECRET_FILE}
+
+volumes:
+  clamav-runtime:
+    labels:
+      com.project-conversation.stack: "true"
+      com.project-conversation.environment: ${DEPLOY_ENVIRONMENT:?set DEPLOY_ENVIRONMENT}
+      com.project-conversation.role: clamav-runtime
 
 networks:
   backend:

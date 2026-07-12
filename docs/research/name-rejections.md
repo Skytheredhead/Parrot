@@ -4,7 +4,9 @@ Status: preliminary naming research, 2026-07-11. No candidate in this document i
 
 ## Non-negotiable exclusions
 
-- **Slick** and **Parrot** are user-rejected. They and cosmetic variants (for example, Slickly, Slicker, Parrott, or Parrotly) must not re-enter the pool.
+- **Slick** remains user-rejected. **Parrot** was initially rejected, then explicitly selected by the
+  user as the public product name on 2026-07-12. Cosmetic misspellings such as Parrott or Parrotly
+  remain rejected. The reversal is a product decision, not professional trademark clearance.
 - Names built around generic `AI`, `agent`, `chat`, `team`, `flow`, `sync`, or `hub` language were rejected unless unusually distinctive. None survived.
 - Deliberate misspellings whose only purpose is identifier availability were rejected.
 - Names that read as imitations of Slack, Discord, Reddit, X/Twitter, Teams, or Notion were rejected.

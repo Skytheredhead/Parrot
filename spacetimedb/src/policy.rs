@@ -172,6 +172,37 @@ pub(crate) fn workspace_export_generation_lease_within_ttl<T: PartialOrd>(
     proposed_expiry <= job_expiry
 }
 
+pub(crate) const fn worker_effect_takeover_allowed(
+    same_owner_generation: bool,
+    allow_takeover: bool,
+    lease_expired: bool,
+    newer_generation_for_same_owner: bool,
+) -> bool {
+    same_owner_generation || (allow_takeover && (lease_expired || newer_generation_for_same_owner))
+}
+
+pub(crate) fn clean_object_identity_valid(object_version: &str, checksum_sha256: &str) -> bool {
+    !object_version.is_empty()
+        && object_version.len() <= 200
+        && object_version
+            .bytes()
+            .all(|byte| (0x21..=0x7e).contains(&byte) && byte != b'/' && byte != b'\\')
+        && checksum_sha256.len() == 64
+        && checksum_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+pub(crate) const fn file_deletion_reclaim_allowed(
+    claim_is_finalized: bool,
+    claim_is_released: bool,
+    exact_owner_generation: bool,
+    newer_authority_generation: bool,
+) -> bool {
+    !claim_is_finalized
+        && (exact_owner_generation || claim_is_released || newer_authority_generation)
+}
+
 pub(crate) fn role_allows(role: PolicyRole, action: PolicyAction) -> bool {
     match role {
         PolicyRole::Owner | PolicyRole::Admin => true,
@@ -367,10 +398,18 @@ pub(crate) fn bootstrap_configuration_valid(
     };
     valid_text(issuer, 500)
         && oidc_issuer_valid(issuer)
-        && valid_text(audience, 255)
-        && !audience.chars().any(char::is_whitespace)
+        && oidc_audience_valid(audience)
         && valid_text(owner_subject, 255)
         && !owner_subject.chars().any(char::is_whitespace)
+}
+
+pub(crate) fn oidc_audience_valid(audience: &str) -> bool {
+    !audience.is_empty()
+        && audience.len() <= 255
+        && audience.trim() == audience
+        && !audience.chars().any(char::is_control)
+        && !audience.chars().any(char::is_whitespace)
+        && !audience.contains(',')
 }
 
 fn oidc_issuer_valid(issuer: &str) -> bool {

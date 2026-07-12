@@ -3,8 +3,8 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildGateway } from "../src/app.js";
 import type { SearchCandidate, StoredFile } from "../src/contracts.js";
-import { createTestDependencies } from "../src/testing/fakes.js";
 import type { TestDependencies } from "../src/testing/fakes.js";
+import { createTestDependencies } from "../src/testing/fakes.js";
 import { HmacSha256WebhookVerifier } from "../src/webhooks/verifier.js";
 import { TEST_CONFIG } from "./helpers.js";
 
@@ -109,6 +109,11 @@ describe("gateway security boundaries", () => {
       authzEpoch: 7,
       principal: { id: "internal-user" },
     });
+    expect(deps.principalResolver.bindings).toHaveLength(1);
+    expect(deps.principalResolver.bindings[0]?.resolved).toBe(deps.principalResolver.principal);
+    const checked = deps.principalResolver.bindings[0]?.checked;
+    expect(Object.isFrozen(checked)).toBe(true);
+    expect(checked).toBe(deps.dbTokenBroker.calls[0]?.principal);
   });
 
   it("fails closed when the authoritative resolver returns a different issuer or subject", async () => {
@@ -301,6 +306,30 @@ describe("gateway security boundaries", () => {
       },
     });
     expect(wrongOrigin.statusCode).toBe(503);
+  });
+
+  it("rejects non-canonical or caller-mismatched upload reservations from authority", async () => {
+    const createPending = deps.files.createPending.bind(deps.files);
+    deps.files.createPending = async (input) => ({
+      ...(await createPending(input)),
+      objectKey: "../../host-escape",
+      uploaderId: "another-principal",
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/files/uploads",
+      headers: bearer,
+      payload: {
+        workspaceId: "workspace-1",
+        spaceId: "space-1",
+        displayName: "report.pdf",
+        declaredContentType: "application/pdf",
+        sizeBytes: 4,
+        checksumSha256: "a".repeat(64),
+      },
+    });
+    expect(response.statusCode).toBe(503);
+    expect(deps.objects.uploadCalls).toHaveLength(0);
   });
 
   it("does not reveal file lifecycle before authorization and pins clean downloads to the scanned version", async () => {

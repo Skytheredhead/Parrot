@@ -56,6 +56,7 @@ import CompleteWorkspaceExportReducer from "./complete_workspace_export_reducer"
 import CompleteWorkspaceExportCleanupReducer from "./complete_workspace_export_cleanup_reducer";
 import ConfigurePollReducer from "./configure_poll_reducer";
 import ConfigureWorkspaceLifecycleReducer from "./configure_workspace_lifecycle_reducer";
+import ConsumeAgentToolApprovalReducer from "./consume_agent_tool_approval_reducer";
 import CreateDirectConversationReducer from "./create_direct_conversation_reducer";
 import CreateFileUploadReducer from "./create_file_upload_reducer";
 import CreateNamedThreadReducer from "./create_named_thread_reducer";
@@ -99,6 +100,7 @@ import RecordFileScanOutcomeReducer from "./record_file_scan_outcome_reducer";
 import RecordNotificationDigestOutcomeReducer from "./record_notification_digest_outcome_reducer";
 import RecordToolOutcomeReducer from "./record_tool_outcome_reducer";
 import RecoverOutboxJobReducer from "./recover_outbox_job_reducer";
+import RegisterCleanFileObjectReducer from "./register_clean_file_object_reducer";
 import RegisterServicePrincipalReducer from "./register_service_principal_reducer";
 import RegisterTrustedToolReducer from "./register_trusted_tool_reducer";
 import RegisterUserReducer from "./register_user_reducer";
@@ -109,6 +111,19 @@ import RequestWorkspaceDeletionReducer from "./request_workspace_deletion_reduce
 import RequestWorkspaceExportReducer from "./request_workspace_export_reducer";
 import RevokeAgentReducer from "./revoke_agent_reducer";
 import SendDirectMessageReducer from "./send_direct_message_reducer";
+import ServiceAcquireWorkerEffectReducer from "./service_acquire_worker_effect_reducer";
+import ServiceAppendAgentCheckpointReducer from "./service_append_agent_checkpoint_reducer";
+import ServiceClaimAgentExecutionReducer from "./service_claim_agent_execution_reducer";
+import ServiceClaimFileDeletionReducer from "./service_claim_file_deletion_reducer";
+import ServiceCommitAgentFinalReducer from "./service_commit_agent_final_reducer";
+import ServiceFinalizeFileDeletionReducer from "./service_finalize_file_deletion_reducer";
+import ServicePrepareAgentToolCallReducer from "./service_prepare_agent_tool_call_reducer";
+import ServiceRecordAgentProviderDispatchReducer from "./service_record_agent_provider_dispatch_reducer";
+import ServiceRecordFileOrphanReducer from "./service_record_file_orphan_reducer";
+import ServiceReleaseFileDeletionReducer from "./service_release_file_deletion_reducer";
+import ServiceSaveAgentProgressReducer from "./service_save_agent_progress_reducer";
+import ServiceTransitionAgentRunReducer from "./service_transition_agent_run_reducer";
+import ServiceUpdateWorkerEffectReducer from "./service_update_worker_effect_reducer";
 import SetAgentScopeReducer from "./set_agent_scope_reducer";
 import SetAgentToolPolicyReducer from "./set_agent_tool_policy_reducer";
 import SetNotificationPreferenceReducer from "./set_notification_preference_reducer";
@@ -131,11 +146,16 @@ import UpdateTaskStatusReducer from "./update_task_status_reducer";
 // Import all table schema definitions
 import AgentContextCandidatesRow from "./agent_context_candidates_table";
 import AgentWorkQueueRow from "./agent_work_queue_table";
+import CurrentGatewayPrincipalRow from "./current_gateway_principal_table";
 import CurrentUserRow from "./current_user_table";
 import FileProcessingPlansRow from "./file_processing_plans_table";
 import MyCommandReceiptsRow from "./my_command_receipts_table";
 import MyDirectReadStatesRow from "./my_direct_read_states_table";
 import MyFileUploadsRow from "./my_file_uploads_table";
+import MyGatewayFileDescriptorsRow from "./my_gateway_file_descriptors_table";
+import MyGatewayPendingUploadsRow from "./my_gateway_pending_uploads_table";
+import MyGatewaySpaceGrantsRow from "./my_gateway_space_grants_table";
+import MyGatewayWorkspaceGrantsRow from "./my_gateway_workspace_grants_table";
 import MyNotificationPreferencesRow from "./my_notification_preferences_table";
 import MyNotificationsRow from "./my_notifications_table";
 import MyPostStatesRow from "./my_post_states_table";
@@ -151,6 +171,13 @@ import PendingOutboxWorkRow from "./pending_outbox_work_table";
 import PendingPostSearchDocumentsRow from "./pending_post_search_documents_table";
 import PendingWorkspaceExportCleanupPlansRow from "./pending_workspace_export_cleanup_plans_table";
 import PendingWorkspaceExportPlansRow from "./pending_workspace_export_plans_table";
+import ServiceAgentApprovalBindingsRow from "./service_agent_approval_bindings_table";
+import ServiceAgentExecutionPlansRow from "./service_agent_execution_plans_table";
+import ServiceAgentProviderDispatchesRow from "./service_agent_provider_dispatches_table";
+import ServiceAgentRunProgressRow from "./service_agent_run_progress_table";
+import ServiceFileDeletionClaimsRow from "./service_file_deletion_claims_table";
+import ServiceFileProcessingOutcomesRow from "./service_file_processing_outcomes_table";
+import ServiceWorkerEffectsRow from "./service_worker_effects_table";
 import VisibleAgentContextManifestsRow from "./visible_agent_context_manifests_table";
 import VisibleAgentInstallationsRow from "./visible_agent_installations_table";
 import VisibleAgentRunEventsRow from "./visible_agent_run_events_table";
@@ -203,6 +230,13 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, AgentWorkQueueRow),
+  current_gateway_principal: __table({
+    name: 'current_gateway_principal',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, CurrentGatewayPrincipalRow),
   current_user: __table({
     name: 'current_user',
     indexes: [
@@ -238,6 +272,34 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, MyFileUploadsRow),
+  my_gateway_file_descriptors: __table({
+    name: 'my_gateway_file_descriptors',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, MyGatewayFileDescriptorsRow),
+  my_gateway_pending_uploads: __table({
+    name: 'my_gateway_pending_uploads',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, MyGatewayPendingUploadsRow),
+  my_gateway_space_grants: __table({
+    name: 'my_gateway_space_grants',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, MyGatewaySpaceGrantsRow),
+  my_gateway_workspace_grants: __table({
+    name: 'my_gateway_workspace_grants',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, MyGatewayWorkspaceGrantsRow),
   my_notification_preferences: __table({
     name: 'my_notification_preferences',
     indexes: [
@@ -343,6 +405,55 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, PendingWorkspaceExportPlansRow),
+  service_agent_approval_bindings: __table({
+    name: 'service_agent_approval_bindings',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, ServiceAgentApprovalBindingsRow),
+  service_agent_execution_plans: __table({
+    name: 'service_agent_execution_plans',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, ServiceAgentExecutionPlansRow),
+  service_agent_provider_dispatches: __table({
+    name: 'service_agent_provider_dispatches',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, ServiceAgentProviderDispatchesRow),
+  service_agent_run_progress: __table({
+    name: 'service_agent_run_progress',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, ServiceAgentRunProgressRow),
+  service_file_deletion_claims: __table({
+    name: 'service_file_deletion_claims',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, ServiceFileDeletionClaimsRow),
+  service_file_processing_outcomes: __table({
+    name: 'service_file_processing_outcomes',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, ServiceFileProcessingOutcomesRow),
+  service_worker_effects: __table({
+    name: 'service_worker_effects',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, ServiceWorkerEffectsRow),
   visible_agent_context_manifests: __table({
     name: 'visible_agent_context_manifests',
     indexes: [
@@ -600,6 +711,7 @@ const reducersSchema = __reducers(
   __reducerSchema("complete_workspace_export_cleanup", CompleteWorkspaceExportCleanupReducer),
   __reducerSchema("configure_poll", ConfigurePollReducer),
   __reducerSchema("configure_workspace_lifecycle", ConfigureWorkspaceLifecycleReducer),
+  __reducerSchema("consume_agent_tool_approval", ConsumeAgentToolApprovalReducer),
   __reducerSchema("create_direct_conversation", CreateDirectConversationReducer),
   __reducerSchema("create_file_upload", CreateFileUploadReducer),
   __reducerSchema("create_named_thread", CreateNamedThreadReducer),
@@ -643,6 +755,7 @@ const reducersSchema = __reducers(
   __reducerSchema("record_notification_digest_outcome", RecordNotificationDigestOutcomeReducer),
   __reducerSchema("record_tool_outcome", RecordToolOutcomeReducer),
   __reducerSchema("recover_outbox_job", RecoverOutboxJobReducer),
+  __reducerSchema("register_clean_file_object", RegisterCleanFileObjectReducer),
   __reducerSchema("register_service_principal", RegisterServicePrincipalReducer),
   __reducerSchema("register_trusted_tool", RegisterTrustedToolReducer),
   __reducerSchema("register_user", RegisterUserReducer),
@@ -653,6 +766,19 @@ const reducersSchema = __reducers(
   __reducerSchema("request_workspace_export", RequestWorkspaceExportReducer),
   __reducerSchema("revoke_agent", RevokeAgentReducer),
   __reducerSchema("send_direct_message", SendDirectMessageReducer),
+  __reducerSchema("service_acquire_worker_effect", ServiceAcquireWorkerEffectReducer),
+  __reducerSchema("service_append_agent_checkpoint", ServiceAppendAgentCheckpointReducer),
+  __reducerSchema("service_claim_agent_execution", ServiceClaimAgentExecutionReducer),
+  __reducerSchema("service_claim_file_deletion", ServiceClaimFileDeletionReducer),
+  __reducerSchema("service_commit_agent_final", ServiceCommitAgentFinalReducer),
+  __reducerSchema("service_finalize_file_deletion", ServiceFinalizeFileDeletionReducer),
+  __reducerSchema("service_prepare_agent_tool_call", ServicePrepareAgentToolCallReducer),
+  __reducerSchema("service_record_agent_provider_dispatch", ServiceRecordAgentProviderDispatchReducer),
+  __reducerSchema("service_record_file_orphan", ServiceRecordFileOrphanReducer),
+  __reducerSchema("service_release_file_deletion", ServiceReleaseFileDeletionReducer),
+  __reducerSchema("service_save_agent_progress", ServiceSaveAgentProgressReducer),
+  __reducerSchema("service_transition_agent_run", ServiceTransitionAgentRunReducer),
+  __reducerSchema("service_update_worker_effect", ServiceUpdateWorkerEffectReducer),
   __reducerSchema("set_agent_scope", SetAgentScopeReducer),
   __reducerSchema("set_agent_tool_policy", SetAgentToolPolicyReducer),
   __reducerSchema("set_notification_preference", SetNotificationPreferenceReducer),

@@ -27,6 +27,10 @@ compiled or published with all three environment variables below:
   only the parsed host `localhost` may use HTTP for local development. Userinfo, query, fragment,
   backslash, percent-encoding, and malformed ports are rejected.
 - `PROJECT_CONVERSATION_BOOTSTRAP_OIDC_AUDIENCE`: the exact, whitespace-free OIDC audience.
+- `PROJECT_CONVERSATION_BOOTSTRAP_OIDC_ADDITIONAL_AUDIENCES`: optional comma-separated exact
+  audiences (at most seven) issued by the same immutable issuer. This supports separate browser and
+  machine Connect clients without trusting a second issuer. Empty values, duplicates, whitespace,
+  commas inside an audience, and more than eight total audiences are rejected.
 - `PROJECT_CONVERSATION_BOOTSTRAP_OWNER_SUBJECT`: the exact OIDC `sub` claim of the identity authorized to create
   the initial owner and workspace.
 

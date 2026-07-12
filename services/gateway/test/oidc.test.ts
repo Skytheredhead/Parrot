@@ -24,7 +24,11 @@ describe("OidcJwtVerifier", () => {
     servers.length = 0;
   });
 
-  async function verifier(maxJwksBytes = 262_144) {
+  async function verifier(
+    maxJwksBytes = 262_144,
+    allowMissingTokenType = false,
+    allowClientIdAudience = false,
+  ) {
     const server = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");
       response.end(JSON.stringify({ keys: [jwk] }));
@@ -37,6 +41,8 @@ describe("OidcJwtVerifier", () => {
       issuer,
       audience: "gateway",
       allowedTokenTypes: ["at+jwt"],
+      allowMissingTokenType,
+      allowClientIdAudience,
       maxTokenAgeSeconds: 300,
       maxJwksBytes,
     });
@@ -48,13 +54,14 @@ describe("OidcJwtVerifier", () => {
       lifetime?: number;
       audience?: string;
       claims?: Record<string, unknown>;
+      omitTyp?: boolean;
     } = {},
   ) {
     return new SignJWT(input.claims ?? {})
       .setProtectedHeader({
         alg: "RS256",
         kid: "test-key",
-        ...(input.typ === undefined ? { typ: "at+jwt" } : { typ: input.typ }),
+        ...(input.omitTyp ? {} : input.typ === undefined ? { typ: "at+jwt" } : { typ: input.typ }),
       })
       .setSubject("service-subject")
       .setIssuer(issuer)
@@ -76,6 +83,10 @@ describe("OidcJwtVerifier", () => {
     expect(result).not.toHaveProperty("principal_kind");
     expect(result).not.toHaveProperty("user_id");
     expect(result).not.toHaveProperty("authz_epoch");
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(signed);
+    expect(subjectVerifier.bearerFor(result)).toBe(signed);
+    expect(subjectVerifier.bearerFor({ ...result })).toBeUndefined();
   });
 
   it("accepts only a numeric non-future OIDC auth_time fresh-auth marker", async () => {
@@ -101,6 +112,29 @@ describe("OidcJwtVerifier", () => {
     await expect(subjectVerifier.verify(await token(input))).rejects.toMatchObject({
       statusCode: 401,
     });
+  });
+
+  it("accepts a missing JOSE token type only under an explicit provider profile", async () => {
+    const signed = await token({ omitTyp: true });
+    await expect((await verifier()).verify(signed)).rejects.toMatchObject({ statusCode: 401 });
+    await expect((await verifier(262_144, true)).verify(signed)).resolves.toMatchObject({
+      issuer,
+      subject: "service-subject",
+      tokenType: "access",
+    });
+  });
+
+  it("accepts WorkOS client_id audience binding only under an explicit provider profile", async () => {
+    const signed = await token({ audience: "not-the-gateway", claims: { client_id: "gateway" } });
+    await expect((await verifier()).verify(signed)).rejects.toMatchObject({ statusCode: 401 });
+    await expect((await verifier(262_144, false, true)).verify(signed)).resolves.toMatchObject({
+      subject: "service-subject",
+    });
+    await expect(
+      (await verifier(262_144, false, true)).verify(
+        await token({ audience: "not-the-gateway", claims: { client_id: "other" } }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 401 });
   });
 
   it("rejects an oversized JWKS response even without Content-Length", async () => {

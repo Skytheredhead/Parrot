@@ -1,0 +1,25 @@
+[Unit]
+Description=Parrot %i private Ollama Unix-socket bridge
+Documentation=file:/opt/parrot/current/docs/operations/deployment-runbook.md
+After=ollama.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+User=parrot
+Group=parrot
+UMask=0077
+EnvironmentFile=/srv/project-conversation/%i/config/deployment.env
+ExecStartPre=/usr/bin/rm -f /srv/project-conversation/%i/state/worker/ollama-bridge/ollama.sock
+ExecStart=/usr/bin/socat UNIX-LISTEN:/srv/project-conversation/%i/state/worker/ollama-bridge/ollama.sock,mode=0600,fork TCP4:127.0.0.1:11434
+ExecStopPost=/usr/bin/rm -f /srv/project-conversation/%i/state/worker/ollama-bridge/ollama.sock
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/srv/project-conversation/%i/state/worker/ollama-bridge
+RestrictAddressFamilies=AF_UNIX AF_INET
+RestrictSUIDSGID=true
+LockPersonality=true

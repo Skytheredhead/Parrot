@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import Fastify, { LogController } from "fastify";
@@ -8,23 +9,24 @@ import { authenticateRequest } from "./auth/request-auth.js";
 import type { GatewayConfig } from "./config.js";
 import type {
   GatewayDependencies,
+  ObjectCapabilityUploadGrant,
   Principal,
-  ReadinessProbe,
   RateLimitResult,
+  ReadinessProbe,
   ReadyDependency,
 } from "./contracts.js";
-import { GatewayError, forbidden, invalidInput, notFound, unavailable } from "./errors.js";
-import { FileCapabilityService } from "./files/service.js";
+import { forbidden, GatewayError, invalidInput, notFound, unavailable } from "./errors.js";
 import type { WorkspaceBudget } from "./files/service.js";
+import { FileCapabilityService } from "./files/service.js";
 import { InvitationService } from "./invitations/service.js";
 import { safeErrorFields } from "./observability.js";
 import { PermissionSafeSearchService } from "./search/service.js";
-import { SessionAdministrationService } from "./sessions/service.js";
 import {
   enforceBrowserBoundary,
   equalSecret,
   isAllowedOrigin,
 } from "./security/browser-boundary.js";
+import { SessionAdministrationService } from "./sessions/service.js";
 
 const id = z
   .string()
@@ -125,7 +127,8 @@ function requestId(header: string | string[] | undefined): string {
 }
 
 function dependencyProbe(name: string, dependency: ReadyDependency): ReadinessProbe {
-  return { name, check: (signal) => dependency.ready(signal) };
+  const label = dependency.adapterName.startsWith("disabled-surface:") ? `${name}:disabled` : name;
+  return { name: label, check: (signal) => dependency.ready(signal) };
 }
 
 function dependencyProbes(deps: GatewayDependencies): ReadinessProbe[] {
@@ -138,6 +141,9 @@ function dependencyProbes(deps: GatewayDependencies): ReadinessProbe[] {
     dependencyProbe("db-token-broker", deps.dbTokenBroker),
     dependencyProbe("file-metadata", deps.files),
     dependencyProbe("object-storage", deps.objects),
+    ...(deps.objectCapabilities
+      ? [dependencyProbe("object-capability-ingress", deps.objectCapabilities)]
+      : []),
     dependencyProbe("search", deps.search),
     dependencyProbe("search-cursors", deps.searchCursors),
     dependencyProbe("rate-limits", deps.rateLimits),
@@ -163,6 +169,7 @@ function assertProductionAdapters(config: GatewayConfig, deps: GatewayDependenci
     deps.dbTokenBroker,
     deps.files,
     deps.objects,
+    deps.objectCapabilities,
     deps.search,
     deps.searchCursors,
     deps.rateLimits,
@@ -227,6 +234,7 @@ export async function buildGateway(config: GatewayConfig, deps: GatewayDependenc
   assertProductionAdapters(config, deps);
   const app = Fastify({
     bodyLimit: 1_048_576,
+    routerOptions: { maxParamLength: 8_192 },
     logController: new LogController({ disableRequestLogging: true }),
     genReqId: (request) => requestId(request.headers["x-request-id"]),
     logger: {
@@ -246,6 +254,8 @@ export async function buildGateway(config: GatewayConfig, deps: GatewayDependenc
           "invitationToken",
           "invitation.token",
           "req.body.token",
+          "req.params.token",
+          "params.token",
           "capability.url",
         ],
       },
@@ -260,13 +270,15 @@ export async function buildGateway(config: GatewayConfig, deps: GatewayDependenc
   await app.register(cors, {
     credentials: true,
     strictPreflight: true,
-    methods: ["GET", "HEAD", "POST", "DELETE", "OPTIONS"],
+    methods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: [
       "authorization",
       "content-type",
       "idempotency-key",
       "x-csrf-token",
       "x-request-id",
+      "x-checksum-sha256",
+      "if-none-match",
     ],
     exposedHeaders: ["x-request-id"],
     origin: (origin, callback) =>
@@ -414,6 +426,86 @@ export async function buildGateway(config: GatewayConfig, deps: GatewayDependenc
       .status(ready ? 200 : 503)
       .send({ status: ready ? "ready" : "not_ready", checks: results });
   });
+
+  const objectCapabilities = deps.objectCapabilities;
+  if (objectCapabilities) {
+    await app.register(async (capabilityApp) => {
+      capabilityApp.addContentTypeParser(
+        "application/x-parrot-capability-stream",
+        (_request, payload, done) => done(null, payload),
+      );
+      const uploadGrants = new WeakMap<object, ObjectCapabilityUploadGrant>();
+      capabilityApp.route<{ Params: { token: string } }>({
+        method: "PUT",
+        url: "/v1/object-capabilities/upload/:token",
+        config: { csrfExempt: true },
+        preParsing: async (request, _reply, payload) => {
+          const grant = await objectCapabilities.authorizeUpload({
+            token: parse(
+              z
+                .string()
+                .min(43)
+                .max(8_192)
+                .regex(/^[A-Za-z0-9_-]+$/),
+              request.params.token,
+            ),
+            method: request.method,
+            headers: request.headers,
+          });
+          uploadGrants.set(request, grant);
+          // Select the streaming parser only after the signed content type has been checked.
+          request.headers["content-type"] = "application/x-parrot-capability-stream";
+          return payload;
+        },
+        handler: async (request, reply) => {
+          const grant = uploadGrants.get(request);
+          const body = request.body;
+          if (
+            !grant ||
+            !body ||
+            typeof (body as AsyncIterable<Uint8Array>)[Symbol.asyncIterator] !== "function"
+          )
+            throw invalidInput("A streaming upload body is required");
+          const stored = await objectCapabilities.consumeUpload({
+            grant,
+            body: body as AsyncIterable<Uint8Array>,
+          });
+          return reply.status(201).send(stored);
+        },
+      });
+
+      capabilityApp.get<{ Params: { token: string } }>(
+        "/v1/object-capabilities/download/:token",
+        { config: { csrfExempt: true } },
+        async (request, reply) => {
+          const grant = await objectCapabilities.authorizeDownload({
+            token: parse(
+              z
+                .string()
+                .min(43)
+                .max(8_192)
+                .regex(/^[A-Za-z0-9_-]+$/),
+              request.params.token,
+            ),
+            method: request.method,
+          });
+          const object = await objectCapabilities.openDownload({ grant });
+          reply.header("content-type", object.contentType);
+          reply.header("content-length", String(object.sizeBytes));
+          reply.header(
+            "digest",
+            `sha-256=${Buffer.from(object.checksumSha256, "hex").toString("base64")}`,
+          );
+          reply.header("etag", `"${object.objectVersion}"`);
+          reply.header(
+            "content-disposition",
+            `attachment; filename*=UTF-8''${encodeURIComponent(object.displayName)}`,
+          );
+          return reply.send(Readable.from(object.body));
+        },
+      );
+    });
+  }
 
   app.post("/v1/db-token", async (request) => {
     const principal = await authenticate(request);

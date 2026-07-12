@@ -12,6 +12,8 @@ export const TEST_CONFIG: GatewayConfig = {
     audience: "gateway-test",
     jwksUri: "https://issuer.test/.well-known/jwks.json",
     allowedTokenTypes: ["at+jwt"],
+    allowMissingTokenType: false,
+    allowClientIdAudience: false,
     maxTokenAgeSeconds: 900,
     maxJwksBytes: 262_144,
   },

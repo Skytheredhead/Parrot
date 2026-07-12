@@ -1,6 +1,6 @@
 # Backup, restore drill, upgrade, and rollback runbook
 
-Date: 2026-07-11
+Date: 2026-07-12
 
 Public SpacetimeDB documentation does not establish a supported hot-copy procedure for its data root. These artifacts therefore implement only a stopped, complete-root archive for the dedicated Compose instance. Never copy the live root and never apply these commands to the audited unrelated service on port `4789`.
 
@@ -73,7 +73,7 @@ Dry run:
 ```bash
 infra/scripts/restore-drill.sh \
   --env-file /protected/path/production.env \
-  --archive /srv/project-conversation/production/backups/spacetimedb-production-TIMESTAMP.tar.gz
+  --archive /mnt/bigboi/project-conversation/production/backups/spacetimedb-production-TIMESTAMP.tar.gz
 ```
 
 Explicit drill:
@@ -81,14 +81,14 @@ Explicit drill:
 ```bash
 infra/scripts/restore-drill.sh \
   --env-file /protected/path/production.env \
-  --archive /srv/project-conversation/production/backups/spacetimedb-production-TIMESTAMP.tar.gz \
+  --archive /mnt/bigboi/project-conversation/production/backups/spacetimedb-production-TIMESTAMP.tar.gz \
   --apply \
   --confirm project-conversation-production
 ```
 
 After health, the script runs a no-egress verifier against only `http://127.0.0.1:<reserved-port>`.
-It matches the database identity, initialization provenance, and canonical schema digest, proves database-owner access to all 71
-required private tables with aggregate-only queries, compares 81 bounded child/parent counts, and
+It matches the database identity, initialization provenance, and canonical schema digest, proves database-owner access to all 78
+required private tables with aggregate-only queries, compares 90 bounded child/parent counts, and
 verifies audit-to-workspace referential continuity. SQL responses are private transient files, are
 never printed, and are removed before the
 verifier exits. Because the audit model has no global sequence or external anchor, the evidence says
@@ -160,8 +160,8 @@ Review the dry plan first, then use an approved maintenance window:
 infra/scripts/upgrade.sh \
   --env-file /protected/path/production.env \
   --image registry.example/spacetime@sha256:EXACT_DIGEST \
-  --backup /srv/project-conversation/production/backups/EXACT_ARCHIVE.tar.gz \
-  --restore-marker /srv/project-conversation/production/backups/restore-drills/EXACT.success \
+  --backup /mnt/bigboi/project-conversation/production/backups/EXACT_ARCHIVE.tar.gz \
+  --restore-marker /mnt/bigboi/project-conversation/production/backups/restore-drills/EXACT.success \
   --ack-forward-only \
   --apply \
   --confirm project-conversation-production
@@ -195,6 +195,10 @@ After rollback, repeat end-to-end and recovery checks. Never improvise a data do
 
 ## Frequency and evidence
 
-Run a full isolated restore before launch, after every database/storage upgrade or material schema change, and at least monthly once approved. Alert on backup age/failure, offsite-copy age/failure, restore-drill age/failure, disk/inode pressure, and restore duration against approved RPO/RTO. Preserve operator, runbook revision, archive/image/module digests, timestamps, measured outcomes, failures, and follow-up owner without recording secrets or user content.
+`infra/systemd/parrot-cold-backup@.service` and `.timer` are uninstalled templates for the approved hourly schedule. Install only after copying the repository to `/opt/parrot/current`, creating the dedicated `parrot` operator, validating the private environment file, and manually completing/recovering one backup. Enabling `parrot-cold-backup@production.timer` causes a bounded database stop each hour; measure the interruption in staging and alert on failure or excessive duration. The accepted retention remains hourly for 48 hours, daily for 30 days, weekly for 12 weeks, and monthly for 12 months. Do not automate deletion until the selection logic, legal-hold behavior, disk floor, and restore from every tier pass staging review.
+
+`infra/systemd/parrot-rollback@.service` has no timer. It runs only when an operator creates the exact private `state/ALLOW_IMAGE_ROLLBACK` gate after reviewing schema compatibility; the unit removes that gate after success. Prefer the direct dry-run command during initial operations.
+
+Run a full isolated restore before launch, after every database/storage upgrade or material schema change, and at least monthly once approved. Alert on backup age/failure, offsite-copy age/failure, restore-drill age/failure, `/srv` and `/mnt/bigboi` disk/inode pressure, and restore duration against the one-hour RPO/four-hour RTO. Preserve operator, runbook revision, archive/image/module digests, timestamps, measured outcomes, failures, and follow-up owner without recording secrets or user content.
 
 Relevant upstream evidence: [SpacetimeDB self-hosting](https://spacetimedb.com/docs/how-to/deploy/self-hosting/) and the still-open [backup tooling feature request](https://spacetimedb.com/features/requests/50), accessed 2026-07-11.

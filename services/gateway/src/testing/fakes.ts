@@ -1,5 +1,4 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { resourceAuthorizationKey } from "../contracts.js";
 import type {
   AgentStreamBroker,
   AgentToolGateway,
@@ -9,10 +8,10 @@ import type {
   DbTokenBroker,
   FileMetadataStore,
   GatewayDependencies,
-  IpRateLimitInput,
   InvitationCreateRecord,
   InvitationRedemptionResult,
   InvitationStore,
+  IpRateLimitInput,
   ObjectStore,
   PendingUpload,
   Principal,
@@ -33,10 +32,10 @@ import type {
   WebhookRegistry,
   WorkspaceRateLimitInput,
 } from "../contracts.js";
-import { GatewayError } from "../errors.js";
-import { unauthorized } from "../errors.js";
-import { HmacSearchCursorCodec } from "../search/cursor.js";
+import { resourceAuthorizationKey } from "../contracts.js";
+import { GatewayError, unauthorized } from "../errors.js";
 import { HmacInvitationTokenHasher } from "../invitations/token.js";
+import { HmacSearchCursorCodec } from "../search/cursor.js";
 
 export const TEST_IDENTITY: VerifiedIdentity = {
   issuer: "https://issuer.test",
@@ -83,10 +82,17 @@ export class FakeTokenVerifier extends ReadyFake implements TokenVerifier, Sessi
 export class InMemoryPrincipalResolver extends ReadyFake implements PrincipalResolver {
   principal: Principal = TEST_PRINCIPAL;
   readonly calls: VerifiedIdentity[] = [];
+  readonly bindings: Parameters<NonNullable<PrincipalResolver["bindCheckedPrincipal"]>>[0][] = [];
 
   async resolve(identity: VerifiedIdentity): Promise<Principal> {
     this.calls.push(identity);
     return this.principal;
+  }
+
+  bindCheckedPrincipal(
+    input: Parameters<NonNullable<PrincipalResolver["bindCheckedPrincipal"]>>[0],
+  ): void {
+    this.bindings.push(input);
   }
 }
 
@@ -145,20 +151,38 @@ export class FakeDbTokenBroker extends ReadyFake implements DbTokenBroker {
 export class InMemoryFiles extends ReadyFake implements FileMetadataStore {
   readonly pending = new Map<string, PendingUpload>();
   readonly stored = new Map<string, StoredFile>();
-  readonly observed = new Map<string, Parameters<FileMetadataStore["markQuarantined"]>[1]>();
+  readonly observed = new Map<string, Parameters<FileMetadataStore["markQuarantined"]>[2]>();
 
-  async createPending(upload: PendingUpload): Promise<void> {
+  async createPending(
+    input: Parameters<FileMetadataStore["createPending"]>[0],
+  ): Promise<PendingUpload> {
+    const id = input.reservationId;
+    const upload: PendingUpload = {
+      id,
+      objectKey: `uploads/${input.workspaceId}/${id}/1`,
+      workspaceId: input.workspaceId,
+      spaceId: input.spaceId,
+      uploaderId: input.principal.id,
+      displayName: input.displayName,
+      declaredContentType: input.declaredContentType,
+      expectedBytes: input.expectedBytes,
+      checksumSha256: input.checksumSha256,
+      expiresAt: input.maximumExpiresAt,
+      lifecycle: "pending",
+    };
     if (this.pending.has(upload.id)) throw new Error("duplicate upload");
     this.pending.set(upload.id, upload);
+    return upload;
   }
 
-  async getPending(id: string): Promise<PendingUpload | null> {
+  async getPending(_principal: Principal, id: string): Promise<PendingUpload | null> {
     return this.pending.get(id) ?? null;
   }
 
   async markQuarantined(
+    _principal: Principal,
     id: string,
-    observed: Parameters<FileMetadataStore["markQuarantined"]>[1],
+    observed: Parameters<FileMetadataStore["markQuarantined"]>[2],
   ): Promise<void> {
     const value = this.pending.get(id);
     if (!value) throw new Error("missing upload");
@@ -166,7 +190,7 @@ export class InMemoryFiles extends ReadyFake implements FileMetadataStore {
     this.observed.set(id, observed);
   }
 
-  async getFile(id: string): Promise<StoredFile | null> {
+  async getFile(_principal: Principal, id: string): Promise<StoredFile | null> {
     return this.stored.get(id) ?? null;
   }
 }

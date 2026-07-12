@@ -266,7 +266,7 @@ test("production composition validates methods, the complete handler graph, and 
       "recordProviderDispatch",
       "commitFinalAndSucceed",
     ]),
-    approvals: durableAdapter("approvals", ["consumeExact"]),
+    approvals: durableAdapter("approvals", ["prepareExact", "consumeExact"]),
     search: durableAdapter("search", [
       "apply",
       "version",
