@@ -139,6 +139,11 @@ if [[ "$reconcile_gateway" == true ]]; then
     note "Gateway journal marked abandoned because the recorded prior image is still present. No configuration was reconstructed."
     exit 0
   fi
+  if [[ "$gateway_prior_present" == false && "$current_image" == none && "$current_running" == false ]]; then
+    write_gateway_state abandoned
+    note "Gateway journal marked abandoned after confirming the failed first deployment left no gateway container."
+    exit 0
+  fi
   die "gateway state is neither a healthy target nor the untouched recorded prior image; repair in staging before any new deployment"
 fi
 

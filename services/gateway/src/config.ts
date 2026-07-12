@@ -207,12 +207,14 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
   const jwks = validateSecurityUrl("OIDC_JWKS_URI", parsed.OIDC_JWKS_URI, production);
   if (issuer.origin !== jwks.origin)
     throw new Error("OIDC_JWKS_URI must share the approved OIDC_ISSUER origin");
-  const endpoint = parsed.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
-  if (endpoint !== undefined)
-    validateSecurityUrl("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", endpoint, production);
-  if (parsed.OTEL_ENABLED === "true" && endpoint === undefined) {
+  const telemetryEnabled = parsed.OTEL_ENABLED === "true";
+  const configuredEndpoint = parsed.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
+  if (telemetryEnabled && configuredEndpoint !== undefined)
+    validateSecurityUrl("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", configuredEndpoint, production);
+  if (telemetryEnabled && configuredEndpoint === undefined) {
     throw new Error("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is required when OTEL_ENABLED=true");
   }
+  const endpoint = telemetryEnabled ? configuredEndpoint : undefined;
   if (parsed.SESSION_COOKIE_NAME === parsed.CSRF_COOKIE_NAME)
     throw new Error("Session and CSRF cookie names must differ");
   if (
@@ -236,13 +238,16 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
   if (parsed.SPACETIMEDB_URI !== undefined) {
     const spacetime = new URL(parsed.SPACETIMEDB_URI);
     const loopback = ["127.0.0.1", "::1", "localhost"].includes(spacetime.hostname);
+    const privateComposeOrigin =
+      spacetime.hostname === "spacetimedb" && spacetime.port === "3000";
     if (
       spacetime.username ||
       spacetime.password ||
       spacetime.search ||
       spacetime.hash ||
       spacetime.pathname !== "/" ||
-      (spacetime.protocol !== "wss:" && !(spacetime.protocol === "ws:" && loopback))
+      (spacetime.protocol !== "wss:" &&
+        !(spacetime.protocol === "ws:" && (loopback || privateComposeOrigin)))
     )
       throw new Error("SPACETIMEDB_URI must be an exact WSS origin or loopback WS origin");
     if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(parsed.SPACETIMEDB_DATABASE_NAME ?? ""))
@@ -334,7 +339,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
       timeoutMs: parsed.READINESS_TIMEOUT_MS,
     },
     telemetry: {
-      enabled: parsed.OTEL_ENABLED === "true",
+      enabled: telemetryEnabled,
       serviceName: parsed.OTEL_SERVICE_NAME,
       ...(endpoint === undefined ? {} : { endpoint }),
     },

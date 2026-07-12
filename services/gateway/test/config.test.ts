@@ -136,5 +136,16 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...required, GATEWAY_SQLITE_PATH: "relative.sqlite" })).toThrow(
       /absolute/,
     );
+    const privateProduction = loadConfig({
+      ...required,
+      NODE_ENV: "production",
+      READINESS_TOKEN: "a".repeat(32),
+      SPACETIMEDB_URI: "ws://spacetimedb:3000",
+      SPACETIMEDB_DATABASE_NAME: "project-conversation-staging",
+      OTEL_ENABLED: "false",
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://otel-collector:4318/v1/traces",
+    });
+    expect(privateProduction.nodeEnv).toBe("production");
+    expect(privateProduction.telemetry.endpoint).toBeUndefined();
   });
 });
