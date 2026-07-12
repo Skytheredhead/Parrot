@@ -238,8 +238,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): GatewayConfig {
   if (parsed.SPACETIMEDB_URI !== undefined) {
     const spacetime = new URL(parsed.SPACETIMEDB_URI);
     const loopback = ["127.0.0.1", "::1", "localhost"].includes(spacetime.hostname);
-    const privateComposeOrigin =
-      spacetime.hostname === "spacetimedb" && spacetime.port === "3000";
+    const privateComposeOrigin = spacetime.hostname === "spacetimedb" && spacetime.port === "3000";
     if (
       spacetime.username ||
       spacetime.password ||
