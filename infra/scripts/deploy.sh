@@ -176,8 +176,29 @@ if [[ "$pin_was_present" != true ]]; then
   record_reviewed_spacetimedb_image_pin "$SPACETIMEDB_IMAGE" initial-deploy "initial-$(date -u +%Y%m%dT%H%M%SZ)"
 fi
 $with_gateway && wait_healthy gateway
-$with_edge && wait_healthy edge
-$with_worker && wait_healthy worker
+if [[ "$with_edge" == true ]]; then
+  # Nginx resolves the Compose gateway name when it starts. A gateway replacement can otherwise
+  # leave the unchanged edge process pinned to the removed container address.
+  compose --profile edge up --detach --no-deps --force-recreate edge
+  wait_healthy edge
+  command -v curl >/dev/null 2>&1 || die "curl is required for the external edge liveness gate"
+  external_live_url="${FILE_CAPABILITY_PUBLIC_ORIGIN%/}/health/live"
+  external_live=false
+  for _attempt in {1..12}; do
+    if [[ "$(curl --silent --show-error --max-time 10 --output /dev/null --write-out '%{http_code}' "$external_live_url" || true)" == 200 ]]; then
+      external_live=true
+      break
+    fi
+    sleep 2
+  done
+  [[ "$external_live" == true ]] || die "external edge liveness gate failed: $external_live_url"
+fi
+if [[ "$with_worker" == true ]]; then
+  # network_mode: service:worker binds the sidecar to one worker network namespace. Recreate it
+  # after every worker replacement before evaluating worker provider readiness.
+  compose --profile worker up --detach --no-deps --force-recreate ollama-loopback
+  wait_healthy worker
+fi
 $with_scanner && wait_healthy clamav
 $with_telemetry && wait_healthy otel-collector
 if [[ "$with_gateway" == true ]]; then write_gateway_state committed; fi

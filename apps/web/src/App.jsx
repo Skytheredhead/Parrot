@@ -1,4 +1,3 @@
-import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bell,
   Broadcast,
@@ -32,6 +31,8 @@ import {
   UsersThree,
   X,
 } from "@phosphor-icons/react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useProductionApp } from "./useProductionApp.js";
 
 const people = [
   { name: "Jordan Lee", role: "Producer", image: "/avatars/jordan.png", status: "online" },
@@ -71,6 +72,7 @@ const threads = [
 const initialPosts = [
   {
     id: "rundown",
+    demo: true,
     author: "Jordan Lee",
     role: "Producer",
     image: "/avatars/jordan.png",
@@ -89,6 +91,7 @@ const initialPosts = [
   },
   {
     id: "blocking",
+    demo: true,
     author: "Taylor Morgan",
     role: "Director",
     image: "/avatars/taylor.png",
@@ -105,7 +108,7 @@ function Avatar({ src, name, size = "md", status }) {
   return (
     <span className={`avatar avatar-${size}`}>
       <img src={src} alt={`${name} profile`} />
-      {status ? <span className={`presence presence-${status}`} aria-label={status} /> : null}
+      {status ? <span className={`presence presence-${status}`} title={status} /> : null}
     </span>
   );
 }
@@ -194,8 +197,15 @@ function SectionLabel({ children, action, onAction }) {
   );
 }
 
-function Navigation({ selectedSpace, setSelectedSpace, onToast }) {
-  const spaces = [
+function Navigation({
+  selectedSpace,
+  setSelectedSpace,
+  onToast,
+  workspaceName,
+  liveSpaces,
+  notificationCount = 3,
+}) {
+  const spaces = liveSpaces ?? [
     "Announcements",
     "Production hub",
     "Game day",
@@ -213,7 +223,7 @@ function Navigation({ selectedSpace, setSelectedSpace, onToast }) {
   return (
     <aside className="navigation">
       <div className="workspace-title">
-        <span>Saturday Broadcast</span>
+        <span>{workspaceName ?? "Saturday Broadcast"}</span>
         <CaretDown />
         <IconButton label="Edit workspace" onClick={() => onToast("Workspace settings opened")}>
           <PencilSimple />
@@ -223,7 +233,11 @@ function Navigation({ selectedSpace, setSelectedSpace, onToast }) {
         <NavItem icon={House} onClick={() => onToast("Home selected")}>
           Home
         </NavItem>
-        <NavItem icon={Bell} count="3" onClick={() => onToast("Activity opened")}>
+        <NavItem
+          icon={Bell}
+          count={notificationCount || undefined}
+          onClick={() => onToast("Activity opened")}
+        >
           Activity
         </NavItem>
         <NavItem icon={CalendarBlank} onClick={() => onToast("Calendar opened")}>
@@ -232,16 +246,20 @@ function Navigation({ selectedSpace, setSelectedSpace, onToast }) {
         <SectionLabel action="Add space" onAction={() => onToast("New space composer opened")}>
           Spaces
         </SectionLabel>
-        {spaces.map((space) => (
-          <NavItem
-            key={space}
-            icon={Hash}
-            active={selectedSpace === space}
-            onClick={() => setSelectedSpace(space)}
-          >
-            {space}
-          </NavItem>
-        ))}
+        {spaces.map((space) => {
+          const id = typeof space === "string" ? space : space.id;
+          const label = typeof space === "string" ? space : space.name;
+          return (
+            <NavItem
+              key={id}
+              icon={Hash}
+              active={selectedSpace === id}
+              onClick={() => setSelectedSpace(id, label)}
+            >
+              {label}
+            </NavItem>
+          );
+        })}
         <SectionLabel>Resources</SectionLabel>
         {resources.map(([label, Icon]) => (
           <NavItem key={label} icon={Icon} onClick={() => onToast(`${label} opened`)}>
@@ -271,12 +289,12 @@ function Navigation({ selectedSpace, setSelectedSpace, onToast }) {
   );
 }
 
-function Header({ query, setQuery, onCreate, onToast }) {
+function Header({ query, setQuery, onCreate, onToast, spaceName }) {
   return (
     <header className="topbar">
       <div className="channel-heading">
         <div>
-          <strong>Game day</strong>
+          <strong>{spaceName ?? "Game day"}</strong>
           <CaretDown />
         </div>
         <span>Live production for games and events.</span>
@@ -307,6 +325,39 @@ function Header({ query, setQuery, onCreate, onToast }) {
         </IconButton>
       </div>
     </header>
+  );
+}
+
+function SearchResults({ query, state, onMore }) {
+  if (!query.trim()) return null;
+  return (
+    <section className="search-results" aria-label="Search results" aria-live="polite">
+      <div>
+        <strong>Authorized results</strong>
+        <span>{state.status === "loading" ? "Searching…" : `${state.items.length} found`}</span>
+      </div>
+      {state.error ? <p className="search-error">{state.error}</p> : null}
+      {state.items.map((item) => (
+        <article key={`${item.kind}-${item.id}`}>
+          <span>{item.kind.replaceAll("_", " ")}</span>
+          <div className="search-result-copy">
+            <strong>{item.title}</strong>
+            <p>{item.snippet}</p>
+          </div>
+          <time className="search-result-date">
+            {new Date(item.occurredAt).toLocaleDateString()}
+          </time>
+        </article>
+      ))}
+      {state.status === "ready" && state.items.length === 0 ? (
+        <p className="search-result-empty">No authorized results found.</p>
+      ) : null}
+      {state.nextCursor ? (
+        <button type="button" className="quiet-link" onClick={onMore}>
+          Load more
+        </button>
+      ) : null}
+    </section>
   );
 }
 
@@ -357,7 +408,20 @@ function MediaStrip() {
   );
 }
 
-function ThreadRow({ thread, expanded, onOpen }) {
+function ThreadRow({ thread, expanded, onOpen, onReply }) {
+  const [reply, setReply] = useState("");
+  const [sending, setSending] = useState(false);
+  const contributions = thread.contributions;
+  const submitReply = async () => {
+    if (!reply.trim() || !onReply) return;
+    setSending(true);
+    try {
+      await onReply(thread.id, reply.trim());
+      setReply("");
+    } finally {
+      setSending(false);
+    }
+  };
   return (
     <div className={`thread-wrap ${expanded ? "expanded" : ""}`}>
       <button
@@ -383,26 +447,56 @@ function ThreadRow({ thread, expanded, onOpen }) {
       </button>
       {expanded ? (
         <div className="thread-preview-panel">
-          <div className="mini-message">
-            <Avatar src="/avatars/sam.png" name="Sam Cole" size="sm" />
-            <p>
-              <strong>Sam Cole</strong>
-              <span>I’ve attached the latest pass. The timing lands at 18 seconds.</span>
-            </p>
-          </div>
-          <div className="mini-message">
-            <Avatar src="/avatars/casey.png" name="Casey Nguyen" size="sm" />
-            <p>
-              <strong>Casey Nguyen</strong>
-              <span>Looks good from graphics. I’ll keep the sponsor lockup clear.</span>
-            </p>
-          </div>
+          {contributions ? (
+            contributions.length ? (
+              contributions.map((message) => (
+                <div className="mini-message" key={message.id}>
+                  <Avatar src="/avatars/jordan.png" name={message.author} size="sm" />
+                  <p>
+                    <strong>{message.author}</strong>
+                    <span>{message.body}</span>
+                    <small>{message.created}</small>
+                  </p>
+                </div>
+              ))
+            ) : (
+              <p className="thread-empty">No replies yet. Start the conversation.</p>
+            )
+          ) : (
+            <>
+              <div className="mini-message">
+                <Avatar src="/avatars/sam.png" name="Sam Cole" size="sm" />
+                <p>
+                  <strong>Sam Cole</strong>
+                  <span>I’ve attached the latest pass. The timing lands at 18 seconds.</span>
+                </p>
+              </div>
+              <div className="mini-message">
+                <Avatar src="/avatars/casey.png" name="Casey Nguyen" size="sm" />
+                <p>
+                  <strong>Casey Nguyen</strong>
+                  <span>Looks good from graphics. I’ll keep the sponsor lockup clear.</span>
+                </p>
+              </div>
+            </>
+          )}
           <label className="quick-reply">
             <input
               aria-label={`Reply in ${thread.title}`}
               placeholder={`Reply in ${thread.title}`}
+              value={reply}
+              onChange={(event) => setReply(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void submitReply();
+              }}
             />
-            <button type="button">Reply</button>
+            <button
+              type="button"
+              disabled={sending || !reply.trim()}
+              onClick={() => void submitReply()}
+            >
+              {sending ? "Sending…" : "Reply"}
+            </button>
           </label>
         </div>
       ) : null}
@@ -446,8 +540,20 @@ function OutcomeRows({ onReview, onToast, agentApproved }) {
   );
 }
 
-function PostCard({ post, expandedThread, setExpandedThread, onReview, onToast, agentApproved }) {
+function PostCard({
+  post,
+  expandedThread,
+  setExpandedThread,
+  onReview,
+  onToast,
+  agentApproved,
+  onCreateThread,
+  onReply,
+}) {
   const isPrimary = post.id === "rundown";
+  const postThreads = post.threads ?? (isPrimary ? threads : []);
+  const [threadTitle, setThreadTitle] = useState("");
+  const [threading, setThreading] = useState(false);
   return (
     <article className={`post-card ${isPrimary ? "primary-post" : "secondary-post"}`}>
       <header className="post-author">
@@ -481,14 +587,14 @@ function PostCard({ post, expandedThread, setExpandedThread, onReview, onToast, 
             ))}
           </ul>
         ) : null}
-        {isPrimary ? (
+        {post.demo && isPrimary ? (
           <MediaStrip />
-        ) : (
+        ) : post.demo ? (
           <div className="document-preview">
             <FileText />
             <span>Camera_blocking_notes.pdf</span>
           </div>
-        )}
+        ) : null}
       </div>
       <div className="reaction-row">
         <Reaction icon={ThumbsUp} label="Helpful" initialCount={12} onToast={onToast} />
@@ -502,34 +608,66 @@ function PostCard({ post, expandedThread, setExpandedThread, onReview, onToast, 
           <Smiley />
         </IconButton>
       </div>
-      {isPrimary ? (
+      {postThreads.length || onCreateThread ? (
         <>
           <div className="thread-heading">
             <button
               type="button"
-              onClick={() => setExpandedThread(expandedThread ? null : "opening")}
+              onClick={() =>
+                postThreads[0] && setExpandedThread(expandedThread ? null : postThreads[0].id)
+              }
             >
-              3 threads {expandedThread ? <CaretUp /> : <CaretDown />}
+              {postThreads.length} {postThreads.length === 1 ? "thread" : "threads"}{" "}
+              {expandedThread ? <CaretUp /> : <CaretDown />}
             </button>
           </div>
           <div className="thread-list">
-            {threads.map((thread) => (
+            {postThreads.map((thread) => (
               <ThreadRow
                 key={thread.id}
                 thread={thread}
                 expanded={expandedThread === thread.id}
                 onOpen={(id) => setExpandedThread(expandedThread === id ? null : id)}
+                onReply={onReply}
               />
             ))}
           </div>
-          <OutcomeRows onReview={onReview} onToast={onToast} agentApproved={agentApproved} />
+          {onCreateThread ? (
+            <form
+              className="new-thread"
+              onSubmit={async (event) => {
+                event.preventDefault();
+                if (!threadTitle.trim()) return;
+                setThreading(true);
+                try {
+                  await onCreateThread(post.id, threadTitle.trim());
+                  setThreadTitle("");
+                } finally {
+                  setThreading(false);
+                }
+              }}
+            >
+              <input
+                aria-label={`New thread on ${post.title}`}
+                placeholder="Start a named thread"
+                value={threadTitle}
+                onChange={(event) => setThreadTitle(event.target.value)}
+              />
+              <button type="submit" disabled={threading || !threadTitle.trim()}>
+                {threading ? "Starting…" : "Start thread"}
+              </button>
+            </form>
+          ) : null}
+          {post.demo ? (
+            <OutcomeRows onReview={onReview} onToast={onToast} agentApproved={agentApproved} />
+          ) : null}
         </>
       ) : null}
     </article>
   );
 }
 
-function RightRail({ onReview, onToast, completed, setCompleted }) {
+function RightRail({ onReview, onToast, completed, setCompleted, files, onDownload, fileState }) {
   const agents = [
     ["Rundown Assistant", "Watching for updates", true],
     ["Graphic Preflight", "Monitoring assets", true],
@@ -567,6 +705,38 @@ function RightRail({ onReview, onToast, completed, setCompleted }) {
           See all
         </button>
       </section>
+      {files ? (
+        <section>
+          <h3>Files — {files.length}</h3>
+          <div className="live-file-list">
+            {files.slice(0, 6).map((file) => (
+              <button
+                type="button"
+                key={file.id}
+                disabled={file.state !== "Clean" || fileState?.status === "downloading"}
+                onClick={() => onDownload(file.id)}
+              >
+                <FileText />
+                <span>
+                  <strong>{file.name}</strong>
+                  <small>{file.state === "Clean" ? "Clean · Download" : file.state}</small>
+                </span>
+              </button>
+            ))}
+            {files.length === 0 ? <p className="rail-empty">No files in this space.</p> : null}
+          </div>
+          {fileState?.status !== "idle" ? (
+            <p className={`file-operation ${fileState.status}`} role="status">
+              {fileState.error ||
+                (fileState.status === "uploading"
+                  ? `Uploading ${fileState.name}…`
+                  : fileState.status === "quarantined"
+                    ? `${fileState.name} is quarantined for scanning.`
+                    : "Preparing download…")}
+            </p>
+          ) : null}
+        </section>
+      ) : null}
       <section>
         <h3>Accountable agents — 3</h3>
         <div className="agent-list">
@@ -638,19 +808,17 @@ function RightRail({ onReview, onToast, completed, setCompleted }) {
   );
 }
 
-function Composer({ onClose, onPublish }) {
+function Composer({ onClose, onPublish, live }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
+  const [file, setFile] = useState(null);
+  const fileRef = useRef(null);
   const canPublish = title.trim().length > 3 && body.trim().length > 5;
+  const titleRef = useRef(null);
+  useEffect(() => titleRef.current?.focus(), []);
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
-      <section
-        className="dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="composer-title"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
+    <div className="dialog-backdrop" role="presentation">
+      <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="composer-title">
         <header>
           <div>
             <span>Game day</span>
@@ -663,7 +831,7 @@ function Composer({ onClose, onPublish }) {
         <label>
           Title
           <input
-            autoFocus
+            ref={titleRef}
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             placeholder="What should people know?"
@@ -679,20 +847,31 @@ function Composer({ onClose, onPublish }) {
           />
         </label>
         <div className="composer-tools">
-          <button type="button">
+          <input
+            ref={fileRef}
+            className="visually-hidden"
+            type="file"
+            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+          />
+          <button type="button" onClick={() => fileRef.current?.click()}>
             <Paperclip /> Attach file
           </button>
           <button type="button">
             <UsersThree /> Game day crew
           </button>
         </div>
+        {file ? (
+          <p className="selected-file">
+            <Paperclip /> {file.name} · {Math.ceil(file.size / 1024)} KB
+          </p>
+        ) : null}
         <footer>
           <p>Threads, decisions, and tasks can be added after publishing.</p>
           <button
             type="button"
             className="primary-button"
             disabled={!canPublish}
-            onClick={() => onPublish({ title, body })}
+            onClick={() => onPublish({ title, body, file: live ? file : null })}
           >
             Publish post
           </button>
@@ -704,13 +883,12 @@ function Composer({ onClose, onPublish }) {
 
 function AgentReview({ approved, onApprove, onClose }) {
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
+    <div className="dialog-backdrop" role="presentation">
       <section
         className="dialog agent-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="agent-title"
-        onMouseDown={(event) => event.stopPropagation()}
       >
         <header>
           <div className="agent-title">
@@ -779,7 +957,28 @@ function AgentReview({ approved, onApprove, onClose }) {
   );
 }
 
-export function App() {
+function ProductionGate({ title, message, action, actionLabel }) {
+  return (
+    <main className="production-gate">
+      <div className="production-gate-card">
+        <span className="parrot-mark">
+          <Broadcast weight="fill" />
+        </span>
+        <p className="eyebrow">Parrot</p>
+        <h1>{title}</h1>
+        <p>{message}</p>
+        {action ? (
+          <button type="button" className="primary-button" onClick={action}>
+            {actionLabel}
+          </button>
+        ) : null}
+      </div>
+    </main>
+  );
+}
+
+export function App({ auth }) {
+  const production = useProductionApp(auth);
   const [selectedSpace, setSelectedSpace] = useState("Game day");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("Recent activity");
@@ -797,15 +996,49 @@ export function App() {
     toastTimer.current = window.setTimeout(() => setToast(""), 2400);
   };
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
+  const liveWorkspace = production.data.workspaces.find(
+    (workspace) => workspace.id === production.selectedWorkspaceId,
+  );
+  const liveSpaces = production.data.spaces.filter(
+    (space) => space.workspaceId === production.selectedWorkspaceId,
+  );
+  const liveSpace = liveSpaces.find((space) => space.id === production.selectedSpaceId);
+  const displayedPosts = production.live
+    ? production.data.posts.filter(
+        (post) => !production.selectedSpaceId || post.spaceId === production.selectedSpaceId,
+      )
+    : posts;
+  useEffect(() => {
+    if (!production.live) return undefined;
+    const timer = window.setTimeout(() => void production.search(query), query.trim() ? 280 : 0);
+    return () => window.clearTimeout(timer);
+  }, [production.live, production.search, query]);
   const filteredPosts = useMemo(() => {
     const normalized = query.trim().toLowerCase();
+    if (production.live && normalized) {
+      const allowedPostIds = new Set(
+        production.searchState.items.filter((item) => item.kind === "post").map((item) => item.id),
+      );
+      return displayedPosts.filter((post) => allowedPostIds.has(post.id));
+    }
     return normalized
-      ? posts.filter((post) =>
+      ? displayedPosts.filter((post) =>
           `${post.title} ${post.body} ${post.author}`.toLowerCase().includes(normalized),
         )
-      : posts;
-  }, [posts, query]);
-  const publishPost = ({ title, body }) => {
+      : displayedPosts;
+  }, [displayedPosts, production.live, production.searchState.items, query]);
+  const publishPost = async ({ title, body, file }) => {
+    if (production.live) {
+      try {
+        await production.createPost({ title, body });
+        if (file) await production.uploadFile(file);
+        setComposerOpen(false);
+        showToast(file ? "Post published; attachment queued for scanning" : "Post published");
+      } catch (reason) {
+        showToast(reason instanceof Error ? reason.message : "Post could not be published");
+      }
+      return;
+    }
     setPosts((items) => [
       {
         id: `post-${Date.now()}`,
@@ -824,15 +1057,81 @@ export function App() {
     setComposerOpen(false);
     showToast("Post published to Game day");
   };
+  if (production.live && !production.configured) {
+    return (
+      <ProductionGate title="Parrot needs its production settings" message={production.error} />
+    );
+  }
+  if (
+    production.live &&
+    (production.status === "signed-out" || production.status === "authenticating")
+  ) {
+    return (
+      <ProductionGate
+        title={
+          production.status === "authenticating"
+            ? "Restoring your session…"
+            : "Your team, back in context"
+        }
+        message={production.error || "Sign in with WorkOS to open your Parrot workspace."}
+        action={production.status === "signed-out" ? production.signIn : undefined}
+        actionLabel="Sign in"
+      />
+    );
+  }
+  if (production.live && production.status === "bootstrap-required") {
+    return (
+      <ProductionGate
+        title="Create your first Parrot workspace"
+        message="This account does not have a workspace yet. Parrot will create one owner workspace, then switch to short-lived gateway database tickets."
+        action={() => void production.bootstrapWorkspace()}
+        actionLabel="Create Parrot workspace"
+      />
+    );
+  }
+  if (
+    production.live &&
+    ["connecting", "discovering", "bootstrapping"].includes(production.status) &&
+    production.data.workspaces.length === 0
+  ) {
+    return (
+      <ProductionGate
+        title={
+          production.status === "bootstrapping"
+            ? "Creating your workspace…"
+            : "Connecting to your workspace…"
+        }
+        message="Parrot is establishing an encrypted realtime session."
+      />
+    );
+  }
   return (
     <div className="app-shell">
+      {production.live && (production.status === "reconnecting" || production.error) ? (
+        <div className="connection-banner" role="status">
+          <span>
+            {production.status === "reconnecting"
+              ? "Connection interrupted — reconnecting…"
+              : production.error}
+          </span>
+          <button type="button" onClick={production.signOut}>
+            Sign out
+          </button>
+        </div>
+      ) : null}
       <WorkspaceRail onToast={showToast} />
       <Navigation
-        selectedSpace={selectedSpace}
-        setSelectedSpace={(space) => {
-          setSelectedSpace(space);
-          showToast(`${space} selected`);
+        selectedSpace={production.live ? production.selectedSpaceId : selectedSpace}
+        setSelectedSpace={(space, label = space) => {
+          if (production.live) production.setSelectedSpaceId(space);
+          else setSelectedSpace(space);
+          showToast(`${label} selected`);
         }}
+        workspaceName={liveWorkspace?.name}
+        liveSpaces={production.live ? liveSpaces : undefined}
+        notificationCount={
+          production.live ? production.data.notifications.filter((item) => item.unread).length : 3
+        }
         onToast={showToast}
       />
       <main className="main-column">
@@ -841,6 +1140,7 @@ export function App() {
           setQuery={setQuery}
           onCreate={() => setComposerOpen(true)}
           onToast={showToast}
+          spaceName={liveSpace?.name}
         />
         <div className="feed-scroll">
           <div className="feed-toolbar">
@@ -856,6 +1156,13 @@ export function App() {
               <CaretDown />
             </button>
           </div>
+          {production.live ? (
+            <SearchResults
+              query={query}
+              state={production.searchState}
+              onMore={() => void production.search(query, { append: true })}
+            />
+          ) : null}
           <div className="feed">
             {filteredPosts.map((post) => (
               <PostCard
@@ -866,6 +1173,38 @@ export function App() {
                 onReview={() => setReviewOpen(true)}
                 onToast={showToast}
                 agentApproved={agentApproved}
+                onCreateThread={
+                  production.live
+                    ? async (postId, title) => {
+                        try {
+                          await production.createThread(postId, title);
+                          showToast("Thread started");
+                        } catch (reason) {
+                          showToast(
+                            reason instanceof Error
+                              ? reason.message
+                              : "Thread could not be started",
+                          );
+                          throw reason;
+                        }
+                      }
+                    : undefined
+                }
+                onReply={
+                  production.live
+                    ? async (threadId, body) => {
+                        try {
+                          await production.replyToThread(threadId, body);
+                          showToast("Reply sent");
+                        } catch (reason) {
+                          showToast(
+                            reason instanceof Error ? reason.message : "Reply could not be sent",
+                          );
+                          throw reason;
+                        }
+                      }
+                    : undefined
+                }
               />
             ))}
             {filteredPosts.length === 0 ? (
@@ -886,6 +1225,13 @@ export function App() {
         onToast={showToast}
         completed={completed}
         setCompleted={setCompleted}
+        files={
+          production.live
+            ? production.data.files.filter((file) => file.spaceId === production.selectedSpaceId)
+            : undefined
+        }
+        onDownload={production.downloadFile}
+        fileState={production.fileState}
       />
       <nav className="mobile-nav" aria-label="Mobile navigation">
         <IconButton label="Home">
@@ -910,7 +1256,11 @@ export function App() {
         </IconButton>
       </nav>
       {composerOpen ? (
-        <Composer onClose={() => setComposerOpen(false)} onPublish={publishPost} />
+        <Composer
+          onClose={() => setComposerOpen(false)}
+          onPublish={publishPost}
+          live={production.live}
+        />
       ) : null}
       {reviewOpen ? (
         <AgentReview

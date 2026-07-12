@@ -1,7 +1,17 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { constants } from "node:fs";
-import { access, mkdir, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  access,
+  link,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import type { ObjectStore, ObjectVersion } from "./adapters.js";
 import type {
@@ -17,6 +27,17 @@ import type {
 const SAFE_KEY =
   /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127})(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){0,31}$/;
 const HASH = /^[a-f0-9]{64}$/;
+const VERSION = HASH;
+const CONTENT_TYPE = /^[^\s/]+\/[^\s/]+$/;
+
+interface SharedObjectDescriptor {
+  schemaVersion: 1;
+  objectKey: string;
+  objectVersion: string;
+  sizeBytes: number;
+  contentType: string;
+  checksumSha256: string;
+}
 
 const ensureKey = (key: string): string => {
   if (!SAFE_KEY.test(key) || key.includes("..") || key.includes("\\"))
@@ -35,6 +56,44 @@ const aborted = (signal: AbortSignal): void => {
 };
 
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+
+const keyHash = (key: string): string => createHash("sha256").update(ensureKey(key)).digest("hex");
+
+const sharedDescriptorPath = (root: string, key: string): string => {
+  const hash = keyHash(key);
+  return join(root, "heads", hash.slice(0, 2), `${hash}.json`);
+};
+
+const sharedVersionPath = (root: string, key: string, version: string): string => {
+  if (!VERSION.test(version)) throw new Error("object_version_invalid");
+  const hash = keyHash(key);
+  return join(root, "objects", hash.slice(0, 2), hash, version);
+};
+
+const parseSharedDescriptor = (value: unknown, expectedKey?: string): SharedObjectDescriptor => {
+  if (typeof value !== "object" || value === null) throw new Error("object_descriptor_invalid");
+  const row = value as Partial<SharedObjectDescriptor>;
+  if (
+    row.schemaVersion !== 1 ||
+    typeof row.objectKey !== "string" ||
+    (expectedKey !== undefined && row.objectKey !== expectedKey) ||
+    typeof row.objectVersion !== "string" ||
+    !VERSION.test(row.objectVersion) ||
+    typeof row.sizeBytes !== "number" ||
+    !Number.isSafeInteger(row.sizeBytes) ||
+    row.sizeBytes < 0 ||
+    typeof row.contentType !== "string" ||
+    row.contentType.length < 3 ||
+    row.contentType.length > 200 ||
+    !CONTENT_TYPE.test(row.contentType) ||
+    typeof row.checksumSha256 !== "string" ||
+    !HASH.test(row.checksumSha256) ||
+    row.objectVersion !== row.checksumSha256
+  )
+    throw new Error("object_descriptor_invalid");
+  ensureKey(row.objectKey);
+  return row as SharedObjectDescriptor;
+};
 
 /** Immutable, content-address-checked object operations rooted below one private directory. */
 export class FilesystemObjectStore implements ObjectStore {
@@ -67,7 +126,11 @@ export class FilesystemObjectStore implements ObjectStore {
 
   async *readStream(key: string, signal: AbortSignal): AsyncIterable<Uint8Array> {
     aborted(signal);
-    const handle = await open(within(this.root, key), "r");
+    const descriptor = await this.sharedDescriptor(key);
+    const path = descriptor
+      ? sharedVersionPath(this.root, key, descriptor.objectVersion)
+      : within(this.root, key);
+    const handle = await open(path, "r");
     let total = 0;
     try {
       for await (const chunk of handle.createReadStream({ highWaterMark: 64 * 1024, signal })) {
@@ -80,20 +143,76 @@ export class FilesystemObjectStore implements ObjectStore {
     }
   }
 
-  async writeClean(key: string, bytes: Uint8Array, signal: AbortSignal): Promise<string> {
+  async writeClean(
+    key: string,
+    bytes: Uint8Array,
+    contentType: string,
+    signal: AbortSignal,
+  ): Promise<string> {
     aborted(signal);
     if (bytes.byteLength > this.maxBytes) throw new Error("object_too_large");
-    const destination = within(this.root, key);
-    await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+    if (contentType.length < 3 || contentType.length > 200 || !CONTENT_TYPE.test(contentType))
+      throw new Error("object_content_type_invalid");
+    ensureKey(key);
+    const existingDescriptor = await this.sharedDescriptor(key);
     const version = sha256(bytes);
+    if (existingDescriptor) {
+      if (
+        existingDescriptor.objectVersion !== version ||
+        existingDescriptor.checksumSha256 !== version ||
+        existingDescriptor.sizeBytes !== bytes.byteLength ||
+        existingDescriptor.contentType !== contentType
+      )
+        throw new Error("immutable_object_conflict");
+      return version;
+    }
+    const destination = sharedVersionPath(this.root, key, version);
+    await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+    const temp = join(this.root, "tmp", `${randomUUID()}.part`);
+    await mkdir(dirname(temp), { recursive: true, mode: 0o700 });
     try {
-      await writeFile(destination, bytes, { flag: "wx", mode: 0o600, signal });
+      await writeFile(temp, bytes, { flag: "wx", mode: 0o600, signal });
+      await link(temp, destination);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const existing = await readFile(destination, { signal });
       const existingHash = sha256(existing);
       if (!timingSafeEqual(Buffer.from(existingHash), Buffer.from(version)))
         throw new Error("immutable_object_conflict");
+    } finally {
+      await rm(temp, { force: true });
+    }
+    const descriptor: SharedObjectDescriptor = {
+      schemaVersion: 1,
+      objectKey: key,
+      objectVersion: version,
+      sizeBytes: bytes.byteLength,
+      contentType,
+      checksumSha256: version,
+    };
+    const descriptorPath = sharedDescriptorPath(this.root, key);
+    await mkdir(dirname(descriptorPath), { recursive: true, mode: 0o700 });
+    const descriptorTemp = join(this.root, "tmp", `${randomUUID()}.json`);
+    try {
+      await writeFile(descriptorTemp, JSON.stringify(descriptor), {
+        flag: "wx",
+        mode: 0o600,
+        signal,
+      });
+      await link(descriptorTemp, descriptorPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const published = await this.sharedDescriptor(key);
+      if (
+        !published ||
+        published.objectVersion !== version ||
+        published.checksumSha256 !== version ||
+        published.sizeBytes !== bytes.byteLength ||
+        published.contentType !== contentType
+      )
+        throw new Error("immutable_object_conflict");
+    } finally {
+      await rm(descriptorTemp, { force: true });
     }
     return version;
   }
@@ -101,6 +220,8 @@ export class FilesystemObjectStore implements ObjectStore {
   async stat(key: string, signal: AbortSignal): Promise<ObjectVersion | undefined> {
     aborted(signal);
     try {
+      const descriptor = await this.sharedDescriptor(key);
+      if (descriptor) return { versionTag: descriptor.objectVersion };
       return { versionTag: sha256(await readFile(within(this.root, key), { signal })) };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -110,8 +231,11 @@ export class FilesystemObjectStore implements ObjectStore {
 
   async deleteIfMatch(key: string, versionTag: string, signal: AbortSignal): Promise<boolean> {
     aborted(signal);
-    if (!HASH.test(versionTag)) throw new Error("object_version_invalid");
-    const path = within(this.root, key);
+    if (!VERSION.test(versionTag)) throw new Error("object_version_invalid");
+    const descriptor = await this.sharedDescriptor(key);
+    const path = descriptor
+      ? sharedVersionPath(this.root, key, descriptor.objectVersion)
+      : within(this.root, key);
     let actual: string;
     try {
       actual = sha256(await readFile(path, { signal }));
@@ -119,7 +243,15 @@ export class FilesystemObjectStore implements ObjectStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
       throw error;
     }
-    if (!timingSafeEqual(Buffer.from(actual), Buffer.from(versionTag))) return false;
+    if (
+      !timingSafeEqual(
+        Buffer.from(actual),
+        Buffer.from(descriptor?.checksumSha256 ?? versionTag),
+      ) ||
+      (descriptor !== undefined && descriptor.objectVersion !== versionTag)
+    )
+      return false;
+    if (descriptor) await rm(sharedDescriptorPath(this.root, key), { force: true });
     await rm(path, { force: true });
     return true;
   }
@@ -127,6 +259,32 @@ export class FilesystemObjectStore implements ObjectStore {
   async *list(prefix: string, signal: AbortSignal): AsyncIterable<string> {
     aborted(signal);
     const safePrefix = ensureKey(prefix);
+    const heads = join(this.root, "heads");
+    const headPending = [heads];
+    while (headPending.length > 0) {
+      const current = headPending.pop();
+      if (!current) break;
+      let entries: Dirent[];
+      try {
+        entries = await readdir(current, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
+        throw error;
+      }
+      for (const entry of entries) {
+        aborted(signal);
+        const path = join(current, entry.name);
+        if (entry.isDirectory()) headPending.push(path);
+        else if (entry.isFile() && entry.name.endsWith(".json")) {
+          const descriptor = parseSharedDescriptor(JSON.parse(await readFile(path, "utf8")));
+          if (
+            descriptor.objectKey === safePrefix ||
+            descriptor.objectKey.startsWith(`${safePrefix}/`)
+          )
+            yield descriptor.objectKey;
+        }
+      }
+    }
     const base = within(this.root, safePrefix);
     const pending = [base];
     while (pending.length > 0) {
@@ -146,6 +304,18 @@ export class FilesystemObjectStore implements ObjectStore {
         if (entry.isDirectory()) pending.push(path);
         else if (entry.isFile()) yield relative(this.root, path).split(sep).join("/");
       }
+    }
+  }
+
+  private async sharedDescriptor(key: string): Promise<SharedObjectDescriptor | undefined> {
+    try {
+      return parseSharedDescriptor(
+        JSON.parse(await readFile(sharedDescriptorPath(this.root, key), "utf8")),
+        key,
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
     }
   }
 }

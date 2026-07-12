@@ -18,8 +18,9 @@ must remain in memory.
 
 ## Connection sequence
 
-1. Complete authentication with the selected OIDC provider. Provider selection is still an
-   explicit deployment decision.
+1. Complete authentication through the official `@workos-inc/authkit-react` provider. The browser
+   receives only the public WorkOS client ID and Authentication API hostname. WorkOS API keys,
+   M2M secrets, and refresh tokens outside AuthKit's managed cookie are server-only.
 2. Construct `ProjectConversationClient` with the approved HTTPS gateway origin. Browser-session
    clients supply the readable CSRF cookie value; bearer clients supply an access-token callback.
 3. Request `databaseToken(workspaceId)`. The gateway resolves the external identity to the current
@@ -34,6 +35,47 @@ must remain in memory.
 
 Never store access, database, stream, upload, or download capabilities in local storage, analytics,
 logs, URLs owned by the UI, error reports, or persisted client state.
+
+## Parrot web runtime
+
+The production shell in `apps/web` keeps the selected post-first interface while replacing demo
+rows with caller-scoped SpacetimeDB views. A production build never silently enters demo mode. It
+fails closed unless these public settings are present:
+
+- `VITE_WORKOS_CLIENT_ID` (defaults to Parrot's public client ID)
+- `VITE_WORKOS_API_HOSTNAME` (required unless staging dev mode is explicitly enabled)
+- `VITE_WORKOS_DEV_MODE=true` only for the temporary WorkOS staging evaluation
+- `VITE_GATEWAY_URL` (defaults to `https://parrotapi.skylarenns.com`)
+- `VITE_SPACETIMEDB_URI`
+- `VITE_SPACETIMEDB_DATABASE_NAME`
+- `VITE_PARROT_WORKSPACE_ID` optionally pins the initial ticket scope
+
+Production WorkOS configuration uses callback `https://parrot.skylarenns.com/callback`, login
+`https://parrot.skylarenns.com/login`, sign-out return `https://parrot.skylarenns.com/signed-out`,
+and exact CORS origin `https://parrot.skylarenns.com`. Vercel rewrites these routes to the SPA. With
+a production WorkOS environment, configure a custom Authentication API hostname and leave dev mode
+off so AuthKit can use its secure HTTP-only refresh cookie. The explicit staging dev-mode path
+stores refresh state in local storage and is a launch blocker; it is acceptable only for the current
+one-person, non-sensitive evaluation.
+
+AuthKit's `getAccessToken()` is supplied directly to the gateway SDK and is never copied into React
+state or application storage. The web client calls `databaseToken(workspaceId)` before every initial
+connection or reconnect and gives only the returned short-lived ticket to `DbConnection`. Logout
+closes the socket, discards its connection reference and workspace cache, then calls AuthKit
+`signOut`. A gateway 401 or authorization fence must follow the same teardown path rather than retry
+forever.
+
+For the first owner, no workspace UUID exists yet. When no configured or previously discovered UUID
+is available, the browser may use the in-memory WorkOS access token for one narrowly scoped direct
+SpacetimeDB connection that subscribes only to `current_user` and `my_workspaces`. Existing accounts
+discover their first caller-visible workspace; empty accounts get an explicit `bootstrap_owner`
+action with workspace name `Parrot`. As soon as `my_workspaces` yields an ID, the discovery socket is
+closed and all normal traffic switches to gateway-minted database tickets. Only that non-secret UUID
+is retained in local storage. Tokens, rows, commands, and tickets are never persisted. A forbidden
+stored UUID is deleted and rediscovered rather than replaced with a fabricated value. This exception
+depends on the approved SpacetimeDB endpoint accepting the exact WorkOS identity token for these two
+caller-safe views and bootstrap reducer; if production disables that path, bootstrap requires a
+gateway endpoint instead.
 
 ## Authoritative public views
 
@@ -76,12 +118,13 @@ per visible space. Local mute and digest minutes use an IANA-style timezone iden
 digest authority applies a once-per-local-date cursor, while the worker performs daylight-saving
 conversion and reconciles ambiguous provider outcomes before any retry.
 
-Mentions, task assignments, and replies are `Direct` notification events. A thread contribution
+Mentions and replies are direct-attention notification kinds. A thread contribution
 notifies the parent contribution author, or the root-post author for a top-level contribution; a
 direct-message reply notifies the parent-message author. The UI may play a short sound only after a
-user gesture has unlocked browser audio, only for a newly inserted unread Direct event that was not
-authored by the current user, and only when mute/preferences allow it. Persist a notification-ID
-watermark so reconnect/replay never repeats the sound. This is active-browser behavior, not Web Push
+user gesture has unlocked browser audio, only for a newly inserted unread mention or reply that was
+not authored by the current user, and only when mute/preferences allow it. Hydrate the initial cache
+without sound and retain a session-only notification-ID watermark so reconnect/replay never repeats
+the sound. This is active-browser behavior, not Web Push
 and not a guarantee when the tab or browser is closed.
 
 Workspace owners configure explicit retention/grace inputs with `configure_workspace_lifecycle`.
@@ -125,6 +168,14 @@ has not been returned through an authorized view/gateway response.
   and must never be persisted or placed in a URL. Session management uses `listSessions`,
   `revokeSession`, and `revokeOtherSessions`; bulk revocation can require provider reauthentication.
 
+The Parrot web shell implements permission-safe search only through the gateway SDK, with debounced
+queries, stale-response suppression, explicit loading/error/empty states, and cursor pagination.
+Search results never grant visibility; live post cards remain sourced from caller-scoped views.
+Files use the three-stage checksum/capability/completion flow and remain visibly quarantined until
+`visible_files` reports `Clean`; only clean rows expose download actions. Named threads use
+`create_named_thread`, replies use `add_contribution` with `ContributionKind.Message`, and expanded
+thread content is rendered from `visible_contributions` rather than optimistic placeholder data.
+
 ## Agent runs
 
 Start, cancel, inspect, approve, and retry agent work through the generated reducers/views. The
@@ -135,8 +186,9 @@ by the authoritative views.
 
 ## Current intentional gaps
 
-The contract is not a claim that a production environment exists. Provider selection, public
-domains, durable production adapters, export retrieval, provider-specific deletion conformance,
-production restore evidence, and the final threat-model assumptions remain approval-gated. The
-requirements matrix records feature-level readiness. The UI should not fabricate flows for rows
-marked `not started` or `blocked on decision`.
+The checked-in web runtime is deployable once the public settings and initial workspace ID are
+injected, but the supplied `sk_test` credential belongs to WorkOS staging. Production authentication
+therefore remains blocked on a production WorkOS environment plus custom Authentication API domain,
+or a separately reviewed BFF session architecture. Export retrieval, provider-specific deletion
+conformance, and production restore evidence also remain approval-gated. The UI should not fabricate
+flows for rows marked `not started` or `blocked on decision`.

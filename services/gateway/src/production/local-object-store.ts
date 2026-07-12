@@ -15,6 +15,7 @@ import { conflict, invalidInput, notFound, unavailable } from "../errors.js";
 const keyPattern =
   /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127})(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){1,7}$/;
 const checksumPattern = /^[a-f0-9]{64}$/;
+const versionPattern = checksumPattern;
 const tokenPartPattern = /^[A-Za-z0-9_-]+$/;
 const capabilityPayload = z.discriminatedUnion("op", [
   z
@@ -23,7 +24,7 @@ const capabilityPayload = z.discriminatedUnion("op", [
       op: z.literal("put"),
       id: z.uuid(),
       key: z.string().min(3).max(1_024).regex(keyPattern),
-      version: z.uuid(),
+      version: z.string().regex(versionPattern),
       type: z
         .string()
         .min(3)
@@ -40,7 +41,7 @@ const capabilityPayload = z.discriminatedUnion("op", [
       op: z.literal("get"),
       id: z.uuid(),
       key: z.string().min(3).max(1_024).regex(keyPattern),
-      version: z.uuid(),
+      version: z.string().regex(versionPattern),
       type: z
         .string()
         .min(3)
@@ -105,7 +106,7 @@ function descriptorSchema(value: unknown): ObjectDescriptor {
     .object({
       schemaVersion: z.literal(1),
       objectKey: z.string().regex(keyPattern),
-      objectVersion: z.uuid(),
+      objectVersion: z.string().regex(versionPattern),
       sizeBytes: z.number().int().nonnegative().max(5_000_000_000),
       contentType: z
         .string()
@@ -115,6 +116,9 @@ function descriptorSchema(value: unknown): ObjectDescriptor {
       checksumSha256: z.string().regex(checksumPattern),
     })
     .strict()
+    .refine((descriptor) => descriptor.objectVersion === descriptor.checksumSha256, {
+      message: "Object version must equal its content checksum",
+    })
     .parse(value);
 }
 
@@ -192,7 +196,7 @@ export class LocalCapabilityObjectStore implements ObjectStore, ObjectCapability
       op: "put",
       id: randomUUID(),
       key: input.objectKey,
-      version: randomUUID(),
+      version: input.constraints.checksumSha256.toLowerCase(),
       type: input.constraints.contentType,
       bytes: input.constraints.sizeBytes,
       sha256: input.constraints.checksumSha256.toLowerCase(),
@@ -363,9 +367,11 @@ export class LocalCapabilityObjectStore implements ObjectStore, ObjectCapability
     );
     await mkdir(dirname(versionPath), { recursive: true, mode: 0o700 });
     await mkdir(dirname(descriptorPath), { recursive: true, mode: 0o700 });
+    let versionLinked = false;
     try {
       // Link is non-overwriting and therefore preserves immutable versions under races.
       await link(tempPath, versionPath);
+      versionLinked = true;
       const descriptor: ObjectDescriptor = {
         schemaVersion: 1,
         objectKey: input.grant.objectKey,
@@ -388,7 +394,7 @@ export class LocalCapabilityObjectStore implements ObjectStore, ObjectCapability
       // Publishing a fully-synced descriptor through link is exclusive and non-overwriting.
       await link(descriptorTempPath, descriptorPath);
     } catch (error) {
-      await rm(versionPath, { force: true });
+      if (versionLinked) await rm(versionPath, { force: true });
       if ((error as NodeJS.ErrnoException).code === "EEXIST")
         throw conflict("Object key is immutable and already exists");
       throw error;
@@ -493,7 +499,7 @@ export class LocalCapabilityObjectStore implements ObjectStore, ObjectCapability
   }
 
   private versionPath(key: string, version: string): string {
-    if (!z.uuid().safeParse(version).success) throw invalidInput("Object version is invalid");
+    if (!versionPattern.test(version)) throw invalidInput("Object version is invalid");
     const hash = this.keyHash(key);
     return join(this.options.rootDirectory, "objects", hash.slice(0, 2), hash, version);
   }

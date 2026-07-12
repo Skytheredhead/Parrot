@@ -17,15 +17,27 @@ importers:
       '@phosphor-icons/react':
         specifier: 2.1.10
         version: 2.1.10(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
+      '@project-conversation/client-sdk':
+        specifier: workspace:*
+        version: link:../../packages/client-sdk
+      '@project-conversation/db-bindings':
+        specifier: workspace:*
+        version: link:../../packages/db-bindings
       '@vitejs/plugin-react':
         specifier: 5.0.4
         version: 5.0.4(vite@6.4.2(@types/node@24.13.3)(lightningcss@1.32.0)(tsx@4.20.6)(yaml@2.9.0))
+      '@workos-inc/authkit-react':
+        specifier: 0.16.1
+        version: 0.16.1(react@19.2.0)
       react:
         specifier: 19.2.0
         version: 19.2.0
       react-dom:
         specifier: 19.2.0
         version: 19.2.0(react@19.2.0)
+      spacetimedb:
+        specifier: 2.6.1
+        version: 2.6.1(react@19.2.0)
       vite:
         specifier: 6.4.2
         version: 6.4.2(@types/node@24.13.3)(lightningcss@1.32.0)(tsx@4.20.6)(yaml@2.9.0)
@@ -1555,6 +1567,14 @@ packages:
 
   '@vitest/utils@4.1.10':
     resolution: {integrity: sha512-fy9am/HWxbaGt/Sawrp90vt6Y6jQwf1RX77cz3uwoJwJVMli/e1IEwRPnMNJ7vKfPTwo0diXifkpPvwH9v7nGA==}
+
+  '@workos-inc/authkit-js@0.20.0':
+    resolution: {integrity: sha512-8+sw8eH1+XCt3NDoIB2bKKbHvq1N7CVFJeyq1uVrUWG83GCIbNNrFwWrocVNfeQJyhKsVVuDpRcp03iSVsK5Gg==}
+
+  '@workos-inc/authkit-react@0.16.1':
+    resolution: {integrity: sha512-u8IJsAAyZFFM02+3JhvvNTopSNQoJk/hjOoBlmOkh6j+AnVYrR8hjzJn8j3m9Vi5tRE0il7mpsEDT9fI2xRNjg==}
+    peerDependencies:
+      react: '>=17'
 
   abstract-logging@2.0.1:
     resolution: {integrity: sha512-2BjRTZxTPvheOvGbBslFSYOUkr+SjPtOnrLP33f+VIWLzezQpZcqVg7ja3L4dBXmzzgwT+a029jRx5PCi3JuiA==}
@@ -4126,6 +4146,13 @@ snapshots:
       '@vitest/pretty-format': 4.1.10
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.0
+
+  '@workos-inc/authkit-js@0.20.0': {}
+
+  '@workos-inc/authkit-react@0.16.1(react@19.2.0)':
+    dependencies:
+      '@workos-inc/authkit-js': 0.20.0
+      react: 19.2.0
 
   abstract-logging@2.0.1: {}
 

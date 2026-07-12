@@ -343,6 +343,12 @@ for mount in GATEWAY_STATE_DIR WORKER_STATE_DIR OBJECT_DATA_DIR EXPORT_DATA_DIR;
   grep -Fq 'source: ${'"$mount" "$ROOT_DIR/infra/compose.yaml" \
     || die "fixture expected an explicit durable provider mount: $mount"
 done
+[[ "$(grep -Fc 'target: /var/lib/parrot/objects' "$ROOT_DIR/infra/compose.yaml")" == 2 ]] \
+  || die "fixture expected gateway and worker to share the exact private object-store mount"
+grep -Fq 'LOCAL_OBJECT_ROOT: /var/lib/parrot/objects' "$ROOT_DIR/infra/compose.yaml" \
+  || die "fixture expected gateway capabilities to use the shared object-store root"
+grep -Fq 'PARROT_BIG_ROOT: /var/lib/parrot' "$ROOT_DIR/infra/compose.yaml" \
+  || die "fixture expected worker providers to resolve the shared object-store root"
 grep -Fq 'CLAMAV_SOCKET: /run/clamav/clamd.sock' "$ROOT_DIR/infra/compose.yaml" \
   || die "fixture expected worker scanning through the private Unix socket"
 if grep -Fq 'CLAMAV_PORT:' "$ROOT_DIR/infra/compose.yaml"; then
@@ -350,6 +356,13 @@ if grep -Fq 'CLAMAV_PORT:' "$ROOT_DIR/infra/compose.yaml"; then
 fi
 grep -Fq 'OLLAMA_ENDPOINT: http://127.0.0.1:11434' "$ROOT_DIR/infra/compose.yaml" \
   || die "fixture expected the worker provider to retain its loopback-only endpoint"
+grep -Fq 'up --detach --no-deps --force-recreate ollama-loopback' \
+  "$ROOT_DIR/infra/scripts/deploy.sh" \
+  || die "fixture expected every worker deployment to rebind its loopback sidecar"
+grep -Fq 'up --detach --no-deps --force-recreate edge' "$ROOT_DIR/infra/scripts/deploy.sh" \
+  || die "fixture expected every gateway-and-edge deployment to refresh edge DNS state"
+grep -Fq 'external edge liveness gate failed' "$ROOT_DIR/infra/scripts/deploy.sh" \
+  || die "fixture expected an external liveness gate after edge recreation"
 grep -Fq 'UNIX-LISTEN:/srv/project-conversation/%i/state/worker/ollama-bridge/ollama.sock' \
   "$ROOT_DIR/infra/systemd/parrot-ollama-bridge@.service" \
   || die "fixture expected a native Unix-only Ollama bridge"

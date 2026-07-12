@@ -179,6 +179,13 @@ infra/scripts/deploy.sh \
 
 The full private candidate adds `--with-edge --with-worker --with-scanner --with-telemetry`. `--with-edge` also selects the gateway. Production reserves loopback ports `39000` (SpacetimeDB), `39080` (gateway diagnostics/origin), and `39090` (the only Cloudflare origin). Staging reserves `39100`, `39180`, and `39190`. The worker, ClamAV, collector, and Ollama loopback relay have no host listeners. ClamAV signatures use the dedicated `/srv` bind directory. All services and the isolated runtime-socket volume carry project/environment ownership labels and bounded PID, memory, CPU, and JSON-log settings.
 
+The guarded deploy treats container replacement as a namespace change. After any gateway deployment
+with `--with-edge`, it force-recreates the edge so Nginx cannot retain the removed gateway address,
+waits for edge health, and requires public `GET /health/live` to return `200` before committing the
+gateway journal. After any worker deployment it force-recreates `ollama-loopback`, because
+`network_mode: service:worker` binds that sidecar to one exact worker network namespace, and only
+then accepts worker readiness. Do not bypass either step during a manual image swap.
+
 Ollama remains bound to host loopback. Never widen it to `0.0.0.0`, a LAN address, or a Docker bridge.
 Install `infra/systemd/parrot-ollama-bridge@.service` only after reviewing the host `socat` package and
 the exact `parrot` UID. The native unit converts `127.0.0.1:11434` to a mode-`0600` Unix socket below

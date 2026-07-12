@@ -22,10 +22,10 @@ test("filesystem object store is immutable, fenced, and traversal-safe", async (
   const store = new FilesystemObjectStore(root, 100);
   assert.equal(await store.ready(), true);
   const bytes = Buffer.from("hello");
-  const version = await store.writeClean("safe/file.txt", bytes, signal);
-  assert.equal(await store.writeClean("safe/file.txt", bytes, signal), version);
+  const version = await store.writeClean("safe/file.txt", bytes, "text/plain", signal);
+  assert.equal(await store.writeClean("safe/file.txt", bytes, "text/plain", signal), version);
   await assert.rejects(
-    store.writeClean("safe/file.txt", Buffer.from("changed"), signal),
+    store.writeClean("safe/file.txt", Buffer.from("changed"), "text/plain", signal),
     /immutable_object_conflict/,
   );
   await assert.rejects(store.stat("../escape", signal), /object_key_invalid/);

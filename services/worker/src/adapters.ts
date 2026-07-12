@@ -902,7 +902,12 @@ export interface ObjectVersion {
 
 export interface ObjectStore extends RuntimeAdapter {
   readStream(key: string, signal: AbortSignal): AsyncIterable<Uint8Array>;
-  writeClean(key: string, bytes: Uint8Array, signal: AbortSignal): Promise<string>;
+  writeClean(
+    key: string,
+    bytes: Uint8Array,
+    contentType: string,
+    signal: AbortSignal,
+  ): Promise<string>;
   stat(key: string, signal: AbortSignal): Promise<ObjectVersion | undefined>;
   deleteIfMatch(key: string, versionTag: string, signal: AbortSignal): Promise<boolean>;
   list(prefix: string, signal: AbortSignal): AsyncIterable<string>;
@@ -1098,7 +1103,12 @@ export class FileProcessingHandler implements JobHandler {
         await this.authority.markRejected(plan, "malware_detected");
         return { type: "permanent_failure", code: "malware_detected" };
       }
-      const cleanKey = await this.store.writeClean(plan.cleanDestinationKey, bytes, signal);
+      const cleanKey = await this.store.writeClean(
+        plan.cleanDestinationKey,
+        bytes,
+        detectedType,
+        signal,
+      );
       throwIfAborted(signal);
       await this.authority.markClean(plan, cleanKey, result.engine);
       return { type: "succeeded", result: { fileId, version, cleanKey } };
@@ -1198,7 +1208,12 @@ export class InMemoryObjectStore implements ObjectStore {
     }
   }
 
-  async writeClean(key: string, bytes: Uint8Array, signal: AbortSignal): Promise<string> {
+  async writeClean(
+    key: string,
+    bytes: Uint8Array,
+    _contentType: string,
+    signal: AbortSignal,
+  ): Promise<string> {
     throwIfAborted(signal);
     this.objects.set(key, bytes.slice());
     return key;

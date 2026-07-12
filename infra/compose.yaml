@@ -80,7 +80,7 @@ services:
       SPACETIMEDB_URI: ${GATEWAY_SPACETIMEDB_URI:-ws://spacetimedb:3000}
       SPACETIMEDB_DATABASE_NAME: ${SPACETIMEDB_DATABASE_NAME:?set SPACETIMEDB_DATABASE_NAME}
       GATEWAY_SQLITE_PATH: /var/lib/parrot/gateway/gateway.sqlite
-      LOCAL_OBJECT_ROOT: /var/lib/parrot/gateway
+      LOCAL_OBJECT_ROOT: /var/lib/parrot/objects
       READINESS_TOKEN_FILE: /run/secrets/gateway_readiness_token
       OTEL_ENABLED: ${GATEWAY_OTEL_ENABLED:-false}
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${GATEWAY_OTEL_TRACES_ENDPOINT:-http://otel-collector:4318/v1/traces}
@@ -92,6 +92,11 @@ services:
       - type: bind
         source: ${GATEWAY_STATE_DIR:?set GATEWAY_STATE_DIR}
         target: /var/lib/parrot/gateway
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${OBJECT_DATA_DIR:?set OBJECT_DATA_DIR}
+        target: /var/lib/parrot/objects
         bind:
           create_host_path: false
     networks:
@@ -217,7 +222,7 @@ services:
       WORKER_LOG_LEVEL: ${WORKER_LOG_LEVEL:-info}
       OTEL_SERVICE_NAME: project-conversation-worker
       PARROT_STATE_ROOT: /var/lib/parrot/state
-      PARROT_BIG_ROOT: /var/lib/parrot/data
+      PARROT_BIG_ROOT: /var/lib/parrot
       CLAMAV_SOCKET: /run/clamav/clamd.sock
       OLLAMA_ENDPOINT: http://127.0.0.1:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:?set OLLAMA_MODEL}
@@ -240,12 +245,12 @@ services:
           create_host_path: false
       - type: bind
         source: ${OBJECT_DATA_DIR:?set OBJECT_DATA_DIR}
-        target: /var/lib/parrot/data/objects
+        target: /var/lib/parrot/objects
         bind:
           create_host_path: false
       - type: bind
         source: ${EXPORT_DATA_DIR:?set EXPORT_DATA_DIR}
-        target: /var/lib/parrot/data/exports
+        target: /var/lib/parrot/exports
         bind:
           create_host_path: false
       - clamav-runtime:/run/clamav
