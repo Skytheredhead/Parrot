@@ -85,7 +85,7 @@ Provisional retention, subject to user/legal approval: hourly for 48 hours, dail
 Run before launch, after every storage/database upgrade, after material schema changes, and at least monthly thereafter:
 
 The current automated first half is intentionally bounded. It checks the restored database identity,
-initialization provenance, and reviewed canonical schema digest, availability of 63 private authority tables, 67 aggregate-only
+initialization provenance, and reviewed canonical schema digest, availability of 71 private authority tables, 81 aggregate-only
 cross-reference invariants, and bounded audit referential continuity over a
 loopback-only endpoint without printing row data. Its signed marker remains
 `traffic_eligible=false`: end-to-end deletion propagation, object inventory, search rebuild, and

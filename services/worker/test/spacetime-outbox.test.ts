@@ -4,6 +4,8 @@ import {
   decodeSpacetimeOutboxJob,
   type SpacetimeOutboxEnvelope,
   type SpacetimeSearchWorkItem,
+  type SpacetimeWorkspaceExportCleanupPlan,
+  type SpacetimeWorkspaceExportPlan,
 } from "../src/spacetime-outbox.js";
 
 const base = (kind: string): SpacetimeOutboxEnvelope => ({
@@ -27,7 +29,14 @@ const base = (kind: string): SpacetimeOutboxEnvelope => ({
 });
 
 test("canonical SpacetimeDB envelopes decode every reviewed worker job kind", () => {
-  const rows: Array<readonly [SpacetimeOutboxEnvelope, SpacetimeSearchWorkItem?]> = [
+  const rows: Array<
+    readonly [
+      SpacetimeOutboxEnvelope,
+      (SpacetimeSearchWorkItem | null)?,
+      (SpacetimeWorkspaceExportPlan | null)?,
+      SpacetimeWorkspaceExportCleanupPlan?,
+    ]
+  > = [
     [
       {
         ...base("notification.deliver"),
@@ -132,10 +141,55 @@ test("canonical SpacetimeDB envelopes decode every reviewed worker job kind", ()
         runId: "run-1",
       },
     ],
+    [
+      {
+        ...base("workspace.export.generate"),
+        resourceType: "workspace_export",
+        resourceId: "export-1",
+        resourceRevision: 1n,
+        payloadResourceId: "export-1",
+        version: 1n,
+      },
+      null,
+      {
+        jobId: "job-workspace.export.generate",
+        exportId: "export-1",
+        workspaceId: "workspace-1",
+        lifecycleEpoch: 3n,
+        workspaceRevision: 7n,
+        exportRevision: 1n,
+        reconcileOnly: false,
+      },
+    ],
+    [
+      {
+        ...base("workspace.export.cleanup"),
+        resourceType: "workspace_export",
+        resourceId: "export-1",
+        resourceRevision: 3n,
+        payloadResourceId: "export-1",
+        version: 3n,
+      },
+      null,
+      null,
+      {
+        jobId: "job-workspace.export.cleanup",
+        exportId: "export-1",
+        workspaceId: "workspace-1",
+        exportRevision: 3n,
+        artifactKey: "exports/workspace-1/export-1/export.tar.zst",
+        contentHash: "a".repeat(64),
+        artifactVersion: "object-version-1",
+        sizeBytes: 42n,
+      },
+    ],
   ];
 
   assert.deepEqual(
-    rows.map(([row, search]) => decodeSpacetimeOutboxJob(row, search).kind),
+    rows.map(
+      ([row, search, workspaceExport, workspaceExportCleanup]) =>
+        decodeSpacetimeOutboxJob(row, search, workspaceExport, workspaceExportCleanup).kind,
+    ),
     [
       "notification.deliver",
       "search.upsert",
@@ -145,6 +199,8 @@ test("canonical SpacetimeDB envelopes decode every reviewed worker job kind", ()
       "file.extract",
       "file.cleanup",
       "agent.run",
+      "workspace.export.generate",
+      "workspace.export.cleanup",
     ],
   );
   assert.equal(
@@ -164,6 +220,28 @@ test("canonical SpacetimeDB envelopes decode every reviewed worker job kind", ()
   assert.notEqual(
     firstAcl.effectKey,
     decodeSpacetimeOutboxJob(nextAclRow, nextAclSearch).effectKey,
+  );
+  assert.deepEqual(
+    decodeSpacetimeOutboxJob(rows[8]?.[0] as SpacetimeOutboxEnvelope, undefined, rows[8]?.[2])
+      .payload,
+    {
+      exportId: "export-1",
+      lifecycleEpoch: 3,
+      workspaceRevision: 7,
+      exportRevision: 1,
+    },
+  );
+  assert.deepEqual(
+    decodeSpacetimeOutboxJob(rows[9]?.[0] as SpacetimeOutboxEnvelope, null, undefined, rows[9]?.[3])
+      .payload,
+    {
+      exportId: "export-1",
+      exportRevision: 3,
+      artifactKey: "exports/workspace-1/export-1/export.tar.zst",
+      contentHash: "a".repeat(64),
+      artifactVersion: "object-version-1",
+      sizeBytes: 42,
+    },
   );
 });
 
@@ -245,4 +323,41 @@ test("decoder rejects unknown kinds and mismatched protected search work", () =>
       ),
     /search_work_item_mismatch/,
   );
+});
+
+test("decoder requires an exact supplemental workspace export authority plan", () => {
+  const row: SpacetimeOutboxEnvelope = {
+    ...base("workspace.export.generate"),
+    resourceType: "workspace_export",
+    resourceId: "export-1",
+    resourceRevision: 1n,
+    payloadResourceId: "export-1",
+    version: 1n,
+  };
+  assert.throws(() => decodeSpacetimeOutboxJob(row), /missing_workspace_export_plan/);
+  assert.throws(
+    () =>
+      decodeSpacetimeOutboxJob(row, undefined, {
+        jobId: "job-workspace.export.generate",
+        exportId: "other-export",
+        workspaceId: "workspace-1",
+        lifecycleEpoch: 3n,
+        workspaceRevision: 7n,
+        exportRevision: 1n,
+        reconcileOnly: false,
+      }),
+    /workspace_export_plan_mismatch/,
+  );
+});
+
+test("decoder requires exact workspace export cleanup authority", () => {
+  const row: SpacetimeOutboxEnvelope = {
+    ...base("workspace.export.cleanup"),
+    resourceType: "workspace_export",
+    resourceId: "export-1",
+    resourceRevision: 3n,
+    payloadResourceId: "export-1",
+    version: 3n,
+  };
+  assert.throws(() => decodeSpacetimeOutboxJob(row), /missing_workspace_export_cleanup_plan/);
 });

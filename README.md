@@ -16,9 +16,10 @@ Spaces show substantial posts rather than an endless stream of every message. A 
 The repository is in active development. Source research, product options, architecture ADRs, and
 the provider-neutral database, gateway, worker host, authentication/invitation/session boundaries,
 post/social domain, private direct messages, advisory presence, notification controls, workspace
-deletion access fences, typed client contracts, and guarded operations foundations are implemented and tested. Durable provider
-adapters, approved deployment inputs, and integration with the user-owned frontend remain before a
-release candidate exists.
+deletion access fences, legal holds, bounded export/cleanup authority, digest scheduling, central
+agent-tool execution fencing, typed client contracts, and guarded operations foundations are
+implemented and tested. Durable provider adapters, approved deployment inputs, and integration with
+the user-owned frontend remain before a release candidate exists.
 
 Do not use this repository as a production service yet.
 
@@ -35,7 +36,7 @@ Do not use this repository as a production service yet.
 - `packages/client-sdk/` — framework-neutral, hardened browser client for gateway capabilities.
 - `docs/project/frontend-integration-contract.md` — stable integration boundary for the user-owned UI.
 
-The user is building the product UI; this backend work intentionally does not scaffold or modify it.
+- `apps/web/` — research-grounded interactive UI prototype using local mock data; it intentionally does not claim backend integration or production readiness.
 
 ## Prerequisites
 

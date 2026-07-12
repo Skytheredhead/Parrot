@@ -124,6 +124,9 @@ user
 workspace
 workspace_lifecycle
 workspace_lifecycle_drain_schedule
+workspace_legal_hold
+workspace_export
+workspace_export_expiry_schedule
 workspace_member
 space
 space_member
@@ -155,6 +158,11 @@ notification_control
 notification_group
 notification_delivery_permit
 notification_preference
+notification_digest_schedule
+notification_digest_item
+notification_digest_claim
+notification_digest_permit
+notification_digest_outcome
 presence_session
 current_presence
 presence_expiry_schedule
@@ -178,7 +186,7 @@ file_upload
 audit_log
 command_receipt
 TABLES
-[[ "$required_private_table_count" == 63 ]] || die "internal required private-table inventory drifted"
+[[ "$required_private_table_count" == 71 ]] || die "internal required private-table inventory drifted"
 
 domain_invariant_count=0
 while IFS='|' read -r child parent child_column parent_column; do
@@ -192,6 +200,9 @@ done <<'INVARIANTS'
 workspace_member|workspace|workspace_id|id
 workspace_lifecycle|workspace|workspace_id|id
 workspace_lifecycle_drain_schedule|workspace_lifecycle|workspace_id|workspace_id
+workspace_legal_hold|workspace|workspace_id|id
+workspace_export|workspace|workspace_id|id
+workspace_export_expiry_schedule|workspace_export|export_id|id
 space|workspace|workspace_id|id
 space_member|space|space_id|id
 post|workspace|workspace_id|id
@@ -232,6 +243,17 @@ notification_delivery_permit|outbox_job|job_id|id
 notification_delivery_permit|notification|notification_id|id
 notification_delivery_permit|workspace|workspace_id|id
 notification_preference|workspace|workspace_id|id
+notification_digest_schedule|workspace|workspace_id|id
+notification_digest_item|notification_digest_schedule|schedule_id|id
+notification_digest_item|notification|notification_id|id
+notification_digest_item|notification_control|notification_id|notification_id
+notification_digest_claim|notification_digest_schedule|schedule_id|id
+notification_digest_claim|workspace|workspace_id|id
+notification_digest_permit|notification_digest_claim|claim_id|claim_id
+notification_digest_permit|notification_digest_schedule|schedule_id|id
+notification_digest_permit|workspace|workspace_id|id
+notification_digest_outcome|notification_digest_schedule|schedule_id|id
+notification_digest_outcome|workspace|workspace_id|id
 presence_session|workspace|workspace_id|id
 current_presence|workspace|workspace_id|id
 presence_expiry_schedule|presence_session|presence_key|key
@@ -257,7 +279,7 @@ file_upload|file_record|file_id|id
 file_upload|workspace|workspace_id|id
 audit_log|workspace|workspace_id|id
 INVARIANTS
-[[ "$domain_invariant_count" == 67 ]] || die "internal restored-state invariant inventory drifted"
+[[ "$domain_invariant_count" == 81 ]] || die "internal restored-state invariant inventory drifted"
 
 umask 077
 {

@@ -45,6 +45,27 @@ export interface SpacetimeSearchWorkItem {
   readonly tombstone: boolean;
 }
 
+export interface SpacetimeWorkspaceExportPlan {
+  readonly jobId: unknown;
+  readonly exportId: unknown;
+  readonly workspaceId: unknown;
+  readonly lifecycleEpoch: bigint;
+  readonly workspaceRevision: bigint;
+  readonly exportRevision: bigint;
+  readonly reconcileOnly: boolean;
+}
+
+export interface SpacetimeWorkspaceExportCleanupPlan {
+  readonly jobId: unknown;
+  readonly exportId: unknown;
+  readonly workspaceId: unknown;
+  readonly exportRevision: bigint;
+  readonly artifactKey: string;
+  readonly contentHash: string;
+  readonly artifactVersion: string;
+  readonly sizeBytes: bigint;
+}
+
 const identifier = (value: unknown, field: string): string => {
   const normalized = String(value ?? "");
   if (!/^[A-Za-z0-9._:-]{1,256}$/.test(normalized)) throw new Error(`invalid_${field}`);
@@ -108,6 +129,8 @@ const jobState = (value: unknown): OutboxJob["state"] => {
 const payloadFor = (
   row: SpacetimeOutboxEnvelope,
   search: SpacetimeSearchWorkItem | undefined,
+  workspaceExport: SpacetimeWorkspaceExportPlan | undefined,
+  workspaceExportCleanup: SpacetimeWorkspaceExportCleanupPlan | undefined,
 ): JsonValue => {
   const authorityResourceId = identifier(row.resourceId, "authority_resource_id");
   const authorityRevision = safeNumber(row.resourceRevision, "authority_resource_revision");
@@ -208,6 +231,64 @@ const payloadFor = (
       return {
         runId: requireAuthorityBinding("agent_run", option(row.runId, "run_id"), 1),
       };
+    case "workspace.export.generate": {
+      if (!workspaceExport) throw new Error("missing_workspace_export_plan");
+      const exportId = requireAuthorityBinding(
+        "workspace_export",
+        option(row.payloadResourceId, "payload_resource_id"),
+        option(row.version, "version"),
+      );
+      if (
+        identifier(workspaceExport.jobId, "workspace_export_job_id") !==
+          identifier(row.id, "job_id") ||
+        identifier(workspaceExport.exportId, "workspace_export_id") !== exportId ||
+        identifier(workspaceExport.workspaceId, "workspace_export_workspace_id") !==
+          identifier(row.workspaceId, "workspace_id") ||
+        safeNumber(workspaceExport.exportRevision, "workspace_export_revision") !== version() ||
+        typeof workspaceExport.reconcileOnly !== "boolean"
+      ) {
+        throw new Error("workspace_export_plan_mismatch");
+      }
+      return {
+        exportId,
+        lifecycleEpoch: safeNumber(
+          workspaceExport.lifecycleEpoch,
+          "workspace_export_lifecycle_epoch",
+        ),
+        workspaceRevision: safeNumber(
+          workspaceExport.workspaceRevision,
+          "workspace_export_workspace_revision",
+        ),
+        exportRevision: safeNumber(workspaceExport.exportRevision, "workspace_export_revision"),
+      };
+    }
+    case "workspace.export.cleanup": {
+      if (!workspaceExportCleanup) throw new Error("missing_workspace_export_cleanup_plan");
+      const exportId = requireAuthorityBinding(
+        "workspace_export",
+        option(row.payloadResourceId, "payload_resource_id"),
+        option(row.version, "version"),
+      );
+      if (
+        identifier(workspaceExportCleanup.jobId, "workspace_export_cleanup_job_id") !==
+          identifier(row.id, "job_id") ||
+        identifier(workspaceExportCleanup.exportId, "workspace_export_cleanup_id") !== exportId ||
+        identifier(workspaceExportCleanup.workspaceId, "workspace_export_cleanup_workspace_id") !==
+          identifier(row.workspaceId, "workspace_id") ||
+        safeNumber(workspaceExportCleanup.exportRevision, "workspace_export_cleanup_revision") !==
+          version()
+      ) {
+        throw new Error("workspace_export_cleanup_plan_mismatch");
+      }
+      return {
+        exportId,
+        exportRevision: version(),
+        artifactKey: workspaceExportCleanup.artifactKey,
+        contentHash: workspaceExportCleanup.contentHash,
+        artifactVersion: workspaceExportCleanup.artifactVersion,
+        sizeBytes: safeNumber(workspaceExportCleanup.sizeBytes, "workspace_export_cleanup_size"),
+      };
+    }
     default:
       throw new Error("invalid_effect_kind");
   }
@@ -215,7 +296,9 @@ const payloadFor = (
 
 export const decodeSpacetimeOutboxJob = (
   row: SpacetimeOutboxEnvelope,
-  search?: SpacetimeSearchWorkItem,
+  search?: SpacetimeSearchWorkItem | null,
+  workspaceExport?: SpacetimeWorkspaceExportPlan | null,
+  workspaceExportCleanup?: SpacetimeWorkspaceExportCleanupPlan,
 ): OutboxJob => {
   if (!row.effectKey) throw new Error("invalid_authority_effect_key");
   const createdAt = timestampMillis(row.createdAt, "created_at");
@@ -227,7 +310,12 @@ export const decodeSpacetimeOutboxJob = (
       id: identifier(row.id, "job_id"),
       workspaceId: identifier(row.workspaceId, "workspace_id"),
       kind: row.kind as OutboxJob["kind"],
-      payload: payloadFor(row, search),
+      payload: payloadFor(
+        row,
+        search ?? undefined,
+        workspaceExport ?? undefined,
+        workspaceExportCleanup,
+      ),
     },
     createdAt,
   );

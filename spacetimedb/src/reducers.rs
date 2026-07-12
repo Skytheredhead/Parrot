@@ -8,8 +8,13 @@ const OUTBOX_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const MAX_REPLY_DEPTH: u32 = 32;
 const MAX_PRESENCE_SESSIONS_PER_SCOPE: usize = 8;
 const WORKSPACE_LIFECYCLE_DRAIN_BATCH: usize = 64;
+const MAX_ACTIVE_LEGAL_HOLDS_PER_WORKSPACE: usize = 16;
+const MAX_ACTIVE_EXPORTS_PER_WORKSPACE: usize = 3;
 const NOTIFICATION_GROUP_WINDOW_SECONDS: i64 = 5 * 60;
 const NOTIFICATION_PERMIT_MAX_SECONDS: u32 = 5;
+const NOTIFICATION_DIGEST_MAX_CLAIMS: usize = 32;
+const NOTIFICATION_DIGEST_MAX_ITEMS: usize = 50;
+const NOTIFICATION_DIGEST_MAX_LEASE_SECONDS: u32 = 300;
 const JOB_NOTIFICATION_DELIVER: &str =
     crate::policy::CanonicalJobKind::NotificationDeliver.as_str();
 const JOB_SEARCH_UPSERT: &str = crate::policy::CanonicalJobKind::SearchUpsert.as_str();
@@ -19,6 +24,10 @@ const JOB_FILE_SCAN: &str = crate::policy::CanonicalJobKind::FileScan.as_str();
 const JOB_FILE_EXTRACT: &str = crate::policy::CanonicalJobKind::FileExtract.as_str();
 const JOB_FILE_CLEANUP: &str = crate::policy::CanonicalJobKind::FileCleanup.as_str();
 const JOB_AGENT_RUN: &str = crate::policy::CanonicalJobKind::AgentRun.as_str();
+const JOB_WORKSPACE_EXPORT_GENERATE: &str =
+    crate::policy::CanonicalJobKind::WorkspaceExportGenerate.as_str();
+const JOB_WORKSPACE_EXPORT_CLEANUP: &str =
+    crate::policy::CanonicalJobKind::WorkspaceExportCleanup.as_str();
 const BOOTSTRAP_OIDC_ISSUER: Option<&str> =
     option_env!("PROJECT_CONVERSATION_BOOTSTRAP_OIDC_ISSUER");
 const BOOTSTRAP_OIDC_AUDIENCE: Option<&str> =
@@ -91,6 +100,15 @@ fn workspace_lifecycle_row_valid(row: &WorkspaceLifecycle) -> bool {
         }
 }
 
+fn workspace_has_active_legal_hold(ctx: &ReducerContext, workspace_id: Uuid) -> bool {
+    ctx.db
+        .workspace_legal_hold()
+        .workspace_state()
+        .filter((workspace_id, WorkspaceLegalHoldState::Active))
+        .next()
+        .is_some()
+}
+
 pub(crate) fn require_oidc(ctx: &ReducerContext) -> Result<(), String> {
     let jwt = ctx
         .sender_auth()
@@ -153,6 +171,29 @@ fn require_service_provision_operator(
         return Err("platform operator and valid workspace scope required".into());
     }
     Ok(subject)
+}
+
+fn require_export_generation_completion_service(
+    ctx: &ReducerContext,
+    workspace_id: Uuid,
+) -> Result<ServicePrincipal, String> {
+    require_oidc(ctx)?;
+    let service = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .filter(|service| service.enabled && service.can_process_outbox)
+        .ok_or_else(|| "service capability denied".to_string())?;
+    if !service_has_grant(
+        ctx,
+        ctx.sender(),
+        workspace_id,
+        JOB_WORKSPACE_EXPORT_GENERATE,
+    ) {
+        return Err("service capability denied".into());
+    }
+    Ok(service)
 }
 
 fn platform_receipt_key(operation: &str, request_id: Uuid) -> String {
@@ -258,6 +299,9 @@ fn has_application_state(ctx: &ReducerContext) -> bool {
         || ctx.db.workspace().count() != 0
         || ctx.db.workspace_lifecycle().count() != 0
         || ctx.db.workspace_lifecycle_drain_schedule().count() != 0
+        || ctx.db.workspace_legal_hold().count() != 0
+        || ctx.db.workspace_export().count() != 0
+        || ctx.db.workspace_export_expiry_schedule().count() != 0
         || ctx.db.workspace_member().count() != 0
         || ctx.db.space().count() != 0
         || ctx.db.space_member().count() != 0
@@ -289,6 +333,11 @@ fn has_application_state(ctx: &ReducerContext) -> bool {
         || ctx.db.notification_group().count() != 0
         || ctx.db.notification_delivery_permit().count() != 0
         || ctx.db.notification_preference().count() != 0
+        || ctx.db.notification_digest_schedule().count() != 0
+        || ctx.db.notification_digest_item().count() != 0
+        || ctx.db.notification_digest_claim().count() != 0
+        || ctx.db.notification_digest_permit().count() != 0
+        || ctx.db.notification_digest_outcome().count() != 0
         || ctx.db.presence_session().count() != 0
         || ctx.db.current_presence().count() != 0
         || ctx.db.presence_expiry_schedule().count() != 0
@@ -497,6 +546,9 @@ impl OutboxSemanticPayload {
                 self.file_id.is_some() && self.version.is_some()
             }
             JOB_AGENT_RUN => self.run_id.is_some(),
+            JOB_WORKSPACE_EXPORT_GENERATE | JOB_WORKSPACE_EXPORT_CLEANUP => {
+                self.payload_resource_id.is_some() && self.version.is_some()
+            }
             _ => false,
         }
     }
@@ -541,6 +593,11 @@ fn enqueue_outbox(ctx: &ReducerContext, input: OutboxInsert<'_>) -> Result<(), S
             resource_type == "agent_run",
             payload.run_id == Some(resource_id),
         ),
+        JOB_WORKSPACE_EXPORT_GENERATE | JOB_WORKSPACE_EXPORT_CLEANUP => {
+            resource_type == "workspace_export"
+                && payload.payload_resource_id == Some(resource_id)
+                && payload.version == Some(resource_revision)
+        }
         _ => false,
     };
     if !payload.valid_for(kind) || !common_fields_match {
@@ -579,6 +636,68 @@ fn enqueue_outbox(ctx: &ReducerContext, input: OutboxInsert<'_>) -> Result<(), S
         updated_at: ctx.timestamp,
     });
     Ok(())
+}
+
+fn require_workspace_export_cleanup(
+    ctx: &ReducerContext,
+    mut export: WorkspaceExport,
+) -> Result<WorkspaceExport, String> {
+    if export.state == WorkspaceExportState::Ready {
+        export.state = WorkspaceExportState::Expired;
+        export.revision = export
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "workspace export revision exhausted".to_string())?;
+        export.expires_at.get_or_insert(ctx.timestamp);
+        export.failure_reason.clear();
+        export.updated_at = ctx.timestamp;
+        ctx.db.workspace_export().id().update(export.clone());
+    }
+    if export.state != WorkspaceExportState::Expired
+        || !crate::policy::workspace_export_artifact_key_valid(
+            &export.workspace_id.to_string(),
+            &export.id.to_string(),
+            &export.artifact_key,
+        )
+        || export.content_hash.len() != 64
+        || !export
+            .content_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        || !crate::policy::workspace_export_artifact_version_valid(&export.artifact_version)
+        || !crate::policy::workspace_export_size_valid(export.size_bytes)
+    {
+        return Err("workspace export cleanup authority is invalid".into());
+    }
+    let effect_key = format!(
+        "workspace:{}:export:{}:cleanup:{}",
+        export.workspace_id, export.id, export.revision
+    );
+    if ctx
+        .db
+        .outbox_job()
+        .effect_key()
+        .find(effect_key.clone())
+        .is_none()
+    {
+        enqueue_outbox(
+            ctx,
+            OutboxInsert {
+                workspace_id: export.workspace_id,
+                kind: JOB_WORKSPACE_EXPORT_CLEANUP,
+                resource_type: "workspace_export",
+                resource_id: export.id,
+                resource_revision: export.revision,
+                effect_key,
+                payload: OutboxSemanticPayload {
+                    payload_resource_id: Some(export.id),
+                    version: Some(export.revision),
+                    ..Default::default()
+                },
+            },
+        )?;
+    }
+    Ok(export)
 }
 
 fn search_allowed_identities(ctx: &ReducerContext, space: &Space) -> Vec<Identity> {
@@ -804,6 +923,9 @@ pub(crate) struct ResolvedNotificationPreference {
     pub(crate) mode: NotificationDeliveryMode,
     pub(crate) mute_window_configured: bool,
     pub(crate) revision: u64,
+    pub(crate) key: String,
+    pub(crate) time_zone: String,
+    pub(crate) digest_local_minute: u16,
 }
 
 pub(crate) fn notification_mode<C: DbContext>(
@@ -813,6 +935,7 @@ pub(crate) fn notification_mode<C: DbContext>(
     identity: Identity,
     tier: NotificationTier,
 ) -> ResolvedNotificationPreference {
+    let default_key = notification_preference_key(workspace_id, None, identity);
     let preference =
         space_id
             .and_then(|space_id| {
@@ -837,6 +960,9 @@ pub(crate) fn notification_mode<C: DbContext>(
             mode: default,
             mute_window_configured: false,
             revision: 0,
+            key: default_key,
+            time_zone: "UTC".into(),
+            digest_local_minute: 540,
         },
         |preference| {
             let mode = match tier {
@@ -848,9 +974,160 @@ pub(crate) fn notification_mode<C: DbContext>(
                 mode,
                 mute_window_configured: preference.mute_start_local_minute.is_some(),
                 revision: preference.revision,
+                key: preference.key,
+                time_zone: preference.time_zone,
+                digest_local_minute: preference.digest_local_minute,
             }
         },
     )
+}
+
+fn notification_digest_schedule_key(
+    workspace_id: Uuid,
+    recipient_identity: Identity,
+    preference_key: &str,
+    channel: &str,
+) -> String {
+    format!("{workspace_id}:{recipient_identity}:{preference_key}:{channel}")
+}
+
+fn register_notification_digest(
+    ctx: &ReducerContext,
+    notification_id: Uuid,
+    workspace_id: Uuid,
+    recipient_identity: Identity,
+    channel: &str,
+    preference: &ResolvedNotificationPreference,
+) -> Result<(), String> {
+    let key = notification_digest_schedule_key(
+        workspace_id,
+        recipient_identity,
+        &preference.key,
+        channel,
+    );
+    let mut schedule = if let Some(mut schedule) = ctx
+        .db
+        .notification_digest_schedule()
+        .key()
+        .find(key.clone())
+    {
+        schedule.preference_key = preference.key.clone();
+        schedule.time_zone = preference.time_zone.clone();
+        schedule.digest_local_minute = preference.digest_local_minute;
+        schedule.preference_revision = preference.revision;
+        schedule.digest_revision = schedule
+            .digest_revision
+            .checked_add(1)
+            .ok_or_else(|| "notification digest revision exhausted".to_string())?;
+        schedule.updated_at = ctx.timestamp;
+        schedule
+    } else {
+        NotificationDigestSchedule {
+            id: new_id(ctx)?,
+            key,
+            workspace_id,
+            recipient_identity,
+            preference_key: preference.key.clone(),
+            channel: channel.into(),
+            time_zone: preference.time_zone.clone(),
+            digest_local_minute: preference.digest_local_minute,
+            preference_revision: preference.revision,
+            digest_revision: 1,
+            overflow_count: 0,
+            overflow_revision: 0,
+            last_occurrence_local_date: String::new(),
+            created_at: ctx.timestamp,
+            updated_at: ctx.timestamp,
+        }
+    };
+    let digest_revision = schedule.digest_revision;
+    let schedule_id = schedule.id;
+    let existing_item = ctx
+        .db
+        .notification_digest_item()
+        .notification_id()
+        .find(notification_id);
+    if let Some(mut item) = existing_item {
+        item.schedule_id = schedule_id;
+        item.digest_revision = digest_revision;
+        item.updated_at = ctx.timestamp;
+        ctx.db
+            .notification_digest_item()
+            .notification_id()
+            .update(item);
+    } else {
+        let pending_count = ctx
+            .db
+            .notification_digest_item()
+            .schedule_id()
+            .filter(schedule_id)
+            .take(NOTIFICATION_DIGEST_MAX_ITEMS)
+            .count();
+        if pending_count < NOTIFICATION_DIGEST_MAX_ITEMS {
+            ctx.db
+                .notification_digest_item()
+                .insert(NotificationDigestItem {
+                    notification_id,
+                    schedule_id,
+                    digest_revision,
+                    created_at: ctx.timestamp,
+                    updated_at: ctx.timestamp,
+                });
+        } else {
+            schedule.overflow_count = schedule.overflow_count.saturating_add(1);
+            schedule.overflow_revision = digest_revision;
+        }
+    }
+    if ctx
+        .db
+        .notification_digest_schedule()
+        .id()
+        .find(schedule_id)
+        .is_some()
+    {
+        ctx.db.notification_digest_schedule().id().update(schedule);
+    } else {
+        ctx.db.notification_digest_schedule().insert(schedule);
+    }
+    Ok(())
+}
+
+fn refresh_notification_digest_schedule_preference(
+    ctx: &ReducerContext,
+    preference: &NotificationPreference,
+) -> Result<(), String> {
+    for channel in ["email", "push"] {
+        let schedule_key = notification_digest_schedule_key(
+            preference.workspace_id,
+            preference.identity,
+            &preference.key,
+            channel,
+        );
+        let Some(mut schedule) = ctx
+            .db
+            .notification_digest_schedule()
+            .key()
+            .find(schedule_key)
+        else {
+            continue;
+        };
+        if schedule.preference_revision == preference.revision
+            && schedule.time_zone == preference.time_zone
+            && schedule.digest_local_minute == preference.digest_local_minute
+        {
+            continue;
+        }
+        schedule.preference_revision = preference.revision;
+        schedule.time_zone = preference.time_zone.clone();
+        schedule.digest_local_minute = preference.digest_local_minute;
+        schedule.digest_revision = schedule
+            .digest_revision
+            .checked_add(1)
+            .ok_or_else(|| "notification digest revision exhausted".to_string())?;
+        schedule.updated_at = ctx.timestamp;
+        ctx.db.notification_digest_schedule().id().update(schedule);
+    }
+    Ok(())
 }
 
 pub(crate) fn notification_resource_revision<C: DbContext>(
@@ -1223,6 +1500,16 @@ fn coalesce_notification(
     } else {
         ctx.db.notification_control().insert(control);
     }
+    if preference.mode == NotificationDeliveryMode::Digest {
+        register_notification_digest(
+            ctx,
+            notification_id,
+            intent.workspace_id,
+            intent.recipient_identity,
+            "email",
+            &preference,
+        )?;
+    }
     if delivery_allowed {
         enqueue_outbox(
             ctx,
@@ -1415,8 +1702,18 @@ fn drain_workspace_runtime_batch(
     ctx: &ReducerContext,
     workspace_id: Uuid,
     lifecycle_state: WorkspaceLifecycleState,
-) {
+) -> Result<(), String> {
     if lifecycle_state == WorkspaceLifecycleState::DeletionFenced {
+        let ready_exports: Vec<_> = ctx
+            .db
+            .workspace_export()
+            .workspace_state()
+            .filter((workspace_id, WorkspaceExportState::Ready))
+            .take(WORKSPACE_LIFECYCLE_DRAIN_BATCH)
+            .collect();
+        for export in ready_exports {
+            require_workspace_export_cleanup(ctx, export)?;
+        }
         let run_id = [
             AgentRunState::Queued,
             AgentRunState::Authorizing,
@@ -1460,6 +1757,11 @@ fn drain_workspace_runtime_batch(
                 .workspace_state()
                 .filter((workspace_id, state))
         })
+        .filter(|job| {
+            job.kind != JOB_WORKSPACE_EXPORT_CLEANUP
+                && !(job.kind == JOB_WORKSPACE_EXPORT_GENERATE
+                    && matches!(job.state, OutboxState::Leased | OutboxState::OutcomeUnknown))
+        })
         .take(WORKSPACE_LIFECYCLE_DRAIN_BATCH)
         .map(|job| job.id)
         .collect();
@@ -1492,6 +1794,25 @@ fn drain_workspace_runtime_batch(
             .delete(job_id);
     }
 
+    let digest_claim_ids: Vec<_> = ctx
+        .db
+        .notification_digest_claim()
+        .workspace_id()
+        .filter(workspace_id)
+        .take(WORKSPACE_LIFECYCLE_DRAIN_BATCH)
+        .map(|claim| claim.claim_id)
+        .collect();
+    for claim_id in digest_claim_ids {
+        ctx.db
+            .notification_digest_permit()
+            .claim_id()
+            .delete(claim_id);
+        ctx.db
+            .notification_digest_claim()
+            .claim_id()
+            .delete(claim_id);
+    }
+
     let presence_keys: Vec<_> = ctx
         .db
         .presence_session()
@@ -1515,6 +1836,7 @@ fn drain_workspace_runtime_batch(
     for key in current_presence_keys {
         ctx.db.current_presence().key().delete(key);
     }
+    Ok(())
 }
 
 fn workspace_runtime_drain_pending(
@@ -1551,13 +1873,34 @@ fn workspace_runtime_drain_pending(
                 .outbox_job()
                 .workspace_state()
                 .filter((workspace_id, state))
-                .next()
-                .is_some()
+                .any(|job| job.kind != JOB_WORKSPACE_EXPORT_CLEANUP)
         }));
     irreversible_work_pending
+        || (lifecycle_state == WorkspaceLifecycleState::DeletionFenced
+            && ctx
+                .db
+                .workspace_export()
+                .workspace_state()
+                .filter((workspace_id, WorkspaceExportState::Ready))
+                .next()
+                .is_some())
         || ctx
             .db
             .notification_delivery_permit()
+            .workspace_id()
+            .filter(workspace_id)
+            .next()
+            .is_some()
+        || ctx
+            .db
+            .notification_digest_claim()
+            .workspace_id()
+            .filter(workspace_id)
+            .next()
+            .is_some()
+        || ctx
+            .db
+            .notification_digest_permit()
             .workspace_id()
             .filter(workspace_id)
             .next()
@@ -1632,7 +1975,7 @@ pub fn drain_workspace_lifecycle_schedule(
     {
         return Ok(());
     }
-    drain_workspace_runtime_batch(ctx, schedule.workspace_id, lifecycle.state);
+    drain_workspace_runtime_batch(ctx, schedule.workspace_id, lifecycle.state)?;
     if workspace_runtime_drain_pending(ctx, schedule.workspace_id, lifecycle.state) {
         schedule_workspace_lifecycle_drain(ctx, schedule.workspace_id, schedule.lifecycle_epoch);
     }
@@ -2015,6 +2358,223 @@ pub fn migrate_platform_authority(ctx: &ReducerContext) -> Result<(), String> {
             || !workspace_lifecycle_row_valid(&lifecycle)
         {
             return Err("workspace lifecycle migration invariant failed".into());
+        }
+    }
+    for hold in ctx.db.workspace_legal_hold().iter() {
+        let shape_valid = hold.revision > 0
+            && !hold.reason.trim().is_empty()
+            && match hold.state {
+                WorkspaceLegalHoldState::Active => {
+                    hold.released_by_identity.is_none()
+                        && hold.released_by_subject.is_empty()
+                        && hold.release_reason.is_empty()
+                        && hold.released_at.is_none()
+                }
+                WorkspaceLegalHoldState::Released => {
+                    hold.released_by_identity.is_some()
+                        && !hold.released_by_subject.is_empty()
+                        && !hold.release_reason.trim().is_empty()
+                        && hold.released_at.is_some()
+                }
+            };
+        if !shape_valid || ctx.db.workspace().id().find(hold.workspace_id).is_none() {
+            return Err("workspace legal hold migration invariant failed".into());
+        }
+    }
+    for export in ctx.db.workspace_export().iter() {
+        let shape_valid = export.revision > 0
+            && export.lifecycle_epoch > 0
+            && export.workspace_revision > 0
+            && match export.state {
+                WorkspaceExportState::Requested => {
+                    export.artifact_key.is_empty()
+                        && export.content_hash.is_empty()
+                        && export.artifact_version.is_empty()
+                        && export.size_bytes == 0
+                        && export.expires_at.is_none()
+                }
+                WorkspaceExportState::Ready => {
+                    !export.artifact_key.is_empty()
+                        && !export.content_hash.is_empty()
+                        && crate::policy::workspace_export_artifact_version_valid(
+                            &export.artifact_version,
+                        )
+                        && export.size_bytes > 0
+                        && export.expires_at.is_some()
+                }
+                WorkspaceExportState::Failed => {
+                    export.artifact_key.is_empty()
+                        && export.content_hash.is_empty()
+                        && export.artifact_version.is_empty()
+                        && export.size_bytes == 0
+                        && export.expires_at.is_none()
+                        && !export.failure_reason.trim().is_empty()
+                }
+                WorkspaceExportState::Expired => {
+                    !export.artifact_key.is_empty()
+                        && !export.content_hash.is_empty()
+                        && crate::policy::workspace_export_artifact_version_valid(
+                            &export.artifact_version,
+                        )
+                        && export.size_bytes > 0
+                        && export.expires_at.is_some()
+                }
+                WorkspaceExportState::Cleaned => {
+                    export.artifact_key.is_empty()
+                        && export.content_hash.is_empty()
+                        && export.artifact_version.is_empty()
+                        && export.size_bytes == 0
+                        && export.expires_at.is_some()
+                }
+            };
+        if !shape_valid || ctx.db.workspace().id().find(export.workspace_id).is_none() {
+            return Err("workspace export migration invariant failed".into());
+        }
+    }
+    for schedule in ctx.db.notification_digest_schedule().iter() {
+        let overflow_valid = (schedule.overflow_count == 0 && schedule.overflow_revision == 0)
+            || (schedule.overflow_count > 0
+                && schedule.overflow_revision > 0
+                && schedule.overflow_revision <= schedule.digest_revision);
+        let shape_valid = schedule.digest_revision > 0
+            && matches!(schedule.channel.as_str(), "email" | "push")
+            && crate::policy::notification_preference_valid(
+                None,
+                None,
+                schedule.digest_local_minute,
+                &schedule.time_zone,
+            )
+            && (schedule.last_occurrence_local_date.is_empty()
+                || crate::policy::notification_digest_local_date_valid(
+                    &schedule.last_occurrence_local_date,
+                ))
+            && schedule.key
+                == notification_digest_schedule_key(
+                    schedule.workspace_id,
+                    schedule.recipient_identity,
+                    &schedule.preference_key,
+                    &schedule.channel,
+                )
+            && overflow_valid;
+        if !shape_valid
+            || ctx
+                .db
+                .workspace()
+                .id()
+                .find(schedule.workspace_id)
+                .is_none()
+        {
+            return Err("notification digest schedule migration invariant failed".into());
+        }
+    }
+    for item in ctx.db.notification_digest_item().iter() {
+        let Some(schedule) = ctx
+            .db
+            .notification_digest_schedule()
+            .id()
+            .find(item.schedule_id)
+        else {
+            return Err("notification digest item migration invariant failed".into());
+        };
+        if item.digest_revision == 0
+            || item.digest_revision > schedule.digest_revision
+            || ctx
+                .db
+                .notification()
+                .id()
+                .find(item.notification_id)
+                .is_none()
+            || ctx
+                .db
+                .notification_control()
+                .notification_id()
+                .find(item.notification_id)
+                .is_none()
+        {
+            return Err("notification digest item migration invariant failed".into());
+        }
+    }
+    for claim in ctx.db.notification_digest_claim().iter() {
+        let Some(schedule) = ctx
+            .db
+            .notification_digest_schedule()
+            .id()
+            .find(claim.schedule_id)
+        else {
+            return Err("notification digest claim migration invariant failed".into());
+        };
+        let shape_valid = claim.workspace_id == schedule.workspace_id
+            && claim.recipient_identity == schedule.recipient_identity
+            && claim.channel == schedule.channel
+            && claim.preference_revision <= schedule.preference_revision
+            && claim.digest_revision > 0
+            && claim.digest_revision <= schedule.digest_revision
+            && claim.authorization_epoch > 0
+            && crate::policy::notification_digest_local_date_valid(&claim.local_date)
+            && schedule.last_occurrence_local_date >= claim.local_date
+            && crate::policy::worker_slot_id_valid(&claim.worker_slot_id)
+            && claim.lease_generation > 0
+            && claim.attempt_count > 0
+            && ctx
+                .db
+                .service_principal()
+                .identity()
+                .find(claim.service_identity)
+                .is_some();
+        if !shape_valid {
+            return Err("notification digest claim migration invariant failed".into());
+        }
+    }
+    for permit in ctx.db.notification_digest_permit().iter() {
+        let Some(claim) = ctx
+            .db
+            .notification_digest_claim()
+            .claim_id()
+            .find(permit.claim_id)
+        else {
+            return Err("notification digest permit migration invariant failed".into());
+        };
+        let shape_valid = permit.workspace_id == claim.workspace_id
+            && permit.schedule_id == claim.schedule_id
+            && permit.service_identity == claim.service_identity
+            && permit.worker_slot_id == claim.worker_slot_id
+            && permit.lease_generation == claim.lease_generation
+            && permit.preference_revision == claim.preference_revision
+            && permit.digest_revision == claim.digest_revision
+            && permit.authorization_epoch == claim.authorization_epoch
+            && permit.expires_at <= claim.lease_until;
+        if !shape_valid {
+            return Err("notification digest permit migration invariant failed".into());
+        }
+    }
+    for outcome in ctx.db.notification_digest_outcome().iter() {
+        let Some(schedule) = ctx
+            .db
+            .notification_digest_schedule()
+            .id()
+            .find(outcome.schedule_id)
+        else {
+            return Err("notification digest outcome migration invariant failed".into());
+        };
+        let terminal_shape = match outcome.outcome {
+            NotificationDigestTerminalOutcome::Succeeded => {
+                crate::policy::notification_provider_reference_valid(&outcome.provider_reference)
+                    && outcome.code.is_empty()
+            }
+            NotificationDigestTerminalOutcome::Suppressed
+            | NotificationDigestTerminalOutcome::PermanentFailure => {
+                outcome.provider_reference.is_empty() && !outcome.code.is_empty()
+            }
+        };
+        if outcome.workspace_id != schedule.workspace_id
+            || outcome.digest_revision == 0
+            || outcome.digest_revision > schedule.digest_revision
+            || !crate::policy::notification_digest_local_date_valid(&outcome.local_date)
+            || outcome.occurrence_key
+                != notification_digest_occurrence_key(outcome.schedule_id, &outcome.local_date)
+            || !terminal_shape
+        {
+            return Err("notification digest outcome migration invariant failed".into());
         }
     }
     Ok(())
@@ -2513,6 +3073,161 @@ fn advance_workspace_lifecycle(row: &mut WorkspaceLifecycle) -> Result<(), Strin
 }
 
 #[spacetimedb::reducer]
+pub fn place_workspace_legal_hold(
+    ctx: &ReducerContext,
+    input: PlaceWorkspaceLegalHoldInput,
+) -> Result<(), String> {
+    let PlaceWorkspaceLegalHoldInput {
+        workspace_id,
+        reason,
+        client_request_id,
+    } = input;
+    validate_text(&reason, "legal hold reason", 500)?;
+    let reason = reason.trim().to_string();
+    let caller_subject = verified_oidc_subject(ctx)?;
+    let input_hash = normalized_input_hash(&format!("{workspace_id}\0{reason}"));
+    if existing_platform_receipt(
+        ctx,
+        "place_workspace_legal_hold",
+        client_request_id,
+        &input_hash,
+        &caller_subject,
+    )? {
+        return Ok(());
+    }
+    let (_, operator_subject) = require_platform_operator(ctx)?;
+    ctx.db
+        .workspace()
+        .id()
+        .find(workspace_id)
+        .ok_or_else(|| "workspace legal hold target unavailable".to_string())?;
+    let lifecycle = ctx
+        .db
+        .workspace_lifecycle()
+        .workspace_id()
+        .find(workspace_id)
+        .filter(workspace_lifecycle_row_valid)
+        .ok_or_else(|| "workspace legal hold target unavailable".to_string())?;
+    if lifecycle.state == WorkspaceLifecycleState::DeletionFenced
+        || ctx
+            .db
+            .workspace_legal_hold()
+            .workspace_state()
+            .filter((workspace_id, WorkspaceLegalHoldState::Active))
+            .take(MAX_ACTIVE_LEGAL_HOLDS_PER_WORKSPACE)
+            .count()
+            >= MAX_ACTIVE_LEGAL_HOLDS_PER_WORKSPACE
+    {
+        return Err("workspace legal hold placement denied".into());
+    }
+    let hold_id = new_id(ctx)?;
+    ctx.db.workspace_legal_hold().insert(WorkspaceLegalHold {
+        id: hold_id,
+        workspace_id,
+        state: WorkspaceLegalHoldState::Active,
+        reason,
+        placed_by_identity: ctx.sender(),
+        placed_by_subject: operator_subject.clone(),
+        placed_at: ctx.timestamp,
+        released_by_identity: None,
+        released_by_subject: String::new(),
+        release_reason: String::new(),
+        released_at: None,
+        revision: 1,
+        updated_at: ctx.timestamp,
+    });
+    insert_platform_receipt(
+        ctx,
+        "place_workspace_legal_hold",
+        client_request_id,
+        input_hash,
+        operator_subject.clone(),
+        1,
+    );
+    platform_audit(
+        ctx,
+        PlatformAuditInput {
+            actor_subject: &operator_subject,
+            workspace_id: Some(workspace_id),
+            action: "place_workspace_legal_hold",
+            resource: format!("workspace_legal_hold:{hold_id}"),
+            request_id: client_request_id,
+            summary: "workspace legal hold placed; deletion is blocked",
+        },
+    )
+}
+
+#[spacetimedb::reducer]
+pub fn release_workspace_legal_hold(
+    ctx: &ReducerContext,
+    input: ReleaseWorkspaceLegalHoldInput,
+) -> Result<(), String> {
+    let ReleaseWorkspaceLegalHoldInput {
+        hold_id,
+        expected_revision,
+        release_reason,
+        client_request_id,
+    } = input;
+    validate_text(&release_reason, "legal hold release reason", 500)?;
+    let release_reason = release_reason.trim().to_string();
+    let caller_subject = verified_oidc_subject(ctx)?;
+    let input_hash =
+        normalized_input_hash(&format!("{hold_id}\0{expected_revision}\0{release_reason}"));
+    if existing_platform_receipt(
+        ctx,
+        "release_workspace_legal_hold",
+        client_request_id,
+        &input_hash,
+        &caller_subject,
+    )? {
+        return Ok(());
+    }
+    let (_, operator_subject) = require_platform_operator(ctx)?;
+    let mut hold = ctx
+        .db
+        .workspace_legal_hold()
+        .id()
+        .find(hold_id)
+        .ok_or_else(|| "workspace legal hold unavailable".to_string())?;
+    revision_matches(hold.revision, expected_revision)?;
+    if hold.state != WorkspaceLegalHoldState::Active {
+        return Err("workspace legal hold release denied".into());
+    }
+    hold.state = WorkspaceLegalHoldState::Released;
+    hold.released_by_identity = Some(ctx.sender());
+    hold.released_by_subject = operator_subject.clone();
+    hold.release_reason = release_reason;
+    hold.released_at = Some(ctx.timestamp);
+    hold.revision = hold
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| "workspace legal hold revision exhausted".to_string())?;
+    hold.updated_at = ctx.timestamp;
+    let workspace_id = hold.workspace_id;
+    let committed_revision = hold.revision;
+    ctx.db.workspace_legal_hold().id().update(hold);
+    insert_platform_receipt(
+        ctx,
+        "release_workspace_legal_hold",
+        client_request_id,
+        input_hash,
+        operator_subject.clone(),
+        committed_revision,
+    );
+    platform_audit(
+        ctx,
+        PlatformAuditInput {
+            actor_subject: &operator_subject,
+            workspace_id: Some(workspace_id),
+            action: "release_workspace_legal_hold",
+            resource: format!("workspace_legal_hold:{hold_id}"),
+            request_id: client_request_id,
+            summary: "workspace legal hold released",
+        },
+    )
+}
+
+#[spacetimedb::reducer]
 pub fn configure_workspace_lifecycle(
     ctx: &ReducerContext,
     input: ConfigureWorkspaceLifecycleInput,
@@ -2615,6 +3330,7 @@ pub fn request_workspace_deletion(
         true,
         true,
         false,
+        workspace_has_active_legal_hold(ctx, workspace_id),
     ) {
         return Err("workspace deletion request denied".into());
     }
@@ -2685,6 +3401,7 @@ pub fn cancel_workspace_deletion(
         true,
         lifecycle.deletion_grace_days.is_some(),
         false,
+        workspace_has_active_legal_hold(ctx, workspace_id),
     ) {
         return Err("workspace deletion cancellation denied".into());
     }
@@ -2765,6 +3482,7 @@ pub fn finalize_workspace_deletion_fence(
         true,
         lifecycle.deletion_grace_days.is_some(),
         grace_elapsed,
+        workspace_has_active_legal_hold(ctx, workspace_id),
     ) {
         return Err("workspace deletion fence cannot be finalized".into());
     }
@@ -2798,6 +3516,392 @@ pub fn finalize_workspace_deletion_fence(
             summary: "irreversible workspace access fence finalized; provider purge remains separate",
         },
     )
+}
+
+#[spacetimedb::reducer]
+pub fn request_workspace_export(
+    ctx: &ReducerContext,
+    input: RequestWorkspaceExportInput,
+) -> Result<(), String> {
+    let RequestWorkspaceExportInput {
+        workspace_id,
+        client_request_id,
+    } = input;
+    let (workspace, lifecycle) = workspace_lifecycle_owner(ctx, workspace_id)?;
+    let input_hash = normalized_input_hash(&workspace_id.to_string());
+    if existing_receipt(
+        ctx,
+        Some(workspace_id),
+        "request_workspace_export",
+        client_request_id,
+        &input_hash,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+    let active_exports = [WorkspaceExportState::Requested, WorkspaceExportState::Ready]
+        .into_iter()
+        .map(|state| {
+            ctx.db
+                .workspace_export()
+                .workspace_state()
+                .filter((workspace_id, state))
+                .take(MAX_ACTIVE_EXPORTS_PER_WORKSPACE)
+                .count()
+        })
+        .sum::<usize>();
+    if lifecycle.state != WorkspaceLifecycleState::Active
+        || active_exports >= MAX_ACTIVE_EXPORTS_PER_WORKSPACE
+    {
+        return Err("workspace export request denied".into());
+    }
+    let export_id = new_id(ctx)?;
+    let export = WorkspaceExport {
+        id: export_id,
+        workspace_id,
+        requested_by: ctx.sender(),
+        state: WorkspaceExportState::Requested,
+        lifecycle_epoch: lifecycle.lifecycle_epoch,
+        workspace_revision: workspace.revision,
+        artifact_key: String::new(),
+        content_hash: String::new(),
+        artifact_version: String::new(),
+        size_bytes: 0,
+        expires_at: None,
+        failure_reason: String::new(),
+        revision: 1,
+        created_at: ctx.timestamp,
+        updated_at: ctx.timestamp,
+    };
+    ctx.db.workspace_export().insert(export);
+    enqueue_outbox(
+        ctx,
+        OutboxInsert {
+            workspace_id,
+            kind: JOB_WORKSPACE_EXPORT_GENERATE,
+            resource_type: "workspace_export",
+            resource_id: export_id,
+            resource_revision: 1,
+            effect_key: format!("workspace:{workspace_id}:export:{export_id}:1"),
+            payload: OutboxSemanticPayload {
+                payload_resource_id: Some(export_id),
+                version: Some(1),
+                ..Default::default()
+            },
+        },
+    )?;
+    insert_receipt(
+        ctx,
+        Some(workspace_id),
+        "request_workspace_export",
+        client_request_id,
+        input_hash,
+        "workspace_export",
+        export_id,
+    );
+    audit(
+        ctx,
+        AuditInput {
+            workspace_id,
+            action: "request_workspace_export",
+            resource_type: "workspace_export",
+            resource_id: export_id,
+            request_id: client_request_id,
+            effective_principal: "human",
+            summary: "owner requested a bounded workspace export",
+        },
+    )
+}
+
+#[spacetimedb::reducer]
+pub fn complete_workspace_export(
+    ctx: &ReducerContext,
+    input: CompleteWorkspaceExportInput,
+) -> Result<(), String> {
+    let CompleteWorkspaceExportInput {
+        export_id,
+        job_id,
+        lease_generation,
+        worker_slot_id,
+        outcome,
+        artifact_key,
+        content_hash,
+        artifact_version,
+        size_bytes,
+        error,
+        retry_after_seconds,
+    } = input;
+    if !crate::policy::worker_slot_id_valid(&worker_slot_id)
+        || artifact_key.len() > 1_024
+        || artifact_version.len() > 256
+        || error.len() > 2_000
+        || (outcome == WorkspaceExportCompletionOutcome::Ready && retry_after_seconds != 0)
+    {
+        return Err("workspace export completion input is invalid".into());
+    }
+    let hash_valid =
+        content_hash.len() == 64 && content_hash.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !content_hash.is_empty() && !hash_valid {
+        return Err("workspace export content hash is invalid".into());
+    }
+    let ready = outcome == WorkspaceExportCompletionOutcome::Ready;
+    if (ready && !crate::policy::workspace_export_artifact_version_valid(&artifact_version))
+        || (!ready && !artifact_version.is_empty())
+    {
+        return Err("workspace export artifact version is invalid".into());
+    }
+    if !crate::policy::workspace_export_completion_valid(
+        ready,
+        !artifact_key.trim().is_empty(),
+        hash_valid,
+        size_bytes,
+        !error.trim().is_empty(),
+    ) {
+        return Err("workspace export completion shape is invalid".into());
+    }
+    let mut export = ctx
+        .db
+        .workspace_export()
+        .id()
+        .find(export_id)
+        .ok_or_else(|| "workspace export unavailable".to_string())?;
+    require_export_generation_completion_service(ctx, export.workspace_id)?;
+    let lifecycle_current = ctx
+        .db
+        .workspace_lifecycle()
+        .workspace_id()
+        .find(export.workspace_id)
+        .is_some_and(|lifecycle| {
+            lifecycle.state == WorkspaceLifecycleState::Active
+                && lifecycle.lifecycle_epoch == export.lifecycle_epoch
+        });
+    let mut job = ctx
+        .db
+        .outbox_job()
+        .id()
+        .find(job_id)
+        .ok_or_else(|| "workspace export job unavailable".to_string())?;
+    let exact_binding = export.state == WorkspaceExportState::Requested
+        && job.workspace_id == export.workspace_id
+        && job.kind == JOB_WORKSPACE_EXPORT_GENERATE
+        && job.resource_type == "workspace_export"
+        && job.resource_id == export.id
+        && job.resource_revision == export.revision
+        && job.payload_resource_id == Some(export.id)
+        && job.version == Some(export.revision)
+        && job.state == OutboxState::Leased
+        && job.lease_owner == Some(ctx.sender())
+        && job.worker_slot_id == worker_slot_id
+        && job.lease_generation == lease_generation
+        && job.lease_until.is_some_and(|expiry| expiry > ctx.timestamp)
+        && (!ready
+            || crate::policy::workspace_export_artifact_key_valid(
+                &export.workspace_id.to_string(),
+                &export_id.to_string(),
+                &artifact_key,
+            ));
+    if !exact_binding {
+        return Err("workspace export completion authority is stale".into());
+    }
+    match outcome {
+        WorkspaceExportCompletionOutcome::Ready => {
+            let expires_at = ctx.timestamp
+                + TimeDuration::from_micros(
+                    crate::policy::WORKSPACE_EXPORT_TTL_SECONDS * 1_000_000,
+                );
+            export.state = WorkspaceExportState::Ready;
+            export.artifact_key = artifact_key;
+            export.content_hash = content_hash.to_ascii_lowercase();
+            export.artifact_version = artifact_version;
+            export.size_bytes = size_bytes;
+            export.expires_at = Some(expires_at);
+            export.failure_reason.clear();
+            export.revision = export
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| "workspace export revision exhausted".to_string())?;
+            export.updated_at = ctx.timestamp;
+            ctx.db.workspace_export().id().update(export.clone());
+            match crate::policy::workspace_export_materialization_disposition(
+                lifecycle_current,
+                ctx.timestamp <= job.expires_at,
+            ) {
+                crate::policy::WorkspaceExportMaterializationDisposition::PublishReady => {
+                    ctx.db.workspace_export_expiry_schedule().insert(
+                        WorkspaceExportExpirySchedule {
+                            scheduled_id: 0,
+                            scheduled_at: expires_at.into(),
+                            export_id,
+                            expected_revision: export.revision,
+                        },
+                    );
+                }
+                crate::policy::WorkspaceExportMaterializationDisposition::CleanupRequired => {
+                    require_workspace_export_cleanup(ctx, export)?;
+                }
+            }
+            job.state = OutboxState::Succeeded;
+            job.last_error.clear();
+        }
+        WorkspaceExportCompletionOutcome::Retry => {
+            job.state = OutboxState::Retry;
+            job.last_error = error;
+        }
+        WorkspaceExportCompletionOutcome::OutcomeUnknown => {
+            job.state = OutboxState::OutcomeUnknown;
+            job.last_error = error;
+        }
+        WorkspaceExportCompletionOutcome::Failed => {
+            export.state = WorkspaceExportState::Failed;
+            export.failure_reason = error.clone();
+            export.revision = export
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| "workspace export revision exhausted".to_string())?;
+            export.updated_at = ctx.timestamp;
+            ctx.db.workspace_export().id().update(export);
+            job.state = OutboxState::DeadLetter;
+            job.last_error = error;
+        }
+    }
+    job.next_attempt_at = ctx.timestamp
+        + TimeDuration::from_micros(i64::from(retry_after_seconds.min(86_400)) * 1_000_000);
+    job.lease_owner = None;
+    job.worker_slot_id.clear();
+    job.lease_until = None;
+    job.updated_at = ctx.timestamp;
+    ctx.db.outbox_job().id().update(job);
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn expire_workspace_export_schedule(
+    ctx: &ReducerContext,
+    schedule: WorkspaceExportExpirySchedule,
+) -> Result<(), String> {
+    if ctx.sender() != ctx.database_identity() {
+        return Err("workspace export expiry may only be invoked by the scheduler".into());
+    }
+    let Some(export) = ctx.db.workspace_export().id().find(schedule.export_id) else {
+        return Ok(());
+    };
+    if export.state != WorkspaceExportState::Ready
+        || export.revision != schedule.expected_revision
+        || export
+            .expires_at
+            .is_none_or(|expiry| expiry > ctx.timestamp)
+    {
+        return Ok(());
+    }
+    require_workspace_export_cleanup(ctx, export)?;
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn complete_workspace_export_cleanup(
+    ctx: &ReducerContext,
+    input: CompleteWorkspaceExportCleanupInput,
+) -> Result<(), String> {
+    let CompleteWorkspaceExportCleanupInput {
+        export_id,
+        job_id,
+        lease_generation,
+        worker_slot_id,
+        outcome,
+        error,
+        retry_after_seconds,
+    } = input;
+    let cleanup_succeeded = matches!(
+        outcome,
+        WorkspaceExportCleanupOutcome::Deleted | WorkspaceExportCleanupOutcome::NotFound
+    );
+    if !crate::policy::worker_slot_id_valid(&worker_slot_id)
+        || error.len() > 2_000
+        || cleanup_succeeded != error.is_empty()
+        || (cleanup_succeeded && retry_after_seconds != 0)
+    {
+        return Err("workspace export cleanup completion input is invalid".into());
+    }
+    let mut export = ctx
+        .db
+        .workspace_export()
+        .id()
+        .find(export_id)
+        .ok_or_else(|| "workspace export cleanup unavailable".to_string())?;
+    require_service(ctx, export.workspace_id, JOB_WORKSPACE_EXPORT_CLEANUP)?;
+    let mut job = ctx
+        .db
+        .outbox_job()
+        .id()
+        .find(job_id)
+        .ok_or_else(|| "workspace export cleanup job unavailable".to_string())?;
+    let exact_binding = export.state == WorkspaceExportState::Expired
+        && job.workspace_id == export.workspace_id
+        && job.kind == JOB_WORKSPACE_EXPORT_CLEANUP
+        && job.resource_type == "workspace_export"
+        && job.resource_id == export.id
+        && job.resource_revision == export.revision
+        && job.payload_resource_id == Some(export.id)
+        && job.version == Some(export.revision)
+        && job.state == OutboxState::Leased
+        && job.lease_owner == Some(ctx.sender())
+        && job.worker_slot_id == worker_slot_id
+        && job.lease_generation == lease_generation
+        && job.lease_until.is_some_and(|expiry| expiry > ctx.timestamp)
+        && crate::policy::workspace_export_artifact_key_valid(
+            &export.workspace_id.to_string(),
+            &export.id.to_string(),
+            &export.artifact_key,
+        )
+        && export.content_hash.len() == 64
+        && export
+            .content_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+        && crate::policy::workspace_export_artifact_version_valid(&export.artifact_version)
+        && crate::policy::workspace_export_size_valid(export.size_bytes);
+    if !exact_binding {
+        return Err("workspace export cleanup authority is stale".into());
+    }
+    match outcome {
+        WorkspaceExportCleanupOutcome::Deleted | WorkspaceExportCleanupOutcome::NotFound => {
+            export.state = WorkspaceExportState::Cleaned;
+            export.artifact_key.clear();
+            export.content_hash.clear();
+            export.artifact_version.clear();
+            export.size_bytes = 0;
+            export.failure_reason.clear();
+            export.revision = export
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| "workspace export revision exhausted".to_string())?;
+            export.updated_at = ctx.timestamp;
+            ctx.db.workspace_export().id().update(export);
+            job.state = OutboxState::Succeeded;
+            job.last_error.clear();
+        }
+        WorkspaceExportCleanupOutcome::Retry => {
+            job.state = OutboxState::Retry;
+            job.last_error = error;
+        }
+        WorkspaceExportCleanupOutcome::OutcomeUnknown => {
+            job.state = OutboxState::OutcomeUnknown;
+            job.last_error = error;
+        }
+        WorkspaceExportCleanupOutcome::Failed => {
+            job.state = OutboxState::DeadLetter;
+            job.last_error = error;
+        }
+    }
+    job.next_attempt_at = ctx.timestamp
+        + TimeDuration::from_micros(i64::from(retry_after_seconds.min(86_400)) * 1_000_000);
+    job.lease_owner = None;
+    job.worker_slot_id.clear();
+    job.lease_until = None;
+    job.updated_at = ctx.timestamp;
+    ctx.db.outbox_job().id().update(job);
+    Ok(())
 }
 
 #[spacetimedb::reducer]
@@ -6823,7 +7927,7 @@ pub fn set_notification_preference(
         ctx.db
             .notification_preference()
             .insert(NotificationPreference {
-                key,
+                key: key.clone(),
                 identity: ctx.sender(),
                 workspace_id: input.workspace_id,
                 space_id: input.space_id,
@@ -6839,6 +7943,13 @@ pub fn set_notification_preference(
                 updated_at: ctx.timestamp,
             });
     }
+    let committed_preference = ctx
+        .db
+        .notification_preference()
+        .key()
+        .find(key)
+        .ok_or_else(|| "notification preference commit unavailable".to_string())?;
+    refresh_notification_digest_schedule_preference(ctx, &committed_preference)?;
     insert_receipt(
         ctx,
         Some(input.workspace_id),
@@ -6958,6 +8069,574 @@ pub fn authorize_notification_delivery(
         .notification_control()
         .notification_id()
         .update(control);
+    Ok(())
+}
+
+pub(crate) struct NotificationDigestAuthoritySnapshot {
+    pub(crate) suppression_code: String,
+    pub(crate) body: String,
+    pub(crate) item_count: u16,
+}
+
+fn notification_digest_occurrence_key(schedule_id: Uuid, local_date: &str) -> String {
+    format!("{schedule_id}:{local_date}")
+}
+
+pub(crate) fn notification_digest_authority_snapshot<C: DbContext>(
+    ctx: &C,
+    schedule: &NotificationDigestSchedule,
+    claim: &NotificationDigestClaim,
+) -> NotificationDigestAuthoritySnapshot {
+    let suppressed = |code: &str| NotificationDigestAuthoritySnapshot {
+        suppression_code: code.into(),
+        body: String::new(),
+        item_count: 0,
+    };
+    if !workspace_is_active(ctx, schedule.workspace_id) {
+        return suppressed("workspace_fenced");
+    }
+    let Some(membership) = find_membership(ctx, schedule.workspace_id, schedule.recipient_identity)
+        .filter(|membership| membership.active)
+    else {
+        return suppressed("permission_revoked");
+    };
+    if claim.schedule_id != schedule.id
+        || claim.workspace_id != schedule.workspace_id
+        || claim.recipient_identity != schedule.recipient_identity
+        || claim.channel != schedule.channel
+        || claim.authorization_epoch != membership.authz_epoch
+    {
+        return suppressed("permission_revoked");
+    }
+    if schedule.digest_revision < claim.digest_revision {
+        return suppressed("digest_revision_stale");
+    }
+    let mut summaries = Vec::new();
+    let mut omitted = 0_u64;
+    let mut eligible_count = 0_u16;
+    for item in ctx
+        .db_read_only()
+        .notification_digest_item()
+        .schedule_id()
+        .filter(schedule.id)
+        .filter(|item| item.digest_revision <= claim.digest_revision)
+        .take(NOTIFICATION_DIGEST_MAX_ITEMS + 1)
+    {
+        if eligible_count as usize >= NOTIFICATION_DIGEST_MAX_ITEMS {
+            return suppressed("digest_revision_stale");
+        }
+        let Some(notification) = ctx
+            .db_read_only()
+            .notification()
+            .id()
+            .find(item.notification_id)
+        else {
+            continue;
+        };
+        let Some(control) = ctx
+            .db_read_only()
+            .notification_control()
+            .notification_id()
+            .find(item.notification_id)
+        else {
+            continue;
+        };
+        let preference = notification_mode(
+            ctx,
+            schedule.workspace_id,
+            control.space_id,
+            schedule.recipient_identity,
+            control.tier,
+        );
+        if preference.key != schedule.preference_key
+            || preference.revision != claim.preference_revision
+        {
+            return suppressed("preference_revision_stale");
+        }
+        if preference.mute_window_configured {
+            return suppressed("policy_suppressed");
+        }
+        match preference.mode {
+            NotificationDeliveryMode::Disabled => return suppressed("recipient_opted_out"),
+            NotificationDeliveryMode::Immediate => {
+                return suppressed("preference_revision_stale");
+            }
+            NotificationDeliveryMode::Digest => {}
+        }
+        let resource_revision = notification_resource_revision(
+            ctx,
+            schedule.workspace_id,
+            &control.resource_type,
+            control.resource_id,
+        );
+        let authority_binding_current = notification.workspace_id == schedule.workspace_id
+            && notification.recipient_identity == schedule.recipient_identity
+            && notification.id == control.notification_id
+            && control.channel == schedule.channel
+            && control.membership_epoch == claim.authorization_epoch
+            && resource_revision == Some(control.resource_revision)
+            && notification_resource_visible_to(
+                ctx,
+                schedule.workspace_id,
+                schedule.recipient_identity,
+                &control.resource_type,
+                control.resource_id,
+            );
+        if !crate::policy::notification_digest_item_eligible(
+            notification.read_at.is_some(),
+            authority_binding_current,
+        ) {
+            continue;
+        }
+        eligible_count = eligible_count.saturating_add(1);
+        let line = format!("- {}", notification.summary.trim());
+        let projected_bytes =
+            summaries.iter().map(String::len).sum::<usize>() + line.len() + summaries.len();
+        let projected_characters = summaries
+            .iter()
+            .map(|value| value.chars().count())
+            .sum::<usize>()
+            + line.chars().count()
+            + summaries.len();
+        if projected_bytes <= 3_500 && projected_characters <= 1_750 {
+            summaries.push(line);
+        } else {
+            omitted = omitted.saturating_add(1);
+        }
+    }
+    if claim.overflow_count > 0 {
+        omitted = omitted.saturating_add(claim.overflow_count);
+    }
+    if eligible_count == 0 && omitted == 0 {
+        return suppressed("no_content");
+    }
+    if omitted > 0 {
+        summaries.push(format!("- and {omitted} more updates"));
+    }
+    NotificationDigestAuthoritySnapshot {
+        suppression_code: String::new(),
+        body: summaries.join("\n"),
+        item_count: eligible_count.max(1),
+    }
+}
+
+#[spacetimedb::reducer]
+pub fn claim_notification_digests(
+    ctx: &ReducerContext,
+    input: ClaimNotificationDigestsInput,
+) -> Result<(), String> {
+    if input.occurrences.is_empty()
+        || input.occurrences.len() > NOTIFICATION_DIGEST_MAX_CLAIMS
+        || !crate::policy::worker_slot_id_valid(&input.worker_slot_id)
+        || !(5..=NOTIFICATION_DIGEST_MAX_LEASE_SECONDS).contains(&input.lease_seconds)
+    {
+        return Err("notification digest claim input is invalid".into());
+    }
+    let lease_until =
+        ctx.timestamp + TimeDuration::from_micros(i64::from(input.lease_seconds) * 1_000_000);
+    for occurrence in input.occurrences {
+        if !crate::policy::notification_digest_local_date_valid(&occurrence.local_date)
+            || occurrence.scheduled_for > ctx.timestamp
+            || occurrence.expected_digest_revision == 0
+        {
+            return Err("notification digest occurrence is invalid".into());
+        }
+        let mut schedule = ctx
+            .db
+            .notification_digest_schedule()
+            .id()
+            .find(occurrence.schedule_id)
+            .ok_or_else(|| "notification digest schedule unavailable".to_string())?;
+        require_service(ctx, schedule.workspace_id, JOB_NOTIFICATION_DELIVER)?;
+        if let Some(mut claim) = ctx
+            .db
+            .notification_digest_claim()
+            .schedule_id()
+            .find(schedule.id)
+        {
+            if claim.local_date != occurrence.local_date
+                || claim.scheduled_for != occurrence.scheduled_for
+                || !crate::policy::notification_digest_claim_recovery_allowed(
+                    claim.preference_revision,
+                    claim.digest_revision,
+                    occurrence.expected_preference_revision,
+                    occurrence.expected_digest_revision,
+                    schedule.digest_revision,
+                    claim.next_attempt_at <= ctx.timestamp,
+                    claim.lease_until <= ctx.timestamp,
+                )
+            {
+                return Err("notification digest claim unavailable".into());
+            }
+            if claim.state == NotificationDigestClaimState::Claimed {
+                claim.state = NotificationDigestClaimState::OutcomeUnknown;
+            }
+            claim.service_identity = ctx.sender();
+            claim.worker_slot_id = input.worker_slot_id.clone();
+            claim.lease_generation = claim
+                .lease_generation
+                .checked_add(1)
+                .ok_or_else(|| "notification digest lease generation exhausted".to_string())?;
+            claim.lease_until = lease_until;
+            claim.attempt_count = claim.attempt_count.saturating_add(1);
+            claim.updated_at = ctx.timestamp;
+            ctx.db.notification_digest_claim().claim_id().update(claim);
+            continue;
+        }
+        if schedule.preference_revision != occurrence.expected_preference_revision
+            || schedule.digest_revision != occurrence.expected_digest_revision
+        {
+            return Err("notification digest schedule is stale".into());
+        }
+        let membership = find_membership(ctx, schedule.workspace_id, schedule.recipient_identity)
+            .filter(|membership| membership.active)
+            .ok_or_else(|| "notification digest recipient unavailable".to_string())?;
+        if (!schedule.last_occurrence_local_date.is_empty()
+            && occurrence.local_date <= schedule.last_occurrence_local_date)
+            || ctx
+                .db
+                .notification_digest_outcome()
+                .occurrence_key()
+                .find(notification_digest_occurrence_key(
+                    schedule.id,
+                    &occurrence.local_date,
+                ))
+                .is_some()
+        {
+            return Err("notification digest occurrence already claimed".into());
+        }
+        let item_count = ctx
+            .db
+            .notification_digest_item()
+            .schedule_id()
+            .filter(schedule.id)
+            .take(NOTIFICATION_DIGEST_MAX_ITEMS)
+            .count();
+        if item_count == 0 && schedule.overflow_count == 0 {
+            return Err("notification digest has no pending content".into());
+        }
+        let claim = NotificationDigestClaim {
+            claim_id: new_id(ctx)?,
+            schedule_id: schedule.id,
+            workspace_id: schedule.workspace_id,
+            recipient_identity: schedule.recipient_identity,
+            channel: schedule.channel.clone(),
+            local_date: occurrence.local_date.clone(),
+            scheduled_for: occurrence.scheduled_for,
+            preference_revision: schedule.preference_revision,
+            digest_revision: schedule.digest_revision,
+            authorization_epoch: membership.authz_epoch,
+            overflow_count: if schedule.overflow_revision <= schedule.digest_revision {
+                schedule.overflow_count
+            } else {
+                0
+            },
+            state: NotificationDigestClaimState::Claimed,
+            service_identity: ctx.sender(),
+            worker_slot_id: input.worker_slot_id.clone(),
+            lease_generation: 1,
+            lease_until,
+            attempt_count: 1,
+            next_attempt_at: ctx.timestamp,
+            created_at: ctx.timestamp,
+            updated_at: ctx.timestamp,
+        };
+        schedule.last_occurrence_local_date = occurrence.local_date;
+        schedule.updated_at = ctx.timestamp;
+        ctx.db.notification_digest_schedule().id().update(schedule);
+        ctx.db.notification_digest_claim().insert(claim);
+    }
+    Ok(())
+}
+
+#[spacetimedb::reducer]
+pub fn authorize_notification_digest(
+    ctx: &ReducerContext,
+    input: AuthorizeNotificationDigestInput,
+) -> Result<(), String> {
+    if !crate::policy::worker_slot_id_valid(&input.worker_slot_id)
+        || !(1..=NOTIFICATION_PERMIT_MAX_SECONDS).contains(&input.permit_seconds)
+    {
+        return Err("notification digest permit request is invalid".into());
+    }
+    let claim = ctx
+        .db
+        .notification_digest_claim()
+        .claim_id()
+        .find(input.claim_id)
+        .ok_or_else(|| "notification digest plan unavailable".to_string())?;
+    require_service(ctx, claim.workspace_id, JOB_NOTIFICATION_DELIVER)?;
+    if claim.service_identity != ctx.sender()
+        || claim.worker_slot_id != input.worker_slot_id
+        || claim.lease_generation != input.lease_generation
+        || claim.lease_until <= ctx.timestamp
+    {
+        return Err("notification digest plan unavailable".into());
+    }
+    let schedule = ctx
+        .db
+        .notification_digest_schedule()
+        .id()
+        .find(claim.schedule_id)
+        .ok_or_else(|| "notification digest plan unavailable".to_string())?;
+    let snapshot = notification_digest_authority_snapshot(ctx, &schedule, &claim);
+    if !snapshot.suppression_code.is_empty() {
+        ctx.db
+            .notification_digest_permit()
+            .claim_id()
+            .delete(claim.claim_id);
+        return Err("notification digest plan unavailable".into());
+    }
+    let expires_at = std::cmp::min(
+        claim.lease_until,
+        ctx.timestamp + TimeDuration::from_micros(i64::from(input.permit_seconds) * 1_000_000),
+    );
+    let permit = NotificationDigestPermit {
+        claim_id: claim.claim_id,
+        workspace_id: claim.workspace_id,
+        schedule_id: claim.schedule_id,
+        service_identity: ctx.sender(),
+        worker_slot_id: input.worker_slot_id,
+        lease_generation: claim.lease_generation,
+        preference_revision: claim.preference_revision,
+        digest_revision: claim.digest_revision,
+        authorization_epoch: claim.authorization_epoch,
+        expires_at,
+        created_at: ctx.timestamp,
+    };
+    if ctx
+        .db
+        .notification_digest_permit()
+        .claim_id()
+        .find(claim.claim_id)
+        .is_some()
+    {
+        ctx.db
+            .notification_digest_permit()
+            .claim_id()
+            .update(permit);
+    } else {
+        ctx.db.notification_digest_permit().insert(permit);
+    }
+    Ok(())
+}
+
+fn notification_digest_permit_current(
+    ctx: &ReducerContext,
+    claim: &NotificationDigestClaim,
+) -> bool {
+    ctx.db
+        .notification_digest_permit()
+        .claim_id()
+        .find(claim.claim_id)
+        .is_some_and(|permit| {
+            permit.workspace_id == claim.workspace_id
+                && permit.schedule_id == claim.schedule_id
+                && permit.service_identity == ctx.sender()
+                && permit.worker_slot_id == claim.worker_slot_id
+                && permit.lease_generation == claim.lease_generation
+                && permit.preference_revision == claim.preference_revision
+                && permit.digest_revision == claim.digest_revision
+                && permit.authorization_epoch == claim.authorization_epoch
+                && permit.expires_at > ctx.timestamp
+        })
+}
+
+#[spacetimedb::reducer]
+pub fn record_notification_digest_outcome(
+    ctx: &ReducerContext,
+    input: RecordNotificationDigestOutcomeInput,
+) -> Result<(), String> {
+    if !crate::policy::worker_slot_id_valid(&input.worker_slot_id)
+        || input.provider_reference.len() > 256
+        || (!input.provider_reference.is_empty()
+            && !crate::policy::notification_provider_reference_valid(&input.provider_reference))
+        || input.code.len() > 128
+        || input.retry_after_seconds > 86_400
+    {
+        return Err("notification digest outcome input is invalid".into());
+    }
+    let mut claim = ctx
+        .db
+        .notification_digest_claim()
+        .claim_id()
+        .find(input.claim_id)
+        .ok_or_else(|| "notification digest claim unavailable".to_string())?;
+    require_service(ctx, claim.workspace_id, JOB_NOTIFICATION_DELIVER)?;
+    if claim.service_identity != ctx.sender()
+        || claim.worker_slot_id != input.worker_slot_id
+        || claim.lease_generation != input.lease_generation
+        || claim.lease_until <= ctx.timestamp
+    {
+        return Err("notification digest claim unavailable".into());
+    }
+    let schedule = ctx
+        .db
+        .notification_digest_schedule()
+        .id()
+        .find(claim.schedule_id)
+        .ok_or_else(|| "notification digest claim unavailable".to_string())?;
+    let snapshot = notification_digest_authority_snapshot(ctx, &schedule, &claim);
+    let permit_current = notification_digest_permit_current(ctx, &claim);
+    let transient_code = matches!(
+        input.code.as_str(),
+        "rate_limited" | "provider_unavailable" | "network_error"
+    );
+    let permanent_code = matches!(
+        input.code.as_str(),
+        "invalid_recipient" | "recipient_unreachable" | "provider_rejected" | "channel_unavailable"
+    );
+    let unknown_code = matches!(
+        input.code.as_str(),
+        "provider_timeout" | "connection_lost_after_send"
+    );
+    let exact_shape = match input.outcome {
+        NotificationDigestCompletionOutcome::Succeeded => {
+            !input.provider_reference.is_empty()
+                && input.code.is_empty()
+                && input.retry_after_seconds == 0
+                && ((input.reconciled
+                    && claim.state == NotificationDigestClaimState::OutcomeUnknown)
+                    || (!input.reconciled && permit_current))
+        }
+        NotificationDigestCompletionOutcome::Suppressed => {
+            input.provider_reference.is_empty()
+                && !snapshot.suppression_code.is_empty()
+                && input.code == snapshot.suppression_code
+                && input.retry_after_seconds == 0
+                && !input.reconciled
+        }
+        NotificationDigestCompletionOutcome::TransientFailure => {
+            input.provider_reference.is_empty()
+                && transient_code
+                && permit_current
+                && !input.reconciled
+        }
+        NotificationDigestCompletionOutcome::PermanentFailure => {
+            input.provider_reference.is_empty()
+                && permanent_code
+                && input.retry_after_seconds == 0
+                && permit_current
+                && !input.reconciled
+        }
+        NotificationDigestCompletionOutcome::OutcomeUnknown => {
+            input.provider_reference.is_empty()
+                && unknown_code
+                && permit_current
+                && !input.reconciled
+        }
+        NotificationDigestCompletionOutcome::ReconciliationUnknown => {
+            input.provider_reference.is_empty()
+                && input.code == "unknown"
+                && claim.state == NotificationDigestClaimState::OutcomeUnknown
+                && input.reconciled
+        }
+    };
+    if !exact_shape {
+        return Err("notification digest outcome authority is stale".into());
+    }
+    let terminal = match input.outcome {
+        NotificationDigestCompletionOutcome::Succeeded => {
+            Some(NotificationDigestTerminalOutcome::Succeeded)
+        }
+        NotificationDigestCompletionOutcome::Suppressed => {
+            Some(NotificationDigestTerminalOutcome::Suppressed)
+        }
+        NotificationDigestCompletionOutcome::PermanentFailure => {
+            Some(NotificationDigestTerminalOutcome::PermanentFailure)
+        }
+        _ => None,
+    };
+    if let Some(outcome) = terminal {
+        let clear_batch = input.outcome != NotificationDigestCompletionOutcome::Suppressed
+            || matches!(
+                input.code.as_str(),
+                "no_content"
+                    | "recipient_opted_out"
+                    | "channel_disabled"
+                    | "recipient_suspended"
+                    | "permission_revoked"
+            );
+        let occurrence_key =
+            notification_digest_occurrence_key(claim.schedule_id, &claim.local_date);
+        if ctx
+            .db
+            .notification_digest_outcome()
+            .occurrence_key()
+            .find(occurrence_key.clone())
+            .is_some()
+        {
+            return Err("notification digest outcome already recorded".into());
+        }
+        ctx.db
+            .notification_digest_outcome()
+            .insert(NotificationDigestOutcome {
+                occurrence_key,
+                schedule_id: claim.schedule_id,
+                workspace_id: claim.workspace_id,
+                local_date: claim.local_date.clone(),
+                digest_revision: claim.digest_revision,
+                outcome,
+                provider_reference: input.provider_reference,
+                code: input.code,
+                completed_at: ctx.timestamp,
+            });
+        if clear_batch {
+            let item_ids: Vec<_> = ctx
+                .db
+                .notification_digest_item()
+                .schedule_id()
+                .filter(claim.schedule_id)
+                .filter(|item| item.digest_revision <= claim.digest_revision)
+                .take(NOTIFICATION_DIGEST_MAX_ITEMS)
+                .map(|item| item.notification_id)
+                .collect();
+            for notification_id in item_ids {
+                ctx.db
+                    .notification_digest_item()
+                    .notification_id()
+                    .delete(notification_id);
+            }
+        }
+        if clear_batch && schedule.overflow_revision <= claim.digest_revision {
+            let mut updated = schedule;
+            updated.overflow_count = 0;
+            updated.overflow_revision = 0;
+            updated.updated_at = ctx.timestamp;
+            ctx.db.notification_digest_schedule().id().update(updated);
+        }
+        ctx.db
+            .notification_digest_permit()
+            .claim_id()
+            .delete(claim.claim_id);
+        ctx.db
+            .notification_digest_claim()
+            .claim_id()
+            .delete(claim.claim_id);
+        return Ok(());
+    }
+    claim.state = match input.outcome {
+        NotificationDigestCompletionOutcome::TransientFailure => {
+            NotificationDigestClaimState::Retry
+        }
+        NotificationDigestCompletionOutcome::OutcomeUnknown
+        | NotificationDigestCompletionOutcome::ReconciliationUnknown => {
+            NotificationDigestClaimState::OutcomeUnknown
+        }
+        _ => unreachable!("terminal digest outcomes returned above"),
+    };
+    claim.next_attempt_at = ctx.timestamp
+        + TimeDuration::from_micros(i64::from(input.retry_after_seconds.max(1)) * 1_000_000);
+    claim.lease_until = ctx.timestamp;
+    claim.updated_at = ctx.timestamp;
+    ctx.db
+        .notification_digest_claim()
+        .claim_id()
+        .update(claim.clone());
+    ctx.db
+        .notification_digest_permit()
+        .claim_id()
+        .delete(claim.claim_id);
     Ok(())
 }
 
@@ -8846,7 +10525,23 @@ pub fn claim_outbox_job(
         .id()
         .find(job_id)
         .ok_or_else(|| "outbox job not found".to_string())?;
-    require_service(ctx, job.workspace_id, &job.kind)?;
+    let expired_lease = job.state == OutboxState::Leased
+        && job
+            .lease_until
+            .is_some_and(|expiry| expiry <= ctx.timestamp);
+    let fenced_generation_reconciliation = job.kind == JOB_WORKSPACE_EXPORT_GENERATE
+        && !workspace_is_active(ctx, job.workspace_id)
+        && crate::policy::workspace_export_reconciliation_after_fence_allowed(
+            job.state == OutboxState::OutcomeUnknown,
+            expired_lease,
+            job.attempt > 0,
+            true,
+        );
+    if fenced_generation_reconciliation {
+        require_export_generation_completion_service(ctx, job.workspace_id)?;
+    } else {
+        require_service(ctx, job.workspace_id, &job.kind)?;
+    }
     if job.attempt >= OUTBOX_MAX_ATTEMPTS || job.expires_at <= ctx.timestamp {
         job.state = OutboxState::DeadLetter;
         job.last_error = "outbox_limits_exhausted".into();
@@ -8857,16 +10552,19 @@ pub fn claim_outbox_job(
         ctx.db.outbox_job().id().update(job);
         return Ok(());
     }
-    let expired_lease = job.state == OutboxState::Leased
-        && job
-            .lease_until
-            .is_some_and(|expiry| expiry <= ctx.timestamp);
+    let proposed_lease_until =
+        ctx.timestamp + TimeDuration::from_micros(i64::from(lease_seconds) * 1_000_000);
     if job.lease_generation != expected_generation
         || !(matches!(
             job.state,
             OutboxState::Pending | OutboxState::Retry | OutboxState::OutcomeUnknown
         ) || expired_lease)
         || (!expired_lease && job.next_attempt_at > ctx.timestamp)
+        || (job.kind == JOB_WORKSPACE_EXPORT_GENERATE
+            && !crate::policy::workspace_export_generation_lease_within_ttl(
+                proposed_lease_until,
+                job.expires_at,
+            ))
     {
         return Err("outbox job is not claimable".into());
     }
@@ -8874,8 +10572,7 @@ pub fn claim_outbox_job(
     job.attempt = job.attempt.saturating_add(1);
     job.lease_owner = Some(ctx.sender());
     job.worker_slot_id = worker_slot_id;
-    job.lease_until =
-        Some(ctx.timestamp + TimeDuration::from_micros(i64::from(lease_seconds) * 1_000_000));
+    job.lease_until = Some(proposed_lease_until);
     job.lease_generation = job.lease_generation.saturating_add(1);
     job.updated_at = ctx.timestamp;
     ctx.db.outbox_job().id().update(job);
@@ -8902,17 +10599,33 @@ pub fn heartbeat_outbox_job(
         .id()
         .find(job_id)
         .ok_or_else(|| "outbox job not found".to_string())?;
-    require_service(ctx, job.workspace_id, &job.kind)?;
-    if job.state != OutboxState::Leased
-        || job.lease_owner != Some(ctx.sender())
-        || job.worker_slot_id != worker_slot_id
-        || job.lease_generation != lease_generation
-        || job.lease_until.is_none_or(|expiry| expiry <= ctx.timestamp)
-    {
+    let exact_lease = job.state == OutboxState::Leased
+        && job.lease_owner == Some(ctx.sender())
+        && job.worker_slot_id == worker_slot_id
+        && job.lease_generation == lease_generation
+        && job.lease_until.is_some_and(|expiry| expiry > ctx.timestamp);
+    if !exact_lease {
         return Err("stale or expired outbox lease".into());
     }
-    job.lease_until =
-        Some(ctx.timestamp + TimeDuration::from_micros(i64::from(lease_seconds) * 1_000_000));
+    let proposed_lease_until =
+        ctx.timestamp + TimeDuration::from_micros(i64::from(lease_seconds) * 1_000_000);
+    if job.kind == JOB_WORKSPACE_EXPORT_GENERATE
+        && !crate::policy::workspace_export_generation_lease_within_ttl(
+            proposed_lease_until,
+            job.expires_at,
+        )
+    {
+        return Err("workspace export generation lease exceeds artifact TTL safety".into());
+    }
+    if job.kind == JOB_WORKSPACE_EXPORT_GENERATE && !workspace_is_active(ctx, job.workspace_id) {
+        require_export_generation_completion_service(ctx, job.workspace_id)?;
+        if !crate::policy::workspace_export_generation_after_fence_allowed(true, true, true, true) {
+            return Err("service capability denied".into());
+        }
+    } else {
+        require_service(ctx, job.workspace_id, &job.kind)?;
+    }
+    job.lease_until = Some(proposed_lease_until);
     job.updated_at = ctx.timestamp;
     ctx.db.outbox_job().id().update(job);
     Ok(())
@@ -8938,20 +10651,37 @@ pub fn recover_outbox_job(
         .id()
         .find(job_id)
         .ok_or_else(|| "outbox job not found".to_string())?;
-    require_service(ctx, job.workspace_id, &job.kind)?;
-    if !crate::policy::outbox_recovery_allowed(
+    let recovery_allowed = crate::policy::outbox_recovery_allowed(
         job.state == OutboxState::Leased,
         job.lease_owner == Some(ctx.sender()),
         job.worker_slot_id == worker_slot_id,
         job.lease_generation == expected_generation,
         job.lease_until.is_some_and(|expiry| expiry > ctx.timestamp),
-    ) {
+    );
+    if !recovery_allowed {
         return Err("owned outbox lease is unavailable for recovery".into());
+    }
+    let proposed_lease_until =
+        ctx.timestamp + TimeDuration::from_micros(i64::from(lease_seconds) * 1_000_000);
+    if job.kind == JOB_WORKSPACE_EXPORT_GENERATE
+        && !crate::policy::workspace_export_generation_lease_within_ttl(
+            proposed_lease_until,
+            job.expires_at,
+        )
+    {
+        return Err("workspace export generation lease exceeds artifact TTL safety".into());
+    }
+    if job.kind == JOB_WORKSPACE_EXPORT_GENERATE && !workspace_is_active(ctx, job.workspace_id) {
+        require_export_generation_completion_service(ctx, job.workspace_id)?;
+        if !crate::policy::workspace_export_generation_after_fence_allowed(true, true, true, true) {
+            return Err("service capability denied".into());
+        }
+    } else {
+        require_service(ctx, job.workspace_id, &job.kind)?;
     }
     job.lease_generation = crate::policy::recovered_outbox_generation(job.lease_generation)
         .ok_or_else(|| "outbox lease generation exhausted".to_string())?;
-    job.lease_until =
-        Some(ctx.timestamp + TimeDuration::from_micros(i64::from(lease_seconds) * 1_000_000));
+    job.lease_until = Some(proposed_lease_until);
     job.updated_at = ctx.timestamp;
     ctx.db.outbox_job().id().update(job);
     Ok(())
@@ -8989,6 +10719,12 @@ pub fn complete_outbox_job(
         .find(job_id)
         .ok_or_else(|| "outbox job not found".to_string())?;
     require_service(ctx, job.workspace_id, &job.kind)?;
+    if matches!(
+        job.kind.as_str(),
+        JOB_WORKSPACE_EXPORT_GENERATE | JOB_WORKSPACE_EXPORT_CLEANUP
+    ) {
+        return Err("workspace exports require dedicated completion authority".into());
+    }
     if job.state != OutboxState::Leased
         || job.lease_owner != Some(ctx.sender())
         || job.worker_slot_id != worker_slot_id

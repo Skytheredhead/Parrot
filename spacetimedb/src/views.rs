@@ -41,6 +41,104 @@ pub struct VisibleWorkspaceLifecycle {
 }
 
 #[derive(SpacetimeType)]
+pub struct VisibleWorkspaceLegalHold {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub state: WorkspaceLegalHoldState,
+    pub placed_at: Timestamp,
+    pub released_at: Option<Timestamp>,
+    pub revision: u64,
+}
+
+#[derive(SpacetimeType)]
+pub struct VisibleWorkspaceExport {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub state: WorkspaceExportState,
+    pub artifact_key: String,
+    pub content_hash: String,
+    pub size_bytes: u64,
+    pub expires_at: Option<Timestamp>,
+    pub failure_reason: String,
+    pub revision: u64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[derive(SpacetimeType)]
+pub struct WorkspaceExportPlanView {
+    pub job_id: Uuid,
+    pub export_id: Uuid,
+    pub workspace_id: Uuid,
+    pub lifecycle_epoch: u64,
+    pub workspace_revision: u64,
+    pub export_revision: u64,
+    pub reconcile_only: bool,
+    pub state: OutboxState,
+    pub lease_owner: Option<Identity>,
+    pub worker_slot_id: String,
+    pub lease_generation: u64,
+}
+
+#[derive(SpacetimeType)]
+pub struct WorkspaceExportCleanupPlanView {
+    pub job_id: Uuid,
+    pub export_id: Uuid,
+    pub workspace_id: Uuid,
+    pub export_revision: u64,
+    pub artifact_key: String,
+    pub content_hash: String,
+    pub artifact_version: String,
+    pub size_bytes: u64,
+    pub state: OutboxState,
+    pub lease_owner: Option<Identity>,
+    pub worker_slot_id: String,
+    pub lease_generation: u64,
+}
+
+#[derive(SpacetimeType)]
+pub struct NotificationDigestScheduleView {
+    pub schedule_id: Uuid,
+    pub workspace_id: Uuid,
+    pub recipient_identity: Identity,
+    pub channel: String,
+    pub time_zone: String,
+    pub digest_local_minute: u16,
+    pub preference_revision: u64,
+    pub digest_revision: u64,
+    pub last_occurrence_local_date: String,
+    pub active_claim_local_date: String,
+    pub active_claim_scheduled_for: Option<Timestamp>,
+    pub active_claim_state: Option<NotificationDigestClaimState>,
+    pub active_claim_preference_revision: Option<u64>,
+    pub active_claim_digest_revision: Option<u64>,
+    pub active_claim_lease_until: Option<Timestamp>,
+    pub active_claim_next_attempt_at: Option<Timestamp>,
+}
+
+#[derive(SpacetimeType)]
+pub struct NotificationDigestPlanView {
+    pub claim_id: Uuid,
+    pub workspace_id: Uuid,
+    pub recipient_identity: Identity,
+    pub channel: String,
+    pub schedule_id: Uuid,
+    pub local_date: String,
+    pub scheduled_for: Timestamp,
+    pub preference_revision: u64,
+    pub digest_revision: u64,
+    pub authorization_epoch: u64,
+    pub worker_slot_id: String,
+    pub lease_generation: u64,
+    pub reconcile_first: bool,
+    pub decision: String,
+    pub suppression_code: String,
+    pub body: String,
+    pub item_count: u16,
+    pub permit_expires_at: Option<Timestamp>,
+}
+
+#[derive(SpacetimeType)]
 pub struct VisiblePresence {
     pub workspace_id: Uuid,
     pub identity: Identity,
@@ -495,6 +593,85 @@ pub fn my_workspace_lifecycles(ctx: &ViewContext) -> Vec<VisibleWorkspaceLifecyc
             deletion_grace_days: lifecycle.deletion_grace_days,
             deletion_execute_after: lifecycle.deletion_execute_after,
             revision: lifecycle.revision,
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_workspace_legal_holds, public)]
+pub fn my_workspace_legal_holds(ctx: &ViewContext) -> Vec<VisibleWorkspaceLegalHold> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| member.active && member.role == WorkspaceRole::Owner)
+        .filter(|member| {
+            ctx.db
+                .workspace()
+                .id()
+                .find(member.workspace_id)
+                .is_some_and(|workspace| workspace.owner_identity == ctx.sender())
+        })
+        .flat_map(|member| {
+            ctx.db
+                .workspace_legal_hold()
+                .workspace_id()
+                .filter(member.workspace_id)
+        })
+        .map(|hold| VisibleWorkspaceLegalHold {
+            id: hold.id,
+            workspace_id: hold.workspace_id,
+            state: hold.state,
+            placed_at: hold.placed_at,
+            released_at: hold.released_at,
+            revision: hold.revision,
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_workspace_exports, public)]
+pub fn my_workspace_exports(ctx: &ViewContext) -> Vec<VisibleWorkspaceExport> {
+    ctx.db
+        .workspace_member()
+        .identity()
+        .filter(ctx.sender())
+        .filter(|member| {
+            member.active
+                && member.role == WorkspaceRole::Owner
+                && workspace_is_active(ctx, member.workspace_id)
+        })
+        .filter(|member| {
+            ctx.db
+                .workspace()
+                .id()
+                .find(member.workspace_id)
+                .is_some_and(|workspace| workspace.owner_identity == ctx.sender())
+        })
+        .flat_map(|member| {
+            ctx.db
+                .workspace_export()
+                .workspace_id()
+                .filter(member.workspace_id)
+        })
+        .map(|export| {
+            VisibleWorkspaceExport {
+                id: export.id,
+                workspace_id: export.workspace_id,
+                state: export.state,
+                // Artifact references never cross the public View boundary. Retrieval requires a
+                // separate short-lived gateway capability that can enforce wall-clock expiry.
+                artifact_key: String::new(),
+                content_hash: String::new(),
+                size_bytes: 0,
+                expires_at: export.expires_at,
+                failure_reason: if export.state == WorkspaceExportState::Failed {
+                    "generation_failed".into()
+                } else {
+                    String::new()
+                },
+                revision: export.revision,
+                created_at: export.created_at,
+                updated_at: export.updated_at,
+            }
         })
         .collect()
 }
@@ -1206,7 +1383,14 @@ pub fn pending_outbox_work(ctx: &ViewContext) -> Vec<OutboxJobEnvelopeView> {
         .service_grant()
         .service_identity()
         .filter(ctx.sender())
-        .filter(|grant| grant.enabled && workspace_is_active(ctx, grant.workspace_id))
+        .filter(|grant| {
+            grant.enabled
+                && (workspace_is_active(ctx, grant.workspace_id)
+                    || matches!(
+                        grant.kind.as_str(),
+                        "workspace.export.generate" | "workspace.export.cleanup"
+                    ))
+        })
         .flat_map(|grant| {
             ctx.db
                 .outbox_job()
@@ -1215,13 +1399,21 @@ pub fn pending_outbox_work(ctx: &ViewContext) -> Vec<OutboxJobEnvelopeView> {
                 .filter(move |job| job.kind == grant.kind)
         })
         .filter(|job| {
-            matches!(
+            let normally_available = matches!(
                 job.state,
                 OutboxState::Pending
                     | OutboxState::Retry
                     | OutboxState::OutcomeUnknown
                     | OutboxState::Leased
-            )
+            );
+            if workspace_is_active(ctx, job.workspace_id) {
+                return normally_available;
+            }
+            (job.kind == "workspace.export.cleanup" && normally_available)
+                || (job.kind == "workspace.export.generate"
+                    && (job.state == OutboxState::OutcomeUnknown
+                        || (job.state == OutboxState::Leased
+                            && job.lease_owner == Some(ctx.sender()))))
         })
         .map(|job| OutboxJobEnvelopeView {
             id: job.id,
@@ -1252,6 +1444,140 @@ pub fn pending_outbox_work(ctx: &ViewContext) -> Vec<OutboxJobEnvelopeView> {
             lease_until: job.lease_until,
             lease_generation: job.lease_generation,
             last_error: job.last_error,
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = pending_workspace_export_plans, public)]
+pub fn pending_workspace_export_plans(ctx: &ViewContext) -> Vec<WorkspaceExportPlanView> {
+    let allowed = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_process_outbox);
+    if !allowed {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| grant.enabled && grant.kind == "workspace.export.generate")
+        .flat_map(|grant| {
+            ctx.db
+                .outbox_job()
+                .workspace_id()
+                .filter(grant.workspace_id)
+                .filter(|job| job.kind == "workspace.export.generate")
+        })
+        .filter(|job| {
+            matches!(
+                job.state,
+                OutboxState::Pending | OutboxState::Retry | OutboxState::OutcomeUnknown
+            ) || (job.state == OutboxState::Leased && job.lease_owner == Some(ctx.sender()))
+        })
+        .filter_map(|job| {
+            let export = ctx.db.workspace_export().id().find(job.resource_id)?;
+            let lifecycle = ctx
+                .db
+                .workspace_lifecycle()
+                .workspace_id()
+                .find(export.workspace_id)?;
+            let owned_fenced_lease = lifecycle.state != WorkspaceLifecycleState::Active
+                && job.state == OutboxState::Leased
+                && job.lease_owner == Some(ctx.sender());
+            (export.state == WorkspaceExportState::Requested
+                && ((lifecycle.state == WorkspaceLifecycleState::Active
+                    && lifecycle.lifecycle_epoch == export.lifecycle_epoch)
+                    || owned_fenced_lease)
+                && job.workspace_id == export.workspace_id
+                && job.resource_type == "workspace_export"
+                && job.resource_revision == export.revision
+                && job.payload_resource_id == Some(export.id)
+                && job.version == Some(export.revision))
+            .then_some(WorkspaceExportPlanView {
+                job_id: job.id,
+                export_id: export.id,
+                workspace_id: export.workspace_id,
+                lifecycle_epoch: export.lifecycle_epoch,
+                workspace_revision: export.workspace_revision,
+                export_revision: export.revision,
+                reconcile_only: lifecycle.state != WorkspaceLifecycleState::Active,
+                state: job.state,
+                lease_owner: job.lease_owner,
+                worker_slot_id: job.worker_slot_id,
+                lease_generation: job.lease_generation,
+            })
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = pending_workspace_export_cleanup_plans, public)]
+pub fn pending_workspace_export_cleanup_plans(
+    ctx: &ViewContext,
+) -> Vec<WorkspaceExportCleanupPlanView> {
+    let allowed = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_process_outbox);
+    if !allowed {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| grant.enabled && grant.kind == "workspace.export.cleanup")
+        .flat_map(|grant| {
+            ctx.db
+                .outbox_job()
+                .workspace_id()
+                .filter(grant.workspace_id)
+                .filter(|job| job.kind == "workspace.export.cleanup")
+        })
+        .filter(|job| {
+            matches!(
+                job.state,
+                OutboxState::Pending | OutboxState::Retry | OutboxState::OutcomeUnknown
+            ) || (job.state == OutboxState::Leased && job.lease_owner == Some(ctx.sender()))
+        })
+        .filter_map(|job| {
+            let export = ctx.db.workspace_export().id().find(job.resource_id)?;
+            (export.state == WorkspaceExportState::Expired
+                && job.workspace_id == export.workspace_id
+                && job.resource_type == "workspace_export"
+                && job.resource_revision == export.revision
+                && job.payload_resource_id == Some(export.id)
+                && job.version == Some(export.revision)
+                && policy::workspace_export_artifact_key_valid(
+                    &export.workspace_id.to_string(),
+                    &export.id.to_string(),
+                    &export.artifact_key,
+                )
+                && export.content_hash.len() == 64
+                && export
+                    .content_hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                && policy::workspace_export_artifact_version_valid(&export.artifact_version)
+                && policy::workspace_export_size_valid(export.size_bytes))
+            .then_some(WorkspaceExportCleanupPlanView {
+                job_id: job.id,
+                export_id: export.id,
+                workspace_id: export.workspace_id,
+                export_revision: export.revision,
+                artifact_key: export.artifact_key,
+                content_hash: export.content_hash,
+                artifact_version: export.artifact_version,
+                size_bytes: export.size_bytes,
+                state: job.state,
+                lease_owner: job.lease_owner,
+                worker_slot_id: job.worker_slot_id,
+                lease_generation: job.lease_generation,
+            })
         })
         .collect()
 }
@@ -1356,6 +1682,158 @@ pub fn pending_notification_delivery_plans(ctx: &ViewContext) -> Vec<Notificatio
                 worker_slot_id: job.worker_slot_id,
                 lease_generation: job.lease_generation,
                 permit_expires_at: permit.map(|permit| permit.expires_at),
+            })
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = pending_notification_digest_schedules, public)]
+pub fn pending_notification_digest_schedules(
+    ctx: &ViewContext,
+) -> Vec<NotificationDigestScheduleView> {
+    let allowed = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_process_outbox);
+    if !allowed {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| {
+            grant.enabled
+                && grant.kind == "notification.deliver"
+                && workspace_is_active(ctx, grant.workspace_id)
+        })
+        .flat_map(|grant| {
+            ctx.db
+                .notification_digest_schedule()
+                .workspace_id()
+                .filter(grant.workspace_id)
+        })
+        .filter(|schedule| {
+            schedule.overflow_count > 0
+                || ctx
+                    .db
+                    .notification_digest_item()
+                    .schedule_id()
+                    .filter(schedule.id)
+                    .next()
+                    .is_some()
+                || ctx
+                    .db
+                    .notification_digest_claim()
+                    .schedule_id()
+                    .find(schedule.id)
+                    .is_some()
+        })
+        .map(|schedule| {
+            let claim = ctx
+                .db
+                .notification_digest_claim()
+                .schedule_id()
+                .find(schedule.id);
+            NotificationDigestScheduleView {
+                schedule_id: schedule.id,
+                workspace_id: schedule.workspace_id,
+                recipient_identity: schedule.recipient_identity,
+                channel: schedule.channel,
+                time_zone: schedule.time_zone,
+                digest_local_minute: schedule.digest_local_minute,
+                preference_revision: schedule.preference_revision,
+                digest_revision: schedule.digest_revision,
+                last_occurrence_local_date: schedule.last_occurrence_local_date,
+                active_claim_local_date: claim
+                    .as_ref()
+                    .map_or_else(String::new, |claim| claim.local_date.clone()),
+                active_claim_scheduled_for: claim.as_ref().map(|claim| claim.scheduled_for),
+                active_claim_state: claim.as_ref().map(|claim| claim.state),
+                active_claim_preference_revision: claim
+                    .as_ref()
+                    .map(|claim| claim.preference_revision),
+                active_claim_digest_revision: claim.as_ref().map(|claim| claim.digest_revision),
+                active_claim_lease_until: claim.as_ref().map(|claim| claim.lease_until),
+                active_claim_next_attempt_at: claim.map(|claim| claim.next_attempt_at),
+            }
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = pending_notification_digest_plans, public)]
+pub fn pending_notification_digest_plans(ctx: &ViewContext) -> Vec<NotificationDigestPlanView> {
+    let allowed = ctx
+        .db
+        .service_principal()
+        .identity()
+        .find(ctx.sender())
+        .is_some_and(|service| service.enabled && service.can_process_outbox);
+    if !allowed {
+        return vec![];
+    }
+    ctx.db
+        .service_grant()
+        .service_identity()
+        .filter(ctx.sender())
+        .filter(|grant| {
+            grant.enabled
+                && grant.kind == "notification.deliver"
+                && workspace_is_active(ctx, grant.workspace_id)
+        })
+        .flat_map(|grant| {
+            ctx.db
+                .notification_digest_claim()
+                .workspace_id()
+                .filter(grant.workspace_id)
+                .filter(|claim| claim.service_identity == ctx.sender())
+        })
+        .filter_map(|claim| {
+            let schedule = ctx
+                .db
+                .notification_digest_schedule()
+                .id()
+                .find(claim.schedule_id)?;
+            let snapshot =
+                crate::reducers::notification_digest_authority_snapshot(ctx, &schedule, &claim);
+            let permit_expires_at = ctx
+                .db
+                .notification_digest_permit()
+                .claim_id()
+                .find(claim.claim_id)
+                .filter(|permit| {
+                    permit.service_identity == ctx.sender()
+                        && permit.workspace_id == claim.workspace_id
+                        && permit.schedule_id == claim.schedule_id
+                        && permit.worker_slot_id == claim.worker_slot_id
+                        && permit.lease_generation == claim.lease_generation
+                        && permit.preference_revision == claim.preference_revision
+                        && permit.digest_revision == claim.digest_revision
+                        && permit.authorization_epoch == claim.authorization_epoch
+                })
+                .map(|permit| permit.expires_at);
+            let deliver = snapshot.suppression_code.is_empty();
+            Some(NotificationDigestPlanView {
+                claim_id: claim.claim_id,
+                workspace_id: claim.workspace_id,
+                recipient_identity: claim.recipient_identity,
+                channel: claim.channel,
+                schedule_id: claim.schedule_id,
+                local_date: claim.local_date,
+                scheduled_for: claim.scheduled_for,
+                preference_revision: claim.preference_revision,
+                digest_revision: claim.digest_revision,
+                authorization_epoch: claim.authorization_epoch,
+                worker_slot_id: claim.worker_slot_id,
+                lease_generation: claim.lease_generation,
+                reconcile_first: claim.state == NotificationDigestClaimState::OutcomeUnknown,
+                decision: if deliver { "deliver" } else { "suppress" }.into(),
+                suppression_code: snapshot.suppression_code,
+                body: snapshot.body,
+                item_count: snapshot.item_count,
+                permit_expires_at,
             })
         })
         .collect()

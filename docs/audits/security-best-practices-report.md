@@ -1,6 +1,6 @@
 # Security best-practices review
 
-Date: 2026-07-11
+Date: 2026-07-12
 
 ## Executive summary
 
@@ -23,7 +23,7 @@ Evidence:
 
 ### S-002 — Rust/worker job-envelope drift and missing agent dispatch (P1)
 
-Resolved. The Rust authority and worker decoder share an exact eight-kind protocol, semantic payload validation, and a generated-envelope contract test. Starting an agent run atomically creates its `agent.run` outbox job; revocation and cancellation dead-letter nonterminal work.
+Resolved. The Rust authority and worker decoder share an exact ten-kind protocol, semantic payload validation, and a generated-envelope contract test. Starting an agent run atomically creates its `agent.run` outbox job; revocation and cancellation dead-letter nonterminal work. Workspace export generation and cleanup use dedicated authority-bound completion paths rather than the generic outcome path.
 
 Evidence:
 
@@ -72,7 +72,10 @@ and exposed through one aggregate authority row rather than raw or stale session
 delivery uses bounded revisioned groups; each leased job is resolved through a service-only view and
 must obtain a short job/owner/slot/generation-bound permit that rechecks current membership,
 preference, resource revision, deletion, and private-space visibility immediately before provider
-I/O. Legacy unversioned delivery work is suppressed during module update.
+I/O. Legacy unversioned delivery work is suppressed during module update. Daily digests use private,
+revision-bound schedules and items, IANA timezone conversion with explicit daylight-saving gap and
+overlap behavior, one local-date cursor, short-lived delivery permits, and ambiguous-outcome
+reconciliation before replay.
 
 Evidence:
 
@@ -83,6 +86,8 @@ Evidence:
 - `spacetimedb/src/views.rs` exposes aggregate presence and service-only delivery plans.
 - `services/worker/src/spacetime-outbox.ts` binds the authoritative delivery revision into the
   decoded job, while `services/worker/src/adapters.ts` requires current-plan dispatch fencing.
+- `services/worker/src/digest.ts` enforces bounded claims, calendar-valid local dates, exact
+  authority revisions, final authorization, and stable per-day delivery identity.
 - A real SpacetimeDB 2.6.1 automatic publish from the previous committed schema to the new schema
   completed successfully.
 
@@ -105,7 +110,35 @@ Evidence:
 - `spacetimedb/src/reducers.rs` backfills lifecycle rows, validates transition invariants, commits
   access fencing before size-bounded epoch-checked runtime drains.
 - Rust policy tests cover bounded configuration, grace enforcement, cancellation, and irreversible
-  final fencing; exact 2.6.1 fresh publish and automatic committed-schema migration pass.
+final fencing; exact 2.6.1 fresh publish and automatic committed-schema migration pass.
+
+Legal holds and owner-requested workspace exports are additive to that lifecycle. Active holds block
+deletion request and finalization. Export artifacts expire after seven days; irreversible lifecycle
+fencing also expires ready artifacts and schedules exact conditional cleanup. Artifact metadata is
+retained until the provider confirms deletion or absence, while mismatches and permanent failures
+remain visible for operator recovery. A leased or outcome-unknown generation may reconcile behind
+the fence, and any artifact registered after fencing is immediately scheduled for compensation.
+The owner view exposes status and timing only, never storage keys, hashes, versions, or sizes.
+
+### S-008 — Agent tool execution and egress bypasses (P1)
+
+Resolved in the provider-neutral contracts. Production tool definitions are metadata-only; tool
+normalization, execution, and reconciliation run exclusively through a privately provenance-checked,
+immutable central boundary. Authorization precedes normalization, and one canonical-cloned,
+deep-frozen payload is used for approval, effect identity, and execution. The gateway egress boundary
+allows only exact HTTPS hostname/port grants, re-resolves every redirect, rejects private and special
+addresses, pins transport identity, bounds DNS/header/body/time/redirect resources, and brokers
+scoped secrets by reference without exposing them to model-visible payloads or errors.
+
+Evidence:
+
+- `services/worker/src/agent-tool-boundary.ts` snapshots and freezes reviewed boundary methods under
+  module-private provenance; `services/worker/src/agent.ts` performs authorization before central
+  normalization and captures the immutable methods at construction.
+- `services/gateway/src/agent-tools/secure-egress.ts` implements deny-default resolution, redirect,
+  transport, response, and secret-broker controls.
+- Adversarial tests cover mutable arguments and method substitution, malicious normalization,
+  authorization ordering, DNS rebinding, redirects, address classes, credential redaction, and bounds.
 
 ## Open release blockers
 
@@ -122,15 +155,18 @@ Required before release:
 
 ### B-002 — Agent tool network and secret-broker boundary (High)
 
-The worker constrains tool registration, budgets, authorization epochs, approvals, leases, and effect idempotency, but actual network I/O belongs to the future provider adapters. A malicious URL, redirect, DNS rebinding, private-address target, oversized response, or over-broad secret grant must be rejected by that adapter boundary.
+The repository now contains provider-neutral, deny-default execution and HTTPS egress boundaries with
+adversarial tests. Release remains blocked until the selected deployment supplies reviewed durable
+boundary, DNS resolver, pinned transport, and scoped secret-broker implementations, and until network
+policy independently prevents bypass outside the application process.
 
 Required before enabling external tools:
 
-1. Default-deny tool egress by scheme, hostname, resolved address, and port.
-2. Re-resolve and revalidate every redirect; block loopback, link-local, private, metadata, multicast, and unsupported address classes for both IPv4 and IPv6.
-3. Pin request, redirect, response-byte, decompression, concurrency, and total-run budgets.
-4. Use installation-scoped, short-lived credentials; expose secrets only to the selected tool adapter and never to model context, logs, checkpoints, or client responses.
-5. Add DNS-rebinding, redirect, credential-leak, and oversized-response tests to the production adapter conformance suite.
+1. Implement the production resolver, pinned transport, secret broker, and durable execution boundary
+   without exposing lower-level network clients to tools.
+2. Enforce independent host/network egress policy so application code cannot bypass the boundary.
+3. Run the repository conformance suite plus provider-specific DNS-rebinding, redirect,
+   credential-leak, timeout, and oversized-response fault injection.
 
 ### B-003 — Environment-specific threat model and data classification (High)
 
@@ -167,9 +203,9 @@ The repository gate covers format, lint, TypeScript, SDK/gateway/worker tests, R
 Current passing test counts at this review checkpoint are:
 
 - Client SDK: 11/11
-- Gateway: 62/62
-- Worker: 90/90
-- Rust policy and reducer-contract tests: 49/49
-- Job-envelope contract: 2/2
+- Gateway: 68/68
+- Worker: 118/118
+- Rust policy and reducer-contract tests: 52/52
+- Job-envelope contract: 4/4
 
 The counts are evidence for the checked-in provider-neutral implementation only; they are not substitutes for the open environment-specific release gates above.

@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import test from "node:test";
 import {
   AgentToolRegistry,
+  type EffectResult,
   FakeClock,
   HandlerRegistry,
   InMemoryAgentRunRepository,
@@ -15,17 +16,16 @@ import {
   InMemorySearchBackend,
   InMemorySpanExporter,
   InMemoryTransactionalOutbox,
+  type JobHandler,
+  type JobKind,
+  loadWorkerConfig,
+  newJob,
   OpenTelemetry,
+  type RuntimeAdapter,
   ScriptedAgentProvider,
   StaticAgentContextSource,
   StructuredLogger,
   WorkerHost,
-  loadWorkerConfig,
-  newJob,
-  type EffectResult,
-  type JobHandler,
-  type JobKind,
-  type RuntimeAdapter,
   type WorkerProductionPorts,
 } from "../src/index.js";
 
@@ -38,6 +38,8 @@ const jobKinds: readonly JobKind[] = [
   "file.extract",
   "file.cleanup",
   "agent.run",
+  "workspace.export.generate",
+  "workspace.export.cleanup",
 ];
 
 const config = (overrides: Partial<ReturnType<typeof loadWorkerConfig>> = {}) => ({
@@ -82,6 +84,7 @@ const graph = (
     readonly outbox?: InMemoryTransactionalOutbox;
     readonly handler?: JobHandler;
     readonly onClose?: () => void;
+    readonly onDigestClaim?: () => void;
   } = {},
 ): WorkerProductionPorts => {
   const clock = new FakeClock(Date.now());
@@ -132,6 +135,20 @@ const graph = (
   const spanExporter = readyAdapter(new InMemorySpanExporter());
   const search = readyAdapter(new InMemorySearchBackend());
   const objects = readyAdapter(new InMemoryObjectStore());
+  const agentToolExecutionBoundary: WorkerProductionPorts["agentToolExecutionBoundary"] =
+    readyAdapter({
+      adapterKind: "test-only" as const,
+      adapterName: "runtime-test-tool-boundary",
+      async normalize(input) {
+        return input.arguments;
+      },
+      async execute(): Promise<EffectResult> {
+        return { type: "succeeded" };
+      },
+      async reconcile() {
+        return { type: "not_found" as const };
+      },
+    });
   return {
     outbox,
     effects,
@@ -146,14 +163,38 @@ const graph = (
     authorization: readyAdapter(new InMemoryAuthorizationGate()),
     contextSource: readyAdapter(new StaticAgentContextSource([])),
     notificationAuthority: readyAdapter(new InMemoryNotificationDeliveryAuthority()),
+    digestAuthority: readyAdapter({
+      adapterKind: "test-only" as const,
+      adapterName: "runtime-test-digest-authority",
+      async claimDue() {
+        options.onDigestClaim?.();
+        return [];
+      },
+      async resolvePlan() {
+        throw new Error("no digest claim");
+      },
+      async dispatchCurrentPlan() {
+        return { current: false } as const;
+      },
+      async recordOutcome() {
+        return false;
+      },
+    }),
     notificationProvider: readyAdapter(new InMemoryNotificationProvider()),
     agentProvider: readyAdapter(new ScriptedAgentProvider([])),
+    agentToolExecutionBoundary,
+    workspaceExportAuthority: placeholder(
+      "runtime-test-workspace-export-authority",
+    ) as WorkerProductionPorts["workspaceExportAuthority"],
+    workspaceExportMaterializer: placeholder(
+      "runtime-test-workspace-export-materializer",
+    ) as WorkerProductionPorts["workspaceExportMaterializer"],
     logSink,
     logger: new StructuredLogger("runtime-test", "error", logSink),
     spanExporter,
     telemetry: new OpenTelemetry(clock, spanExporter),
     handlers,
-    tools: new AgentToolRegistry().register(tool),
+    tools: new AgentToolRegistry(agentToolExecutionBoundary).register(tool),
   };
 };
 
@@ -167,7 +208,25 @@ const eventually = async (condition: () => boolean | Promise<boolean>, timeoutMs
 
 test("worker host serves minimal liveness/readiness and closes adapters", async () => {
   let closes = 0;
-  const host = new WorkerHost(config(), graph({ onClose: () => closes++ }));
+  let digestClaims = 0;
+  const order: string[] = [];
+  const outbox = new InMemoryTransactionalOutbox(new FakeClock(Date.now()));
+  const claim = outbox.claim.bind(outbox);
+  outbox.claim = async (...args: Parameters<typeof claim>) => {
+    order.push("outbox");
+    return claim(...args);
+  };
+  const host = new WorkerHost(
+    config(),
+    graph({
+      outbox,
+      onClose: () => closes++,
+      onDigestClaim: () => {
+        digestClaims++;
+        order.push("digest");
+      },
+    }),
+  );
   await host.start();
   const address = host.address();
   assert.ok(address);
@@ -183,7 +242,45 @@ test("worker host serves minimal liveness/readiness and closes adapters", async 
   assert.equal(missing.status, 404);
   await host.stop("test");
   assert.equal(closes, 1);
+  assert.ok(digestClaims > 0);
+  assert.ok(order.indexOf("outbox") >= 0);
+  assert.ok(order.indexOf("outbox") < order.indexOf("digest"));
   assert.equal(host.isLive(), false);
+});
+
+test("an empty digest pass preserves the hot outbox processed signal", async () => {
+  const clock = new FakeClock(Date.now());
+  const outbox = new InMemoryTransactionalOutbox(clock);
+  let executions = 0;
+  const handler: JobHandler = {
+    retryWhenReconciledNotFound: false,
+    dependencies: [outbox],
+    async execute() {
+      executions += 1;
+      return { type: "succeeded" };
+    },
+    async reconcile() {
+      return { type: "not_found" };
+    },
+  };
+  for (let index = 0; index < 2; index += 1) {
+    await outbox.enqueue(
+      newJob(
+        {
+          id: `runtime-hot-${index}`,
+          workspaceId: "workspace-1",
+          kind: "notification.deliver",
+          payload: { intentId: `intent-hot-${index}`, deliveryRevision: 1 },
+        },
+        clock.now(),
+      ),
+    );
+  }
+  const host = new WorkerHost(config({ pollIntervalMs: 1_000 }), graph({ outbox, handler }));
+  await host.start();
+  await eventually(() => executions === 2, 500);
+  await host.stop("test");
+  assert.equal(executions, 2);
 });
 
 test("SIGTERM-style stop drains an owned job without aborting it", async () => {

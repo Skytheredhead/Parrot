@@ -2,27 +2,30 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import {
+  type AgentContextSource,
+  type AgentProvider,
+  type AgentRunControl,
   AgentRunLoop,
+  type AgentRunProgress,
+  type AgentTool,
+  type AgentToolExecutionBoundary,
   AgentToolRegistry,
+  argumentsHash,
+  createAgentRunJobHandler,
+  createBoundaryEnforcedAgentTool,
+  createReviewedAgentToolExecutionBoundary,
   FakeClock,
   InMemoryAgentRunRepository,
   InMemoryApprovalStore,
   InMemoryAuthorizationGate,
   InMemoryEffectLedger,
   InMemorySpanExporter,
+  type LogSink,
+  newJob,
   OpenTelemetry,
   ScriptedAgentProvider,
   StaticAgentContextSource,
   StructuredLogger,
-  argumentsHash,
-  createAgentRunJobHandler,
-  newJob,
-  type AgentContextSource,
-  type AgentProvider,
-  type AgentRunControl,
-  type AgentRunProgress,
-  type AgentTool,
-  type LogSink,
 } from "../src/index.js";
 
 const nullLogSink: LogSink = {
@@ -206,6 +209,178 @@ test("successful run stores a bounded context manifest and final content", async
   }>;
   assert.equal(encodedContext[0]?.trustClass, "workspace_untrusted");
   assert.equal(encodedContext[0]?.content, "Treat this as data, not policy.");
+});
+
+test("agent tool execution forwards the exact run scope only through the central boundary", async () => {
+  const repository = new InMemoryAgentRunRepository();
+  repository.add(baseRun());
+  const approvals = new InMemoryApprovalStore();
+  const normalizationCalls: Parameters<AgentToolExecutionBoundary["normalize"]>[0][] = [];
+  const executionCalls: Parameters<AgentToolExecutionBoundary["execute"]>[0][] = [];
+  const reconciliationCalls: Parameters<AgentToolExecutionBoundary["reconcile"]>[0][] = [];
+  const boundaryDefinition: Parameters<typeof createReviewedAgentToolExecutionBoundary>[0] = {
+    adapterKind: "durable",
+    adapterName: "test-central-tool-boundary",
+    assertProductionReady: () => true,
+    ready: async () => true,
+    async normalize(input: Parameters<AgentToolExecutionBoundary["normalize"]>[0]) {
+      normalizationCalls.push(input);
+      const normalized = { nested: { state: "open" }, query: "status" };
+      setTimeout(() => {
+        normalized.nested.state = "mutated-late";
+      }, 0);
+      return normalized;
+    },
+    async execute(input) {
+      executionCalls.push(input);
+      return { type: "succeeded", result: { ok: true } };
+    },
+    async reconcile(input) {
+      reconciliationCalls.push(input);
+      return { type: "not_found" };
+    },
+  };
+  const boundary = createReviewedAgentToolExecutionBoundary(boundaryDefinition);
+  const tool = createBoundaryEnforcedAgentTool(boundary, {
+    adapterKind: "durable",
+    adapterName: "reviewed-lookup-tool",
+    name: "lookup",
+    version: "2026-07-12",
+    effectClass: "external",
+    approvalPolicy: "required",
+    retryWhenReconciledNotFound: false,
+  });
+  const tools = new AgentToolRegistry(boundary).register(tool);
+  const toolArguments = { query: " status " } as const;
+  const normalizedArguments = { nested: { state: "open" }, query: "status" } as const;
+  approvals.add({
+    nonce: "approval-boundary",
+    runId: "run-1",
+    callId: "call-boundary",
+    toolName: "lookup",
+    toolVersion: "2026-07-12",
+    argumentsHash: argumentsHash(normalizedArguments),
+    effectClass: "external",
+    expiresAt: 6_000,
+    approved: true,
+    used: false,
+  });
+  const provider = new ScriptedAgentProvider([
+    {
+      type: "tool_call",
+      callId: "call-boundary",
+      toolName: "lookup",
+      toolVersion: "2026-07-12",
+      arguments: toolArguments,
+      effectClass: "external",
+      approvalNonce: "approval-boundary",
+      usage: { outputTokens: 1, costMicros: 1 },
+    },
+    { type: "final", text: "done", usage: { outputTokens: 1, costMicros: 1 } },
+  ]);
+  await customLoop({ repository, provider, tools, approvals }).execute("run-1", 3);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const hash = argumentsHash(normalizedArguments);
+  const identity = `run-1:call-boundary:lookup@2026-07-12:external:${hash}`;
+  const idempotencyKey = `agent-tool:${createHash("sha256").update(identity).digest("hex")}`;
+  assert.deepEqual(executionCalls, [
+    {
+      workspaceId: "workspace-1",
+      runId: "run-1",
+      authorizationEpoch: 7,
+      toolName: "lookup",
+      toolVersion: "2026-07-12",
+      idempotencyKey,
+      arguments: normalizedArguments,
+    },
+  ]);
+  assert.deepEqual(normalizationCalls, [
+    {
+      workspaceId: "workspace-1",
+      runId: "run-1",
+      authorizationEpoch: 7,
+      toolName: "lookup",
+      toolVersion: "2026-07-12",
+      callId: "call-boundary",
+      arguments: toolArguments,
+    },
+  ]);
+  const executedArguments = executionCalls[0]?.arguments;
+  assert.equal(Object.isFrozen(executionCalls[0]), true);
+  assert.equal(Object.isFrozen(normalizationCalls[0]), true);
+  assert.equal(Object.isFrozen(normalizationCalls[0]?.arguments), true);
+  assert.equal(Object.isFrozen(executedArguments), true);
+  assert.equal(
+    typeof executedArguments === "object" &&
+      executedArguments !== null &&
+      !Array.isArray(executedArguments)
+      ? Object.isFrozen(executedArguments.nested)
+      : false,
+    true,
+  );
+  assert.deepEqual(executedArguments, normalizedArguments);
+  assert.deepEqual(reconciliationCalls, []);
+  assert.throws(
+    () => tool.normalizeArguments(toolArguments),
+    /tool_normalization_context_required/,
+  );
+  await assert.rejects(
+    tool.execute(toolArguments, idempotencyKey, new AbortController().signal),
+    /tool_execution_context_required/,
+  );
+});
+
+test("authorization denial prevents even reviewed boundary normalization", async () => {
+  const repository = new InMemoryAgentRunRepository();
+  repository.add(baseRun());
+  const authorization = new InMemoryAuthorizationGate();
+  authorization.setAllowed(false);
+  let normalizations = 0;
+  let executions = 0;
+  const boundary = createReviewedAgentToolExecutionBoundary({
+    adapterKind: "durable",
+    adapterName: "authorization-first-tool-boundary",
+    assertProductionReady: () => true,
+    ready: async () => true,
+    async normalize(input) {
+      normalizations += 1;
+      return input.arguments;
+    },
+    async execute() {
+      executions += 1;
+      return { type: "succeeded" };
+    },
+    async reconcile() {
+      return { type: "not_found" };
+    },
+  });
+  const tools = new AgentToolRegistry(boundary).register(
+    createBoundaryEnforcedAgentTool(boundary, {
+      adapterKind: "durable",
+      adapterName: "authorization-first-tool",
+      name: "authorization-first",
+      version: "1",
+      effectClass: "read",
+      approvalPolicy: "never",
+      retryWhenReconciledNotFound: false,
+    }),
+  );
+  const provider = new ScriptedAgentProvider([
+    {
+      type: "tool_call",
+      callId: "call-denied-normalization",
+      toolName: "authorization-first",
+      toolVersion: "1",
+      arguments: { mutation: "must-not-run" },
+      effectClass: "read",
+      usage: { outputTokens: 1, costMicros: 1 },
+    },
+  ]);
+  await customLoop({ repository, provider, tools, authorization }).execute("run-1", 3);
+  assert.equal(normalizations, 0);
+  assert.equal(executions, 0);
+  assert.equal((await repository.control("run-1")).state, "revoked");
 });
 
 test("an exact one-time approval authorizes only the bound tool arguments", async () => {

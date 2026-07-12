@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import type { AuthorizationGate } from "./adapters.js";
+import {
+  type AgentToolExecutionBoundary,
+  type AgentToolExecutionContext,
+  type AgentToolNormalizationContext,
+  isBoundaryEnforcedAgentTool,
+} from "./agent-tool-boundary.js";
 import type {
   Clock,
   EffectClaim,
@@ -8,7 +14,7 @@ import type {
   OutboxJob,
   ReconciliationResult,
 } from "./domain.js";
-import { ProviderTimeoutError, errorCode } from "./domain.js";
+import { errorCode, ProviderTimeoutError } from "./domain.js";
 import type { EffectLedger, JobHandler, RuntimeAdapter } from "./outbox.js";
 import { markReviewedHandler } from "./reviewed-handlers.js";
 import type { OpenTelemetry, StructuredLogger } from "./telemetry.js";
@@ -262,6 +268,8 @@ export class AgentToolRegistry {
   readonly #tools = new Map<string, AgentTool>();
   #sealed = false;
 
+  constructor(private readonly boundary?: AgentToolExecutionBoundary) {}
+
   register(tool: AgentTool): this {
     if (this.#sealed) throw new Error("tool_registry_sealed");
     if (tool.effectClass !== "read" && tool.approvalPolicy !== "required") {
@@ -269,23 +277,26 @@ export class AgentToolRegistry {
     }
     const key = `${tool.name}@${tool.version}`;
     if (this.#tools.has(key)) throw new Error("duplicate_tool_registration");
-    const snapshot: AgentTool = Object.freeze({
-      adapterKind: tool.adapterKind,
-      adapterName: tool.adapterName,
-      ...(typeof tool.assertProductionReady === "function"
-        ? { assertProductionReady: tool.assertProductionReady.bind(tool) }
-        : {}),
-      ...(typeof tool.ready === "function" ? { ready: tool.ready.bind(tool) } : {}),
-      ...(typeof tool.close === "function" ? { close: tool.close.bind(tool) } : {}),
-      name: tool.name,
-      version: tool.version,
-      effectClass: tool.effectClass,
-      approvalPolicy: tool.approvalPolicy,
-      retryWhenReconciledNotFound: tool.retryWhenReconciledNotFound,
-      normalizeArguments: tool.normalizeArguments.bind(tool),
-      execute: tool.execute.bind(tool),
-      reconcile: tool.reconcile.bind(tool),
-    });
+    const snapshot: AgentTool =
+      this.boundary && isBoundaryEnforcedAgentTool(tool, this.boundary)
+        ? tool
+        : Object.freeze({
+            adapterKind: tool.adapterKind,
+            adapterName: tool.adapterName,
+            ...(typeof tool.assertProductionReady === "function"
+              ? { assertProductionReady: tool.assertProductionReady.bind(tool) }
+              : {}),
+            ...(typeof tool.ready === "function" ? { ready: tool.ready.bind(tool) } : {}),
+            ...(typeof tool.close === "function" ? { close: tool.close.bind(tool) } : {}),
+            name: tool.name,
+            version: tool.version,
+            effectClass: tool.effectClass,
+            approvalPolicy: tool.approvalPolicy,
+            retryWhenReconciledNotFound: tool.retryWhenReconciledNotFound,
+            normalizeArguments: tool.normalizeArguments.bind(tool),
+            execute: tool.execute.bind(tool),
+            reconcile: tool.reconcile.bind(tool),
+          });
     this.#tools.set(key, snapshot);
     return this;
   }
@@ -309,6 +320,10 @@ export class AgentToolRegistry {
 
   entries(): readonly AgentTool[] {
     return Object.freeze([...this.#tools.values()]);
+  }
+
+  executionBoundary(): AgentToolExecutionBoundary | undefined {
+    return this.boundary;
   }
 }
 
@@ -362,6 +377,24 @@ const canonicalUnchecked = (value: JsonValue): string => {
 const canonical = (value: JsonValue): string => {
   assertJsonValue(value);
   return canonicalUnchecked(value);
+};
+
+const deepFreezeJson = (value: JsonValue): JsonValue => {
+  if (value !== null && typeof value === "object") {
+    if (Array.isArray(value)) {
+      for (const item of value) deepFreezeJson(item);
+    } else {
+      for (const item of Object.values(value)) deepFreezeJson(item);
+    }
+    Object.freeze(value);
+  }
+  return value;
+};
+
+const immutableCanonicalClone = (value: JsonValue): JsonValue => {
+  const decoded: unknown = JSON.parse(canonical(value));
+  assertJsonValue(decoded);
+  return deepFreezeJson(decoded);
 };
 
 export const argumentsHash = (value: JsonValue): string => {
@@ -457,6 +490,11 @@ export interface AgentRunLoopOptions {
 }
 
 export class AgentRunLoop {
+  private readonly toolExecutionBoundary: AgentToolExecutionBoundary | undefined;
+  private readonly boundaryNormalize: AgentToolExecutionBoundary["normalize"] | undefined;
+  private readonly boundaryExecute: AgentToolExecutionBoundary["execute"] | undefined;
+  private readonly boundaryReconcile: AgentToolExecutionBoundary["reconcile"] | undefined;
+
   constructor(
     private readonly options: AgentRunLoopOptions,
     private readonly clock: Clock,
@@ -469,7 +507,12 @@ export class AgentRunLoop {
     private readonly effects: EffectLedger,
     private readonly logger: StructuredLogger,
     private readonly telemetry: OpenTelemetry,
-  ) {}
+  ) {
+    this.toolExecutionBoundary = tools.executionBoundary();
+    this.boundaryNormalize = this.toolExecutionBoundary?.normalize.bind(this.toolExecutionBoundary);
+    this.boundaryExecute = this.toolExecutionBoundary?.execute.bind(this.toolExecutionBoundary);
+    this.boundaryReconcile = this.toolExecutionBoundary?.reconcile.bind(this.toolExecutionBoundary);
+  }
 
   repositoryAdapter(): AgentRunRepository {
     return this.repository;
@@ -491,6 +534,7 @@ export class AgentRunLoop {
       this.approvals,
       this.authorization,
       this.effects,
+      ...(this.toolExecutionBoundary ? [this.toolExecutionBoundary] : []),
       ...this.tools.entries(),
     ]);
   }
@@ -786,8 +830,41 @@ export class AgentRunLoop {
       throw new AgentError("tool_policy_mismatch");
     }
     assertJsonValue(step.arguments);
-    const normalizedArguments = tool.normalizeArguments(structuredClone(step.arguments));
-    assertJsonValue(normalizedArguments);
+    await this.assertCurrent(initial, leaseGeneration);
+    const normalizationAllowed = await this.authorization.canPerform({
+      workspaceId: initial.workspaceId,
+      operation: `agent.tool.${tool.name}`,
+      resourceId: initial.runId,
+      authorizationEpoch: initial.authorizationEpoch,
+    });
+    if (!normalizationAllowed) throw new RunRevokedError();
+    const normalizationContext: AgentToolNormalizationContext = Object.freeze({
+      workspaceId: initial.workspaceId,
+      runId: initial.runId,
+      authorizationEpoch: initial.authorizationEpoch,
+      toolName: tool.name,
+      toolVersion: tool.version,
+      callId: step.callId,
+    });
+    const rawArguments = immutableCanonicalClone(step.arguments);
+    const normalizationInput = Object.freeze({
+      ...normalizationContext,
+      arguments: rawArguments,
+    });
+    const normalizedCandidate = this.boundaryNormalize
+      ? await this.runAbortable(
+          initial,
+          leaseGeneration,
+          this.options.toolTimeoutMs ?? this.options.providerTimeoutMs,
+          (signal) =>
+            this.boundaryNormalize?.(normalizationInput, signal) ??
+            Promise.reject(new AgentError("tool_execution_boundary_required")),
+        )
+      : tool.adapterKind === "test-only"
+        ? tool.normalizeArguments(structuredClone(rawArguments))
+        : await Promise.reject(new AgentError("tool_execution_boundary_required"));
+    assertJsonValue(normalizedCandidate);
+    const normalizedArguments = immutableCanonicalClone(normalizedCandidate);
     if (Buffer.byteLength(canonical(normalizedArguments), "utf8") > 256 * 1024) {
       throw new AgentError("tool_arguments_too_large");
     }
@@ -795,6 +872,25 @@ export class AgentRunLoop {
     const identity = `${initial.runId}:${step.callId}:${tool.name}@${tool.version}:${tool.effectClass}:${hash}`;
     const identityFingerprint = createHash("sha256").update(identity).digest("hex");
     const effectKey = `agent-tool:${identityFingerprint}`;
+    const executionContext: AgentToolExecutionContext = Object.freeze({
+      workspaceId: initial.workspaceId,
+      runId: initial.runId,
+      authorizationEpoch: initial.authorizationEpoch,
+      toolName: tool.name,
+      toolVersion: tool.version,
+      idempotencyKey: effectKey,
+    });
+    if (
+      !executionContext.workspaceId ||
+      !executionContext.runId ||
+      !Number.isSafeInteger(executionContext.authorizationEpoch) ||
+      executionContext.authorizationEpoch < 0 ||
+      !executionContext.toolName ||
+      !executionContext.toolVersion ||
+      !executionContext.idempotencyKey
+    ) {
+      throw new AgentError("tool_execution_context_invalid");
+    }
     const existing = await this.effects.get(effectKey);
     if (existing?.state === "succeeded") return existing.result ?? null;
     if (existing?.state === "failed_permanent") throw new AgentError("tool_failed_permanent");
@@ -863,7 +959,12 @@ export class AgentRunLoop {
           initial,
           leaseGeneration,
           this.options.toolTimeoutMs ?? this.options.providerTimeoutMs,
-          (signal) => tool.reconcile(effectKey, signal),
+          (signal) =>
+            this.boundaryReconcile
+              ? this.boundaryReconcile(executionContext, signal)
+              : tool.adapterKind === "test-only"
+                ? tool.reconcile(effectKey, signal)
+                : Promise.reject(new AgentError("tool_execution_boundary_required")),
           claim,
         );
       } catch (error) {
@@ -900,7 +1001,15 @@ export class AgentRunLoop {
         initial,
         leaseGeneration,
         this.options.toolTimeoutMs ?? this.options.providerTimeoutMs,
-        (signal) => tool.execute(normalizedArguments, effectKey, signal),
+        (signal) =>
+          this.boundaryExecute
+            ? this.boundaryExecute(
+                Object.freeze({ ...executionContext, arguments: normalizedArguments }),
+                signal,
+              )
+            : tool.adapterKind === "test-only"
+              ? tool.execute(normalizedArguments, effectKey, signal)
+              : Promise.reject(new AgentError("tool_execution_boundary_required")),
         claim,
       );
     } catch (error) {

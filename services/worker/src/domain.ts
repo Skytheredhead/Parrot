@@ -34,7 +34,9 @@ export type JobKind =
   | "file.scan"
   | "file.extract"
   | "file.cleanup"
-  | "agent.run";
+  | "agent.run"
+  | "workspace.export.generate"
+  | "workspace.export.cleanup";
 
 export type JobState = "pending" | "leased" | "outcome_unknown" | "succeeded" | "dead_letter";
 
@@ -100,6 +102,26 @@ export type ReconciliationResult =
   | { readonly type: "succeeded"; readonly providerReference?: string; readonly result?: JsonValue }
   | { readonly type: "not_found" }
   | { readonly type: "unknown" };
+
+export type WorkspaceExportCompletion =
+  | {
+      readonly type: "succeeded";
+      readonly exportId: string;
+      readonly exportRevision: number;
+      readonly artifactKey: string;
+      readonly contentHash: string;
+      readonly artifactVersion: string;
+      readonly sizeBytes: number;
+    }
+  | { readonly type: "retry"; readonly code: string; readonly retryAfterMs: number }
+  | { readonly type: "outcome_unknown"; readonly code: string; readonly retryAfterMs: number }
+  | { readonly type: "failed"; readonly code: string };
+
+export type WorkspaceExportCleanupCompletion =
+  | { readonly type: "deleted" | "not_found"; readonly exportId: string }
+  | { readonly type: "retry"; readonly code: string; readonly retryAfterMs: number }
+  | { readonly type: "outcome_unknown"; readonly code: string; readonly retryAfterMs: number }
+  | { readonly type: "failed"; readonly code: string };
 
 export class StaleLeaseError extends Error {
   constructor(jobId: string) {

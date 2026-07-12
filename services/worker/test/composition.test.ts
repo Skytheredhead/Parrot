@@ -2,8 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AgentRunLoop,
+  type AgentTool,
   AgentToolRegistry,
   CompositionValidationError,
+  composeWorkerRuntime,
+  createAgentRunJobHandler,
+  createBoundaryEnforcedAgentTool,
+  createFileProcessingHandler,
+  createNotificationDeliveryHandler,
+  createReviewedAgentToolExecutionBoundary,
+  createSearchIndexHandler,
+  createWorkspaceExportCleanupHandler,
+  createWorkspaceExportHandler,
   FakeClock,
   HandlerRegistry,
   InMemoryAgentRunRepository,
@@ -16,18 +26,12 @@ import {
   InMemorySearchBackend,
   InMemorySpanExporter,
   InMemoryTransactionalOutbox,
+  type JobKind,
   OpenTelemetry,
+  type RuntimeAdapter,
   ScriptedAgentProvider,
   StaticAgentContextSource,
   StructuredLogger,
-  composeWorkerRuntime,
-  createAgentRunJobHandler,
-  createFileProcessingHandler,
-  createNotificationDeliveryHandler,
-  createSearchIndexHandler,
-  type AgentTool,
-  type JobKind,
-  type RuntimeAdapter,
   type WorkerProductionPorts,
 } from "../src/index.js";
 
@@ -40,6 +44,8 @@ const jobKinds: readonly JobKind[] = [
   "file.extract",
   "file.cleanup",
   "agent.run",
+  "workspace.export.generate",
+  "workspace.export.cleanup",
 ];
 
 const testGraph = (): WorkerProductionPorts => {
@@ -77,7 +83,20 @@ const testGraph = (): WorkerProductionPorts => {
       },
     });
   }
-  const tools = new AgentToolRegistry().register({
+  const agentToolExecutionBoundary: WorkerProductionPorts["agentToolExecutionBoundary"] = {
+    adapterKind: "test-only",
+    adapterName: "test-tool-boundary",
+    async normalize(input) {
+      return input.arguments;
+    },
+    async execute() {
+      return { type: "succeeded" };
+    },
+    async reconcile() {
+      return { type: "not_found" };
+    },
+  };
+  const tools = new AgentToolRegistry(agentToolExecutionBoundary).register({
     adapterKind: "test-only",
     adapterName: "test-tool",
     name: "test",
@@ -113,8 +132,57 @@ const testGraph = (): WorkerProductionPorts => {
     authorization: new InMemoryAuthorizationGate(),
     contextSource: new StaticAgentContextSource([]),
     notificationAuthority: new InMemoryNotificationDeliveryAuthority(),
+    digestAuthority: {
+      adapterKind: "test-only",
+      adapterName: "test-digest-authority",
+      async claimDue() {
+        return [];
+      },
+      async resolvePlan() {
+        throw new Error("no digest claim");
+      },
+      async dispatchCurrentPlan() {
+        return { current: false };
+      },
+      async recordOutcome() {
+        return false;
+      },
+    },
     notificationProvider: new InMemoryNotificationProvider(),
     agentProvider: new ScriptedAgentProvider([]),
+    agentToolExecutionBoundary,
+    workspaceExportAuthority: {
+      adapterKind: "test-only",
+      adapterName: "test-workspace-export-authority",
+      async resolvePlan() {
+        return undefined;
+      },
+      async dispatchCurrentPlan() {
+        return { current: false };
+      },
+      async resolveCleanupPlan() {
+        return undefined;
+      },
+      async dispatchCurrentCleanupPlan() {
+        return { current: false };
+      },
+    },
+    workspaceExportMaterializer: {
+      adapterKind: "test-only",
+      adapterName: "test-workspace-export-materializer",
+      async materialize() {
+        return { type: "permanent_failure", code: "provider_rejected" };
+      },
+      async reconcile() {
+        return { type: "not_found" };
+      },
+      async deleteExact() {
+        return { type: "not_found" };
+      },
+      async reconcileDelete() {
+        return { type: "not_found" };
+      },
+    },
     logSink,
     logger: new StructuredLogger("test", "debug", logSink),
     spanExporter,
@@ -141,10 +209,28 @@ test("production composition rejects every in-memory authority", () => {
   assert.doesNotThrow(() => composeWorkerRuntime("test", ports));
 });
 
-test("production composition validates methods, the complete handler graph, and tools", () => {
+test("production composition validates methods, the complete handler graph, and tools", async () => {
   const base = testGraph();
   const logSink = durableAdapter("logs", ["write"]) as WorkerProductionPorts["logSink"];
   const spanExporter = durableAdapter("spans", ["export"]) as WorkerProductionPorts["spanExporter"];
+  const toolBoundaryDefinition = {
+    adapterKind: "durable" as const,
+    adapterName: "agent-tool-boundary",
+    assertProductionReady: () => true,
+    ready: async () => true,
+    async normalize(
+      input: Parameters<WorkerProductionPorts["agentToolExecutionBoundary"]["normalize"]>[0],
+    ) {
+      return input.arguments;
+    },
+    async execute() {
+      return { type: "succeeded" as const };
+    },
+    async reconcile() {
+      return { type: "not_found" as const };
+    },
+  };
+  const toolBoundary = createReviewedAgentToolExecutionBoundary(toolBoundaryDefinition);
   const ports = {
     outbox: durableAdapter("outbox", [
       "enqueue",
@@ -152,6 +238,8 @@ test("production composition validates methods, the complete handler graph, and 
       "claim",
       "heartbeat",
       "complete",
+      "completeWorkspaceExport",
+      "completeWorkspaceExportCleanup",
       "retry",
       "outcomeUnknown",
       "deadLetter",
@@ -220,33 +308,43 @@ test("production composition validates methods, the complete handler graph, and 
       "resolvePlan",
       "dispatchCurrentPlan",
     ]),
+    digestAuthority: durableAdapter("digest-authority", [
+      "claimDue",
+      "resolvePlan",
+      "dispatchCurrentPlan",
+      "recordOutcome",
+    ]),
     notificationProvider: durableAdapter("notifications", ["send", "reconcile"]),
     agentProvider: durableAdapter("agent-provider", ["next", "reconcile"]),
+    agentToolExecutionBoundary: toolBoundary,
+    workspaceExportAuthority: durableAdapter("workspace-export-authority", [
+      "resolvePlan",
+      "dispatchCurrentPlan",
+      "resolveCleanupPlan",
+      "dispatchCurrentCleanupPlan",
+    ]),
+    workspaceExportMaterializer: durableAdapter("workspace-export-materializer", [
+      "materialize",
+      "reconcile",
+      "deleteExact",
+      "reconcileDelete",
+    ]),
     logSink,
     logger: new StructuredLogger("production", "info", logSink),
     spanExporter,
     telemetry: new OpenTelemetry(new FakeClock(0), spanExporter),
     handlers: new HandlerRegistry(),
-    tools: new AgentToolRegistry(),
+    tools: new AgentToolRegistry(toolBoundary),
   } as unknown as WorkerProductionPorts;
-  const durableTool: AgentTool = {
+  const durableTool = createBoundaryEnforcedAgentTool(toolBoundary, {
     adapterKind: "durable",
     adapterName: "durable-tool",
-    assertProductionReady: () => true,
-    ready: async () => true,
     name: "durable-tool",
     version: "1",
     effectClass: "read",
     approvalPolicy: "never",
     retryWhenReconciledNotFound: false,
-    normalizeArguments: (value) => value,
-    async execute() {
-      return { type: "succeeded" };
-    },
-    async reconcile() {
-      return { type: "not_found" };
-    },
-  };
+  });
   ports.tools.register(durableTool);
   const notificationHandler = createNotificationDeliveryHandler(
     ports.authorization,
@@ -274,6 +372,14 @@ test("production composition validates methods, the complete handler graph, and 
     ports.telemetry,
   );
   const agentHandler = createAgentRunJobHandler(agentLoop, ports.agentRuns);
+  const workspaceExportHandler = createWorkspaceExportHandler(
+    ports.workspaceExportAuthority,
+    ports.workspaceExportMaterializer,
+  );
+  const workspaceExportCleanupHandler = createWorkspaceExportCleanupHandler(
+    ports.workspaceExportAuthority,
+    ports.workspaceExportMaterializer,
+  );
   ports.handlers.register("notification.deliver", notificationHandler);
   for (const kind of ["search.upsert", "search.tombstone", "search.rebuild"] as const) {
     ports.handlers.register(kind, searchHandler);
@@ -282,6 +388,8 @@ test("production composition validates methods, the complete handler graph, and 
     ports.handlers.register(kind, fileHandler);
   }
   ports.handlers.register("agent.run", agentHandler);
+  ports.handlers.register("workspace.export.generate", workspaceExportHandler);
+  ports.handlers.register("workspace.export.cleanup", workspaceExportCleanupHandler);
   const runtime = composeWorkerRuntime("production", ports);
   assert.equal(runtime.outbox.adapterKind, "durable");
   assert.equal(runtime.tools.isSealed(), true);
@@ -319,12 +427,122 @@ test("production composition validates methods, the complete handler graph, and 
     () => Object.assign(sealedTool, { execute: async () => ({ type: "succeeded" }) }),
     TypeError,
   );
-  Object.assign(durableTool, {
-    adapterKind: "test-only",
-    execute: async () => ({ type: "permanent_failure", code: "mutated" }),
-  });
+  assert.throws(
+    () =>
+      Object.assign(durableTool, {
+        adapterKind: "test-only",
+        execute: async () => ({ type: "permanent_failure", code: "mutated" }),
+      }),
+    TypeError,
+  );
   assert.equal(sealedTool.adapterKind, "durable");
   assert.equal(sealedTool.execute, sealedExecute);
+  const capturedBoundaryExecute = toolBoundary.execute;
+  assert.throws(
+    () => Object.assign(toolBoundary, { execute: async () => ({ type: "permanent_failure" }) }),
+    TypeError,
+  );
+  Object.assign(toolBoundaryDefinition, {
+    execute: async () => ({ type: "permanent_failure" as const }),
+  });
+  assert.equal(toolBoundary.execute, capturedBoundaryExecute);
+  assert.deepEqual(
+    await toolBoundary.execute(
+      {
+        workspaceId: "workspace-1",
+        runId: "run-1",
+        authorizationEpoch: 1,
+        toolName: "durable-tool",
+        toolVersion: "1",
+        idempotencyKey: "effect-1",
+        arguments: null,
+      },
+      new AbortController().signal,
+    ),
+    { type: "succeeded" },
+  );
+  let unreviewedConformanceCalls = 0;
+  const unreviewedBoundary: WorkerProductionPorts["agentToolExecutionBoundary"] = {
+    adapterKind: "durable",
+    adapterName: "unreviewed-tool-boundary",
+    assertProductionReady: () => {
+      unreviewedConformanceCalls += 1;
+      return true;
+    },
+    ready: async () => true,
+    async normalize(input) {
+      return input.arguments;
+    },
+    async execute() {
+      return { type: "succeeded" };
+    },
+    async reconcile() {
+      return { type: "not_found" };
+    },
+  };
+  assert.throws(
+    () =>
+      composeWorkerRuntime("production", {
+        ...ports,
+        agentToolExecutionBoundary: unreviewedBoundary,
+      }),
+    /tools:execution_boundary_unreviewed/,
+  );
+  assert.equal(unreviewedConformanceCalls, 0);
+
+  let rawNormalizationCalls = 0;
+  const rawDurableTool: AgentTool = {
+    adapterKind: "durable",
+    adapterName: "raw-durable-tool",
+    assertProductionReady: () => true,
+    ready: async () => true,
+    name: "raw-durable-tool",
+    version: "1",
+    effectClass: "read",
+    approvalPolicy: "never",
+    retryWhenReconciledNotFound: false,
+    normalizeArguments: (value) => {
+      rawNormalizationCalls += 1;
+      return value;
+    },
+    async execute() {
+      return { type: "succeeded" };
+    },
+    async reconcile() {
+      return { type: "not_found" };
+    },
+  };
+  assert.throws(
+    () =>
+      composeWorkerRuntime("production", {
+        ...ports,
+        tools: new AgentToolRegistry(toolBoundary).register(rawDurableTool),
+      }),
+    /tools:unreviewed_execution_boundary:raw-durable-tool@1/,
+  );
+  assert.equal(rawNormalizationCalls, 0);
+
+  const swappedBoundary = createReviewedAgentToolExecutionBoundary({
+    ...toolBoundaryDefinition,
+    adapterName: "swapped-agent-tool-boundary",
+  });
+  const swappedTool = createBoundaryEnforcedAgentTool(swappedBoundary, {
+    adapterKind: "durable",
+    adapterName: "swapped-boundary-tool",
+    name: "swapped-boundary-tool",
+    version: "1",
+    effectClass: "read",
+    approvalPolicy: "never",
+    retryWhenReconciledNotFound: false,
+  });
+  assert.throws(
+    () =>
+      composeWorkerRuntime("production", {
+        ...ports,
+        tools: new AgentToolRegistry(swappedBoundary).register(swappedTool),
+      }),
+    /tools:boundary_not_bound_to_graph/,
+  );
 
   assert.throws(
     () =>
@@ -391,6 +609,26 @@ test("production composition validates methods, the complete handler graph, and 
     () => composeWorkerRuntime("production", noFinalNotificationFence),
     /authorization:missing_method:dispatchAuthorizedOperation/,
   );
+  const noDigestOutcomeFence = {
+    ...ports,
+    digestAuthority: durableAdapter("broken-digest-authority", [
+      "claimDue",
+      "resolvePlan",
+      "dispatchCurrentPlan",
+    ]),
+  } as WorkerProductionPorts;
+  assert.throws(
+    () => composeWorkerRuntime("production", noDigestOutcomeFence),
+    /digestAuthority:missing_method:recordOutcome/,
+  );
+  const noExportAuthorityFence = {
+    ...ports,
+    workspaceExportAuthority: durableAdapter("broken-workspace-export-authority", ["resolvePlan"]),
+  } as WorkerProductionPorts;
+  assert.throws(
+    () => composeWorkerRuntime("production", noExportAuthorityFence),
+    /workspaceExportAuthority:missing_method:dispatchCurrentPlan/,
+  );
   const { recoverOwned: _recoverOwned, ...outboxWithoutRecovery } = ports.outbox;
   const noOwnedLeaseRecovery = {
     ...ports,
@@ -399,6 +637,16 @@ test("production composition validates methods, the complete handler graph, and 
   assert.throws(
     () => composeWorkerRuntime("production", noOwnedLeaseRecovery),
     /outbox:missing_method:recoverOwned/,
+  );
+  const { completeWorkspaceExport: _completeWorkspaceExport, ...outboxWithoutExportCompletion } =
+    ports.outbox;
+  const noDedicatedExportCompletion = {
+    ...ports,
+    outbox: outboxWithoutExportCompletion,
+  } as WorkerProductionPorts;
+  assert.throws(
+    () => composeWorkerRuntime("production", noDedicatedExportCompletion),
+    /outbox:missing_method:completeWorkspaceExport/,
   );
   const nonconformant = {
     ...ports,

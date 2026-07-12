@@ -39,6 +39,7 @@ import AcquireAgentToolEffectReducer from "./acquire_agent_tool_effect_reducer";
 import AddContributionReducer from "./add_contribution_reducer";
 import AppendAgentRunEventReducer from "./append_agent_run_event_reducer";
 import AuthorizeNotificationDeliveryReducer from "./authorize_notification_delivery_reducer";
+import AuthorizeNotificationDigestReducer from "./authorize_notification_digest_reducer";
 import BootstrapOwnerReducer from "./bootstrap_owner_reducer";
 import CancelAgentRunReducer from "./cancel_agent_run_reducer";
 import CancelDmPromotionReducer from "./cancel_dm_promotion_reducer";
@@ -46,10 +47,13 @@ import CancelPlatformOperatorTransferReducer from "./cancel_platform_operator_tr
 import CancelWorkspaceDeletionReducer from "./cancel_workspace_deletion_reducer";
 import CastPollVoteReducer from "./cast_poll_vote_reducer";
 import ClaimAgentRunReducer from "./claim_agent_run_reducer";
+import ClaimNotificationDigestsReducer from "./claim_notification_digests_reducer";
 import ClaimOutboxJobReducer from "./claim_outbox_job_reducer";
 import CompleteAgentRunReducer from "./complete_agent_run_reducer";
 import CompleteFileUploadReducer from "./complete_file_upload_reducer";
 import CompleteOutboxJobReducer from "./complete_outbox_job_reducer";
+import CompleteWorkspaceExportReducer from "./complete_workspace_export_reducer";
+import CompleteWorkspaceExportCleanupReducer from "./complete_workspace_export_cleanup_reducer";
 import ConfigurePollReducer from "./configure_poll_reducer";
 import ConfigureWorkspaceLifecycleReducer from "./configure_workspace_lifecycle_reducer";
 import CreateDirectConversationReducer from "./create_direct_conversation_reducer";
@@ -83,6 +87,7 @@ import LeaveDirectConversationReducer from "./leave_direct_conversation_reducer"
 import MarkDirectReadReducer from "./mark_direct_read_reducer";
 import MarkNotificationReadReducer from "./mark_notification_read_reducer";
 import MigratePlatformAuthorityReducer from "./migrate_platform_authority_reducer";
+import PlaceWorkspaceLegalHoldReducer from "./place_workspace_legal_hold_reducer";
 import ProposeDmPromotionReducer from "./propose_dm_promotion_reducer";
 import ProposePlatformOperatorTransferReducer from "./propose_platform_operator_transfer_reducer";
 import ReconcileAgentToolEffectReducer from "./reconcile_agent_tool_effect_reducer";
@@ -91,14 +96,17 @@ import RecordAgentContextPostReducer from "./record_agent_context_post_reducer";
 import RecordDecisionReducer from "./record_decision_reducer";
 import RecordFileExtractionReducer from "./record_file_extraction_reducer";
 import RecordFileScanOutcomeReducer from "./record_file_scan_outcome_reducer";
+import RecordNotificationDigestOutcomeReducer from "./record_notification_digest_outcome_reducer";
 import RecordToolOutcomeReducer from "./record_tool_outcome_reducer";
 import RecoverOutboxJobReducer from "./recover_outbox_job_reducer";
 import RegisterServicePrincipalReducer from "./register_service_principal_reducer";
 import RegisterTrustedToolReducer from "./register_trusted_tool_reducer";
 import RegisterUserReducer from "./register_user_reducer";
+import ReleaseWorkspaceLegalHoldReducer from "./release_workspace_legal_hold_reducer";
 import RequestAgentToolCallReducer from "./request_agent_tool_call_reducer";
 import RequestSearchRebuildReducer from "./request_search_rebuild_reducer";
 import RequestWorkspaceDeletionReducer from "./request_workspace_deletion_reducer";
+import RequestWorkspaceExportReducer from "./request_workspace_export_reducer";
 import RevokeAgentReducer from "./revoke_agent_reducer";
 import SendDirectMessageReducer from "./send_direct_message_reducer";
 import SetAgentScopeReducer from "./set_agent_scope_reducer";
@@ -131,12 +139,18 @@ import MyFileUploadsRow from "./my_file_uploads_table";
 import MyNotificationPreferencesRow from "./my_notification_preferences_table";
 import MyNotificationsRow from "./my_notifications_table";
 import MyPostStatesRow from "./my_post_states_table";
+import MyWorkspaceExportsRow from "./my_workspace_exports_table";
+import MyWorkspaceLegalHoldsRow from "./my_workspace_legal_holds_table";
 import MyWorkspaceLifecyclesRow from "./my_workspace_lifecycles_table";
 import MyWorkspaceMembershipsRow from "./my_workspace_memberships_table";
 import MyWorkspacesRow from "./my_workspaces_table";
 import PendingNotificationDeliveryPlansRow from "./pending_notification_delivery_plans_table";
+import PendingNotificationDigestPlansRow from "./pending_notification_digest_plans_table";
+import PendingNotificationDigestSchedulesRow from "./pending_notification_digest_schedules_table";
 import PendingOutboxWorkRow from "./pending_outbox_work_table";
 import PendingPostSearchDocumentsRow from "./pending_post_search_documents_table";
+import PendingWorkspaceExportCleanupPlansRow from "./pending_workspace_export_cleanup_plans_table";
+import PendingWorkspaceExportPlansRow from "./pending_workspace_export_plans_table";
 import VisibleAgentContextManifestsRow from "./visible_agent_context_manifests_table";
 import VisibleAgentInstallationsRow from "./visible_agent_installations_table";
 import VisibleAgentRunEventsRow from "./visible_agent_run_events_table";
@@ -245,6 +259,20 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, MyPostStatesRow),
+  my_workspace_exports: __table({
+    name: 'my_workspace_exports',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, MyWorkspaceExportsRow),
+  my_workspace_legal_holds: __table({
+    name: 'my_workspace_legal_holds',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, MyWorkspaceLegalHoldsRow),
   my_workspace_lifecycles: __table({
     name: 'my_workspace_lifecycles',
     indexes: [
@@ -273,6 +301,20 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, PendingNotificationDeliveryPlansRow),
+  pending_notification_digest_plans: __table({
+    name: 'pending_notification_digest_plans',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, PendingNotificationDigestPlansRow),
+  pending_notification_digest_schedules: __table({
+    name: 'pending_notification_digest_schedules',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, PendingNotificationDigestSchedulesRow),
   pending_outbox_work: __table({
     name: 'pending_outbox_work',
     indexes: [
@@ -287,6 +329,20 @@ const tablesSchema = __schema({
     constraints: [
     ],
   }, PendingPostSearchDocumentsRow),
+  pending_workspace_export_cleanup_plans: __table({
+    name: 'pending_workspace_export_cleanup_plans',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, PendingWorkspaceExportCleanupPlansRow),
+  pending_workspace_export_plans: __table({
+    name: 'pending_workspace_export_plans',
+    indexes: [
+    ],
+    constraints: [
+    ],
+  }, PendingWorkspaceExportPlansRow),
   visible_agent_context_manifests: __table({
     name: 'visible_agent_context_manifests',
     indexes: [
@@ -527,6 +583,7 @@ const reducersSchema = __reducers(
   __reducerSchema("add_contribution", AddContributionReducer),
   __reducerSchema("append_agent_run_event", AppendAgentRunEventReducer),
   __reducerSchema("authorize_notification_delivery", AuthorizeNotificationDeliveryReducer),
+  __reducerSchema("authorize_notification_digest", AuthorizeNotificationDigestReducer),
   __reducerSchema("bootstrap_owner", BootstrapOwnerReducer),
   __reducerSchema("cancel_agent_run", CancelAgentRunReducer),
   __reducerSchema("cancel_dm_promotion", CancelDmPromotionReducer),
@@ -534,10 +591,13 @@ const reducersSchema = __reducers(
   __reducerSchema("cancel_workspace_deletion", CancelWorkspaceDeletionReducer),
   __reducerSchema("cast_poll_vote", CastPollVoteReducer),
   __reducerSchema("claim_agent_run", ClaimAgentRunReducer),
+  __reducerSchema("claim_notification_digests", ClaimNotificationDigestsReducer),
   __reducerSchema("claim_outbox_job", ClaimOutboxJobReducer),
   __reducerSchema("complete_agent_run", CompleteAgentRunReducer),
   __reducerSchema("complete_file_upload", CompleteFileUploadReducer),
   __reducerSchema("complete_outbox_job", CompleteOutboxJobReducer),
+  __reducerSchema("complete_workspace_export", CompleteWorkspaceExportReducer),
+  __reducerSchema("complete_workspace_export_cleanup", CompleteWorkspaceExportCleanupReducer),
   __reducerSchema("configure_poll", ConfigurePollReducer),
   __reducerSchema("configure_workspace_lifecycle", ConfigureWorkspaceLifecycleReducer),
   __reducerSchema("create_direct_conversation", CreateDirectConversationReducer),
@@ -571,6 +631,7 @@ const reducersSchema = __reducers(
   __reducerSchema("mark_direct_read", MarkDirectReadReducer),
   __reducerSchema("mark_notification_read", MarkNotificationReadReducer),
   __reducerSchema("migrate_platform_authority", MigratePlatformAuthorityReducer),
+  __reducerSchema("place_workspace_legal_hold", PlaceWorkspaceLegalHoldReducer),
   __reducerSchema("propose_dm_promotion", ProposeDmPromotionReducer),
   __reducerSchema("propose_platform_operator_transfer", ProposePlatformOperatorTransferReducer),
   __reducerSchema("reconcile_agent_tool_effect", ReconcileAgentToolEffectReducer),
@@ -579,14 +640,17 @@ const reducersSchema = __reducers(
   __reducerSchema("record_decision", RecordDecisionReducer),
   __reducerSchema("record_file_extraction", RecordFileExtractionReducer),
   __reducerSchema("record_file_scan_outcome", RecordFileScanOutcomeReducer),
+  __reducerSchema("record_notification_digest_outcome", RecordNotificationDigestOutcomeReducer),
   __reducerSchema("record_tool_outcome", RecordToolOutcomeReducer),
   __reducerSchema("recover_outbox_job", RecoverOutboxJobReducer),
   __reducerSchema("register_service_principal", RegisterServicePrincipalReducer),
   __reducerSchema("register_trusted_tool", RegisterTrustedToolReducer),
   __reducerSchema("register_user", RegisterUserReducer),
+  __reducerSchema("release_workspace_legal_hold", ReleaseWorkspaceLegalHoldReducer),
   __reducerSchema("request_agent_tool_call", RequestAgentToolCallReducer),
   __reducerSchema("request_search_rebuild", RequestSearchRebuildReducer),
   __reducerSchema("request_workspace_deletion", RequestWorkspaceDeletionReducer),
+  __reducerSchema("request_workspace_export", RequestWorkspaceExportReducer),
   __reducerSchema("revoke_agent", RevokeAgentReducer),
   __reducerSchema("send_direct_message", SendDirectMessageReducer),
   __reducerSchema("set_agent_scope", SetAgentScopeReducer),

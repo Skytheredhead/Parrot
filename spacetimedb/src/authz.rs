@@ -357,7 +357,7 @@ pub(crate) fn require_service(
     kind: &str,
 ) -> Result<ServicePrincipal, String> {
     crate::reducers::require_oidc(ctx)?;
-    if !workspace_is_active(ctx, workspace_id) {
+    if kind != "workspace.export.cleanup" && !workspace_is_active(ctx, workspace_id) {
         return Err("service capability denied".into());
     }
     let service = ctx

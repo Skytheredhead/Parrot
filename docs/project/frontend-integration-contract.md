@@ -40,7 +40,7 @@ logs, URLs owned by the UI, error reports, or persisted client state.
 The generated package is the source of truth for the current list. The core surfaces include:
 
 - identity/workspace: `current_user`, `my_workspaces`, `my_workspace_memberships`,
-  `my_workspace_lifecycles`
+  `my_workspace_lifecycles`, `my_workspace_legal_holds`, `my_workspace_exports`
 - collaboration: `visible_spaces`, `visible_posts`, `visible_named_threads`,
   `visible_contributions`, `visible_reply_ancestry`, `visible_post_tags`,
   `visible_post_mentions`, `visible_post_reactions`, `visible_post_pins`,
@@ -56,9 +56,9 @@ The generated package is the source of truth for the current list. The core surf
   `visible_agent_runs`, `visible_agent_run_events`, `visible_agent_tool_calls`,
   `visible_approvals`, `visible_agent_context_manifests`
 
-Worker-only views such as pending outbox, notification-delivery-plan, search-document,
-file-processing, context-candidate, and agent-work queues require an enabled service grant and must
-never be subscribed to by the browser.
+Worker-only views such as pending outbox, notification/digest delivery plans, workspace-export
+generation/cleanup plans, search documents, file processing, context candidates, and agent-work
+queues require an enabled service grant and must never be subscribed to by the browser.
 Direct messages are intentionally absent from search. Workspace owners and administrators have no
 role-based bypass into a direct conversation; render only rows supplied by the caller-aware views.
 
@@ -72,8 +72,9 @@ matching receipt as the authoritative resolution after a reconnect.
 Presence uses `heartbeat_presence` as disposable advisory state. It never grants access, and the UI
 must compare the aggregate `expires_at` value with its own current time because bounded cleanup may
 lag. Notification settings use `set_notification_preference`; workspace defaults may be overridden
-per visible space. Local mute and digest minutes are stored with an IANA-style timezone identifier
-so a future scheduler can apply daylight-saving rules rather than persisting a stale UTC offset.
+per visible space. Local mute and digest minutes use an IANA-style timezone identifier. The durable
+digest authority applies a once-per-local-date cursor, while the worker performs daylight-saving
+conversion and reconciles ambiguous provider outcomes before any retry.
 
 Workspace owners configure explicit retention/grace inputs with `configure_workspace_lifecycle`.
 `request_workspace_deletion` immediately removes the workspace from human and service views and
@@ -84,6 +85,13 @@ access subject to fresh authorization. `finalize_workspace_deletion_fence` is ir
 grace window and only then drains durable work through bounded batches. It is an access fence, not
 proof that search, objects, backups, or providers have physically purged data; never label the
 workspace as fully erased until downstream reconciliation exists.
+
+Platform operators place and release legal holds; owners can see hold status but never private hold
+reasons. Owners request bounded exports with `request_workspace_export` and track status through
+`my_workspace_exports`. That view deliberately never exposes the artifact key, hash, or provider
+version. Expiry and irreversible deletion enqueue exact conditional cleanup and retain private
+metadata until deletion or not-found is confirmed. Do not implement a download button until the
+gateway exposes a short-lived owner-authorized retrieval capability.
 
 Optimistic UI is allowed only when it can roll back. Never optimistically elevate a role, reveal a
 private object, approve an agent tool, mark a quarantined file clean, or display a search result that
@@ -120,7 +128,7 @@ by the authoritative views.
 ## Current intentional gaps
 
 The contract is not a claim that a production environment exists. Provider selection, public
-domains, durable production adapters, downstream deletion/export reconciliation, production restore
-evidence, and the final threat-model assumptions remain approval-gated. The requirements matrix
-records feature-level readiness. The UI should not fabricate flows for rows marked `not started` or
-`blocked on decision`.
+domains, durable production adapters, export retrieval, provider-specific deletion conformance,
+production restore evidence, and the final threat-model assumptions remain approval-gated. The
+requirements matrix records feature-level readiness. The UI should not fabricate flows for rows
+marked `not started` or `blocked on decision`.

@@ -1,13 +1,14 @@
+export * from "./agent-tools/secure-egress.js";
 export { buildGateway } from "./app.js";
 export { OidcJwtVerifier } from "./auth/oidc.js";
-export { loadConfig } from "./config.js";
 export type { GatewayConfig } from "./config.js";
+export { loadConfig } from "./config.js";
 export * from "./contracts.js";
 export { GatewayError } from "./errors.js";
 export { FileCapabilityService } from "./files/service.js";
 export { InvitationService, normalizeInvitationEmail } from "./invitations/service.js";
-export { HmacInvitationTokenHasher } from "./invitations/token.js";
 export type { InvitationHashKey } from "./invitations/token.js";
+export { HmacInvitationTokenHasher } from "./invitations/token.js";
 export { HmacSearchCursorCodec } from "./search/cursor.js";
 export { PermissionSafeSearchService } from "./search/service.js";
 export { SessionAdministrationService } from "./sessions/service.js";

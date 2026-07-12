@@ -9,10 +9,12 @@ import type {
   LeaseToken,
   OutboxJob,
   ReconciliationResult,
+  WorkspaceExportCleanupCompletion,
+  WorkspaceExportCompletion,
 } from "./domain.js";
-import { StaleLeaseError, errorCode } from "./domain.js";
-import type { StructuredLogger, OpenTelemetry } from "./telemetry.js";
+import { errorCode, StaleLeaseError } from "./domain.js";
 import { isReviewedHandler } from "./reviewed-handlers.js";
+import type { OpenTelemetry, StructuredLogger } from "./telemetry.js";
 
 const MAX_EFFECT_PAYLOAD_BYTES = 256 * 1024;
 const MAX_EFFECT_PAYLOAD_DEPTH = 32;
@@ -27,6 +29,8 @@ const JOB_KINDS = new Set<OutboxJob["kind"]>([
   "file.extract",
   "file.cleanup",
   "agent.run",
+  "workspace.export.generate",
+  "workspace.export.cleanup",
 ]);
 
 const validateEffectPayload = (value: JsonValue): void => {
@@ -102,6 +106,10 @@ const semanticResource = (job: Pick<OutboxJob, "kind" | "payload">): string => {
       return `file:${payloadField(job.payload, "fileId")}:version:${payloadField(job.payload, "version")}`;
     case "agent.run":
       return `run:${payloadField(job.payload, "runId")}`;
+    case "workspace.export.generate":
+      return `export:${payloadField(job.payload, "exportId")}:lifecycle:${payloadField(job.payload, "lifecycleEpoch")}:workspace:${payloadField(job.payload, "workspaceRevision")}:revision:${payloadField(job.payload, "exportRevision")}`;
+    case "workspace.export.cleanup":
+      return `export:${payloadField(job.payload, "exportId")}:cleanup:${payloadField(job.payload, "exportRevision")}:artifact:${payloadField(job.payload, "artifactVersion")}`;
   }
 };
 
@@ -230,6 +238,16 @@ export interface OutboxStore extends RuntimeAdapter {
   ): Promise<{ readonly job: OutboxJob; readonly lease: LeaseToken } | undefined>;
   heartbeat(lease: LeaseToken, leaseExpiresAt: number): Promise<LeaseToken>;
   complete(lease: LeaseToken, result?: JsonValue): Promise<void>;
+  /**
+   * Routes every export outcome through the dedicated transactional authority reducer exactly
+   * once. Durable adapters must resolve the export id from the exact fenced job and convert the
+   * bounded millisecond delay to whole seconds without invoking a generic completion reducer.
+   */
+  completeWorkspaceExport(lease: LeaseToken, outcome: WorkspaceExportCompletion): Promise<void>;
+  completeWorkspaceExportCleanup(
+    lease: LeaseToken,
+    outcome: WorkspaceExportCleanupCompletion,
+  ): Promise<void>;
   retry(lease: LeaseToken, nextAttemptAt: number, code: string): Promise<void>;
   outcomeUnknown(lease: LeaseToken, nextAttemptAt: number, code: string): Promise<void>;
   deadLetter(lease: LeaseToken, reason: string): Promise<void>;
@@ -251,6 +269,8 @@ export class InMemoryTransactionalOutbox implements OutboxStore {
   readonly adapterName = "in-memory-outbox";
   private readonly jobs = new Map<string, OutboxJob>();
   readonly completions = new Map<string, JsonValue | undefined>();
+  readonly workspaceExportCompletions = new Map<string, WorkspaceExportCompletion>();
+  readonly workspaceExportCleanupCompletions = new Map<string, WorkspaceExportCleanupCompletion>();
 
   constructor(private readonly clock: Clock) {}
 
@@ -365,6 +385,60 @@ export class InMemoryTransactionalOutbox implements OutboxStore {
     const job = this.assertLease(lease);
     this.jobs.set(job.id, { ...withoutLease(job), state: "succeeded" });
     this.completions.set(job.id, result);
+  }
+
+  async completeWorkspaceExport(
+    lease: LeaseToken,
+    outcome: WorkspaceExportCompletion,
+  ): Promise<void> {
+    const job = this.assertLease(lease);
+    if (job.kind !== "workspace.export.generate") throw new Error("workspace_export_kind_invalid");
+    const state =
+      outcome.type === "succeeded"
+        ? "succeeded"
+        : outcome.type === "failed"
+          ? "dead_letter"
+          : outcome.type === "outcome_unknown"
+            ? "outcome_unknown"
+            : "pending";
+    this.jobs.set(job.id, {
+      ...withoutLease(job),
+      state,
+      ...(outcome.type === "retry" || outcome.type === "outcome_unknown"
+        ? { nextAttemptAt: this.clock.now() + outcome.retryAfterMs, lastErrorCode: outcome.code }
+        : {}),
+      ...(outcome.type === "failed"
+        ? { deadLetterReason: outcome.code, lastErrorCode: outcome.code }
+        : {}),
+    });
+    this.workspaceExportCompletions.set(job.id, structuredClone(outcome));
+  }
+
+  async completeWorkspaceExportCleanup(
+    lease: LeaseToken,
+    outcome: WorkspaceExportCleanupCompletion,
+  ): Promise<void> {
+    const job = this.assertLease(lease);
+    if (job.kind !== "workspace.export.cleanup") throw new Error("workspace_export_kind_invalid");
+    const state =
+      outcome.type === "deleted" || outcome.type === "not_found"
+        ? "succeeded"
+        : outcome.type === "failed"
+          ? "dead_letter"
+          : outcome.type === "outcome_unknown"
+            ? "outcome_unknown"
+            : "pending";
+    this.jobs.set(job.id, {
+      ...withoutLease(job),
+      state,
+      ...(outcome.type === "retry" || outcome.type === "outcome_unknown"
+        ? { nextAttemptAt: this.clock.now() + outcome.retryAfterMs, lastErrorCode: outcome.code }
+        : {}),
+      ...(outcome.type === "failed"
+        ? { deadLetterReason: outcome.code, lastErrorCode: outcome.code }
+        : {}),
+    });
+    this.workspaceExportCleanupCompletions.set(job.id, structuredClone(outcome));
   }
 
   async retry(lease: LeaseToken, nextAttemptAt: number, code: string): Promise<void> {
@@ -999,18 +1073,18 @@ export class OutboxConsumer {
 
   private async process(job: OutboxJob, controller: LeaseController): Promise<void> {
     if (!SAFE_IDENTIFIER.test(job.id) || !/^effect:[a-f0-9]{64}$/.test(job.effectKey)) {
-      await this.deadLetterOwned(controller, "effect_identity_invalid");
+      await this.deadLetterOwned(job, controller, "effect_identity_invalid");
       return;
     }
     let identity: DerivedEffectIdentity;
     try {
       identity = deriveEffectIdentity(job);
     } catch {
-      await this.deadLetterOwned(controller, "effect_identity_invalid");
+      await this.deadLetterOwned(job, controller, "effect_identity_invalid");
       return;
     }
     if (job.effectKey !== identity.effectKey) {
-      await this.deadLetterOwned(controller, "effect_identity_invalid");
+      await this.deadLetterOwned(job, controller, "effect_identity_invalid");
       return;
     }
 
@@ -1028,18 +1102,18 @@ export class OutboxConsumer {
       });
     } catch (error) {
       if (error instanceof EffectIdentityConflictError) {
-        await this.deadLetterOwned(controller, "effect_identity_conflict");
+        await this.deadLetterOwned(job, controller, "effect_identity_conflict");
         return;
       }
       throw error;
     }
     if (!acquisition.acquired) {
       if (acquisition.record.state === "succeeded") {
-        await this.completeOwned(controller, acquisition.record.result);
+        await this.completeOwned(job, controller, acquisition.record.result);
         return;
       }
       if (acquisition.record.state === "failed_permanent") {
-        await this.deadLetterOwned(controller, "effect_failed_permanent");
+        await this.deadLetterOwned(job, controller, "effect_failed_permanent");
         return;
       }
       await this.retryOwned(job, controller, "effect_in_progress");
@@ -1071,7 +1145,7 @@ export class OutboxConsumer {
           reconciliation.providerReference,
           reconciliation.result,
         );
-        await this.completeOwned(controller, reconciliation.result);
+        await this.completeOwned(job, controller, reconciliation.result);
         return;
       }
       if (
@@ -1113,11 +1187,11 @@ export class OutboxConsumer {
     switch (result.type) {
       case "succeeded":
         await this.ledger.succeeded(effectClaim, result.providerReference, result.result);
-        await this.completeOwned(controller, result.result);
+        await this.completeOwned(job, controller, result.result);
         return;
       case "permanent_failure":
         await this.ledger.failedPermanent(effectClaim);
-        await this.deadLetterOwned(controller, result.code);
+        await this.deadLetterOwned(job, controller, result.code);
         return;
       case "outcome_unknown":
         await this.ledger.outcomeUnknown(effectClaim);
@@ -1125,39 +1199,76 @@ export class OutboxConsumer {
         return;
       case "transient_failure":
         if (this.retryPolicy.exhausted(job, this.clock.now())) {
-          await this.deadLetterOwned(controller, `retry_exhausted:${result.code}`);
+          await this.deadLetterOwned(job, controller, `retry_exhausted:${result.code}`);
           return;
         }
-        await this.store.retry(
-          await controller.assertOwned(),
-          this.clock.now() + this.retryPolicy.delayMs(job.attempt, result.retryAfterMs),
-          result.code,
-        );
+        await this.retryOwned(job, controller, result.code, result.retryAfterMs);
     }
   }
 
-  private async completeOwned(controller: LeaseController, result?: JsonValue): Promise<void> {
-    await this.store.complete(await controller.assertOwned(), result);
+  private async completeOwned(
+    job: OutboxJob,
+    controller: LeaseController,
+    result?: JsonValue,
+  ): Promise<void> {
+    const lease = await controller.assertOwned();
+    if (job.kind === "workspace.export.generate") {
+      await this.store.completeWorkspaceExport(lease, this.workspaceExportSuccess(result));
+      return;
+    }
+    if (job.kind === "workspace.export.cleanup") {
+      await this.store.completeWorkspaceExportCleanup(lease, this.workspaceExportCleanup(result));
+      return;
+    }
+    await this.store.complete(lease, result);
   }
 
-  private async deadLetterOwned(controller: LeaseController, code: string): Promise<void> {
-    await this.store.deadLetter(await controller.assertOwned(), code);
+  private async deadLetterOwned(
+    job: OutboxJob,
+    controller: LeaseController,
+    code: string,
+  ): Promise<void> {
+    const lease = await controller.assertOwned();
+    if (job.kind === "workspace.export.generate") {
+      await this.store.completeWorkspaceExport(lease, { type: "failed", code });
+      return;
+    }
+    if (job.kind === "workspace.export.cleanup") {
+      await this.store.completeWorkspaceExportCleanup(lease, { type: "failed", code });
+      return;
+    }
+    await this.store.deadLetter(lease, code);
   }
 
   private async retryOwned(
     job: OutboxJob,
     controller: LeaseController,
     code: string,
+    retryAfterMs?: number,
   ): Promise<void> {
     if (this.retryPolicy.exhausted(job, this.clock.now())) {
-      await this.deadLetterOwned(controller, `retry_exhausted:${code}`);
+      await this.deadLetterOwned(job, controller, `retry_exhausted:${code}`);
       return;
     }
-    await this.store.retry(
-      await controller.assertOwned(),
-      this.clock.now() + this.retryPolicy.delayMs(job.attempt),
-      code,
-    );
+    const delayMs = this.retryPolicy.delayMs(job.attempt, retryAfterMs);
+    const lease = await controller.assertOwned();
+    if (job.kind === "workspace.export.generate") {
+      await this.store.completeWorkspaceExport(lease, {
+        type: "retry",
+        code,
+        retryAfterMs: delayMs,
+      });
+      return;
+    }
+    if (job.kind === "workspace.export.cleanup") {
+      await this.store.completeWorkspaceExportCleanup(lease, {
+        type: "retry",
+        code,
+        retryAfterMs: delayMs,
+      });
+      return;
+    }
+    await this.store.retry(lease, this.clock.now() + delayMs, code);
   }
 
   private async deferUnknown(
@@ -1166,14 +1277,78 @@ export class OutboxConsumer {
     code: string,
   ): Promise<void> {
     if (this.retryPolicy.exhausted(job, this.clock.now())) {
-      await this.deadLetterOwned(controller, `unknown_outcome_exhausted:${code}`);
+      await this.deadLetterOwned(job, controller, `unknown_outcome_exhausted:${code}`);
       return;
     }
-    await this.store.outcomeUnknown(
-      await controller.assertOwned(),
-      this.clock.now() + this.retryPolicy.delayMs(job.attempt),
-      code,
-    );
+    const delayMs = this.retryPolicy.delayMs(job.attempt);
+    const lease = await controller.assertOwned();
+    if (job.kind === "workspace.export.generate") {
+      await this.store.completeWorkspaceExport(lease, {
+        type: "outcome_unknown",
+        code,
+        retryAfterMs: delayMs,
+      });
+      return;
+    }
+    if (job.kind === "workspace.export.cleanup") {
+      await this.store.completeWorkspaceExportCleanup(lease, {
+        type: "outcome_unknown",
+        code,
+        retryAfterMs: delayMs,
+      });
+      return;
+    }
+    await this.store.outcomeUnknown(lease, this.clock.now() + delayMs, code);
+  }
+
+  private workspaceExportSuccess(result: JsonValue | undefined): WorkspaceExportCompletion {
+    if (typeof result !== "object" || result === null || Array.isArray(result)) {
+      return { type: "failed", code: "workspace_export_completion_invalid" };
+    }
+    const value = result as Readonly<Record<string, JsonValue>>;
+    if (
+      typeof value.exportId !== "string" ||
+      !SAFE_IDENTIFIER.test(value.exportId) ||
+      typeof value.exportRevision !== "number" ||
+      !Number.isSafeInteger(value.exportRevision) ||
+      value.exportRevision < 1 ||
+      typeof value.artifactKey !== "string" ||
+      value.artifactKey.length < 1 ||
+      value.artifactKey.length > 1_024 ||
+      typeof value.contentHash !== "string" ||
+      !/^[a-f0-9]{64}$/.test(value.contentHash) ||
+      typeof value.artifactVersion !== "string" ||
+      !SAFE_IDENTIFIER.test(value.artifactVersion) ||
+      typeof value.sizeBytes !== "number" ||
+      !Number.isSafeInteger(value.sizeBytes) ||
+      value.sizeBytes < 1
+    ) {
+      return { type: "failed", code: "workspace_export_completion_invalid" };
+    }
+    return {
+      type: "succeeded",
+      exportId: value.exportId,
+      exportRevision: value.exportRevision,
+      artifactKey: value.artifactKey,
+      contentHash: value.contentHash,
+      artifactVersion: value.artifactVersion,
+      sizeBytes: value.sizeBytes,
+    };
+  }
+
+  private workspaceExportCleanup(result: JsonValue | undefined): WorkspaceExportCleanupCompletion {
+    if (typeof result !== "object" || result === null || Array.isArray(result)) {
+      return { type: "failed", code: "workspace_export_cleanup_completion_invalid" };
+    }
+    const value = result as Readonly<Record<string, JsonValue>>;
+    if (
+      typeof value.exportId !== "string" ||
+      !SAFE_IDENTIFIER.test(value.exportId) ||
+      (value.cleanupDisposition !== "deleted" && value.cleanupDisposition !== "not_found")
+    ) {
+      return { type: "failed", code: "workspace_export_cleanup_completion_invalid" };
+    }
+    return { type: value.cleanupDisposition, exportId: value.exportId };
   }
 }
 

@@ -87,8 +87,8 @@ infra/scripts/restore-drill.sh \
 ```
 
 After health, the script runs a no-egress verifier against only `http://127.0.0.1:<reserved-port>`.
-It matches the database identity, initialization provenance, and canonical schema digest, proves database-owner access to all 63
-required private tables with aggregate-only queries, compares 67 bounded child/parent counts, and
+It matches the database identity, initialization provenance, and canonical schema digest, proves database-owner access to all 71
+required private tables with aggregate-only queries, compares 81 bounded child/parent counts, and
 verifies audit-to-workspace referential continuity. SQL responses are private transient files, are
 never printed, and are removed before the
 verifier exits. Because the audit model has no global sequence or external anchor, the evidence says
@@ -121,7 +121,8 @@ The signed v4 marker is deliberately not a traffic-readiness artifact. It always
 `outbox_lease_recovery_shape=NotVerified`, and `traffic_eligible=false`. A public global scan is not
 used for restore verification; a future owner-only bounded maintenance snapshot must prove the
 outbox lease invariant without creating a cross-tenant workload amplifier. The restored private
-workspace lifecycle rows are included in the table/referential checks, but
+workspace lifecycle, legal-hold, export, and notification-digest rows are included in the
+table/referential checks, but
 `deletion_lifecycle_overlay=NotConfigured` remains accurate until a drill proves downstream
 search/object/provider purge and backup-retention behavior, not merely authoritative access fencing.
 `upgrade_eligible=false` prevents this bounded evidence from authorizing a live database change.

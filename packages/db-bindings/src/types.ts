@@ -267,6 +267,14 @@ export const AuthPolicy = __t.object("AuthPolicy", {
 });
 export type AuthPolicy = __Infer<typeof AuthPolicy>;
 
+export const AuthorizeNotificationDigestInput = __t.object("AuthorizeNotificationDigestInput", {
+  claimId: __t.uuid(),
+  workerSlotId: __t.string(),
+  leaseGeneration: __t.u64(),
+  permitSeconds: __t.u32(),
+});
+export type AuthorizeNotificationDigestInput = __Infer<typeof AuthorizeNotificationDigestInput>;
+
 export const BootstrapAuthority = __t.object("BootstrapAuthority", {
   singleton: __t.u8(),
   issuer: __t.string(),
@@ -276,6 +284,15 @@ export const BootstrapAuthority = __t.object("BootstrapAuthority", {
   configuredAt: __t.timestamp(),
 });
 export type BootstrapAuthority = __Infer<typeof BootstrapAuthority>;
+
+export const ClaimNotificationDigestsInput = __t.object("ClaimNotificationDigestsInput", {
+  get occurrences() {
+    return __t.array(NotificationDigestOccurrenceInput);
+  },
+  workerSlotId: __t.string(),
+  leaseSeconds: __t.u32(),
+});
+export type ClaimNotificationDigestsInput = __Infer<typeof ClaimNotificationDigestsInput>;
 
 export const CommandReceipt = __t.object("CommandReceipt", {
   key: __t.string(),
@@ -300,6 +317,36 @@ export const CompleteAgentRunInput = __t.object("CompleteAgentRunInput", {
   usedCostMicros: __t.u64(),
 });
 export type CompleteAgentRunInput = __Infer<typeof CompleteAgentRunInput>;
+
+export const CompleteWorkspaceExportCleanupInput = __t.object("CompleteWorkspaceExportCleanupInput", {
+  exportId: __t.uuid(),
+  jobId: __t.uuid(),
+  leaseGeneration: __t.u64(),
+  workerSlotId: __t.string(),
+  get outcome() {
+    return WorkspaceExportCleanupOutcome;
+  },
+  error: __t.string(),
+  retryAfterSeconds: __t.u32(),
+});
+export type CompleteWorkspaceExportCleanupInput = __Infer<typeof CompleteWorkspaceExportCleanupInput>;
+
+export const CompleteWorkspaceExportInput = __t.object("CompleteWorkspaceExportInput", {
+  exportId: __t.uuid(),
+  jobId: __t.uuid(),
+  leaseGeneration: __t.u64(),
+  workerSlotId: __t.string(),
+  get outcome() {
+    return WorkspaceExportCompletionOutcome;
+  },
+  artifactKey: __t.string(),
+  contentHash: __t.string(),
+  artifactVersion: __t.string(),
+  sizeBytes: __t.u64(),
+  error: __t.string(),
+  retryAfterSeconds: __t.u32(),
+});
+export type CompleteWorkspaceExportInput = __Infer<typeof CompleteWorkspaceExportInput>;
 
 export const ConfigurePollInput = __t.object("ConfigurePollInput", {
   postId: __t.uuid(),
@@ -813,6 +860,170 @@ export const NotificationDeliveryState = __t.enum("NotificationDeliveryState", {
 });
 export type NotificationDeliveryState = __Infer<typeof NotificationDeliveryState>;
 
+export const NotificationDigestClaim = __t.object("NotificationDigestClaim", {
+  claimId: __t.uuid(),
+  scheduleId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  recipientIdentity: __t.identity(),
+  channel: __t.string(),
+  localDate: __t.string(),
+  scheduledFor: __t.timestamp(),
+  preferenceRevision: __t.u64(),
+  digestRevision: __t.u64(),
+  authorizationEpoch: __t.u64(),
+  overflowCount: __t.u64(),
+  get state() {
+    return NotificationDigestClaimState;
+  },
+  serviceIdentity: __t.identity(),
+  workerSlotId: __t.string(),
+  leaseGeneration: __t.u64(),
+  leaseUntil: __t.timestamp(),
+  attemptCount: __t.u32(),
+  nextAttemptAt: __t.timestamp(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type NotificationDigestClaim = __Infer<typeof NotificationDigestClaim>;
+
+// The tagged union or sum type for the algebraic type `NotificationDigestClaimState`.
+export const NotificationDigestClaimState = __t.enum("NotificationDigestClaimState", {
+  Claimed: __t.unit(),
+  Retry: __t.unit(),
+  OutcomeUnknown: __t.unit(),
+});
+export type NotificationDigestClaimState = __Infer<typeof NotificationDigestClaimState>;
+
+// The tagged union or sum type for the algebraic type `NotificationDigestCompletionOutcome`.
+export const NotificationDigestCompletionOutcome = __t.enum("NotificationDigestCompletionOutcome", {
+  Succeeded: __t.unit(),
+  Suppressed: __t.unit(),
+  TransientFailure: __t.unit(),
+  PermanentFailure: __t.unit(),
+  OutcomeUnknown: __t.unit(),
+  ReconciliationUnknown: __t.unit(),
+});
+export type NotificationDigestCompletionOutcome = __Infer<typeof NotificationDigestCompletionOutcome>;
+
+export const NotificationDigestItem = __t.object("NotificationDigestItem", {
+  notificationId: __t.uuid(),
+  scheduleId: __t.uuid(),
+  digestRevision: __t.u64(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type NotificationDigestItem = __Infer<typeof NotificationDigestItem>;
+
+export const NotificationDigestOccurrenceInput = __t.object("NotificationDigestOccurrenceInput", {
+  scheduleId: __t.uuid(),
+  localDate: __t.string(),
+  scheduledFor: __t.timestamp(),
+  expectedPreferenceRevision: __t.u64(),
+  expectedDigestRevision: __t.u64(),
+});
+export type NotificationDigestOccurrenceInput = __Infer<typeof NotificationDigestOccurrenceInput>;
+
+export const NotificationDigestOutcome = __t.object("NotificationDigestOutcome", {
+  occurrenceKey: __t.string(),
+  scheduleId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  localDate: __t.string(),
+  digestRevision: __t.u64(),
+  get outcome() {
+    return NotificationDigestTerminalOutcome;
+  },
+  providerReference: __t.string(),
+  code: __t.string(),
+  completedAt: __t.timestamp(),
+});
+export type NotificationDigestOutcome = __Infer<typeof NotificationDigestOutcome>;
+
+export const NotificationDigestPermit = __t.object("NotificationDigestPermit", {
+  claimId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  scheduleId: __t.uuid(),
+  serviceIdentity: __t.identity(),
+  workerSlotId: __t.string(),
+  leaseGeneration: __t.u64(),
+  preferenceRevision: __t.u64(),
+  digestRevision: __t.u64(),
+  authorizationEpoch: __t.u64(),
+  expiresAt: __t.timestamp(),
+  createdAt: __t.timestamp(),
+});
+export type NotificationDigestPermit = __Infer<typeof NotificationDigestPermit>;
+
+export const NotificationDigestPlanView = __t.object("NotificationDigestPlanView", {
+  claimId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  recipientIdentity: __t.identity(),
+  channel: __t.string(),
+  scheduleId: __t.uuid(),
+  localDate: __t.string(),
+  scheduledFor: __t.timestamp(),
+  preferenceRevision: __t.u64(),
+  digestRevision: __t.u64(),
+  authorizationEpoch: __t.u64(),
+  workerSlotId: __t.string(),
+  leaseGeneration: __t.u64(),
+  reconcileFirst: __t.bool(),
+  decision: __t.string(),
+  suppressionCode: __t.string(),
+  body: __t.string(),
+  itemCount: __t.u16(),
+  permitExpiresAt: __t.option(__t.timestamp()),
+});
+export type NotificationDigestPlanView = __Infer<typeof NotificationDigestPlanView>;
+
+export const NotificationDigestSchedule = __t.object("NotificationDigestSchedule", {
+  id: __t.uuid(),
+  key: __t.string(),
+  workspaceId: __t.uuid(),
+  recipientIdentity: __t.identity(),
+  preferenceKey: __t.string(),
+  channel: __t.string(),
+  timeZone: __t.string(),
+  digestLocalMinute: __t.u16(),
+  preferenceRevision: __t.u64(),
+  digestRevision: __t.u64(),
+  overflowCount: __t.u64(),
+  overflowRevision: __t.u64(),
+  lastOccurrenceLocalDate: __t.string(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type NotificationDigestSchedule = __Infer<typeof NotificationDigestSchedule>;
+
+export const NotificationDigestScheduleView = __t.object("NotificationDigestScheduleView", {
+  scheduleId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  recipientIdentity: __t.identity(),
+  channel: __t.string(),
+  timeZone: __t.string(),
+  digestLocalMinute: __t.u16(),
+  preferenceRevision: __t.u64(),
+  digestRevision: __t.u64(),
+  lastOccurrenceLocalDate: __t.string(),
+  activeClaimLocalDate: __t.string(),
+  activeClaimScheduledFor: __t.option(__t.timestamp()),
+  get activeClaimState() {
+    return __t.option(NotificationDigestClaimState);
+  },
+  activeClaimPreferenceRevision: __t.option(__t.u64()),
+  activeClaimDigestRevision: __t.option(__t.u64()),
+  activeClaimLeaseUntil: __t.option(__t.timestamp()),
+  activeClaimNextAttemptAt: __t.option(__t.timestamp()),
+});
+export type NotificationDigestScheduleView = __Infer<typeof NotificationDigestScheduleView>;
+
+// The tagged union or sum type for the algebraic type `NotificationDigestTerminalOutcome`.
+export const NotificationDigestTerminalOutcome = __t.enum("NotificationDigestTerminalOutcome", {
+  Succeeded: __t.unit(),
+  Suppressed: __t.unit(),
+  PermanentFailure: __t.unit(),
+});
+export type NotificationDigestTerminalOutcome = __Infer<typeof NotificationDigestTerminalOutcome>;
+
 export const NotificationGroup = __t.object("NotificationGroup", {
   baseKey: __t.string(),
   groupKey: __t.string(),
@@ -956,6 +1167,13 @@ export const PendingOperatorTransfer = __t.object("PendingOperatorTransfer", {
   expiresAt: __t.timestamp(),
 });
 export type PendingOperatorTransfer = __Infer<typeof PendingOperatorTransfer>;
+
+export const PlaceWorkspaceLegalHoldInput = __t.object("PlaceWorkspaceLegalHoldInput", {
+  workspaceId: __t.uuid(),
+  reason: __t.string(),
+  clientRequestId: __t.uuid(),
+});
+export type PlaceWorkspaceLegalHoldInput = __Infer<typeof PlaceWorkspaceLegalHoldInput>;
 
 export const PlatformAuditLog = __t.object("PlatformAuditLog", {
   id: __t.uuid(),
@@ -1182,6 +1400,28 @@ export const ProposeDmPromotionInput = __t.object("ProposeDmPromotionInput", {
 });
 export type ProposeDmPromotionInput = __Infer<typeof ProposeDmPromotionInput>;
 
+export const RecordNotificationDigestOutcomeInput = __t.object("RecordNotificationDigestOutcomeInput", {
+  claimId: __t.uuid(),
+  workerSlotId: __t.string(),
+  leaseGeneration: __t.u64(),
+  get outcome() {
+    return NotificationDigestCompletionOutcome;
+  },
+  reconciled: __t.bool(),
+  providerReference: __t.string(),
+  code: __t.string(),
+  retryAfterSeconds: __t.u32(),
+});
+export type RecordNotificationDigestOutcomeInput = __Infer<typeof RecordNotificationDigestOutcomeInput>;
+
+export const ReleaseWorkspaceLegalHoldInput = __t.object("ReleaseWorkspaceLegalHoldInput", {
+  holdId: __t.uuid(),
+  expectedRevision: __t.u64(),
+  releaseReason: __t.string(),
+  clientRequestId: __t.uuid(),
+});
+export type ReleaseWorkspaceLegalHoldInput = __Infer<typeof ReleaseWorkspaceLegalHoldInput>;
+
 export const ReplyAncestry = __t.object("ReplyAncestry", {
   key: __t.string(),
   ancestorId: __t.uuid(),
@@ -1190,6 +1430,12 @@ export const ReplyAncestry = __t.object("ReplyAncestry", {
   depth: __t.u32(),
 });
 export type ReplyAncestry = __Infer<typeof ReplyAncestry>;
+
+export const RequestWorkspaceExportInput = __t.object("RequestWorkspaceExportInput", {
+  workspaceId: __t.uuid(),
+  clientRequestId: __t.uuid(),
+});
+export type RequestWorkspaceExportInput = __Infer<typeof RequestWorkspaceExportInput>;
 
 export const SearchDocumentSnapshot = __t.object("SearchDocumentSnapshot", {
   effectKey: __t.string(),
@@ -1565,6 +1811,35 @@ export const VisibleUser = __t.object("VisibleUser", {
 });
 export type VisibleUser = __Infer<typeof VisibleUser>;
 
+export const VisibleWorkspaceExport = __t.object("VisibleWorkspaceExport", {
+  id: __t.uuid(),
+  workspaceId: __t.uuid(),
+  get state() {
+    return WorkspaceExportState;
+  },
+  artifactKey: __t.string(),
+  contentHash: __t.string(),
+  sizeBytes: __t.u64(),
+  expiresAt: __t.option(__t.timestamp()),
+  failureReason: __t.string(),
+  revision: __t.u64(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type VisibleWorkspaceExport = __Infer<typeof VisibleWorkspaceExport>;
+
+export const VisibleWorkspaceLegalHold = __t.object("VisibleWorkspaceLegalHold", {
+  id: __t.uuid(),
+  workspaceId: __t.uuid(),
+  get state() {
+    return WorkspaceLegalHoldState;
+  },
+  placedAt: __t.timestamp(),
+  releasedAt: __t.option(__t.timestamp()),
+  revision: __t.u64(),
+});
+export type VisibleWorkspaceLegalHold = __Infer<typeof VisibleWorkspaceLegalHold>;
+
 export const VisibleWorkspaceLifecycle = __t.object("VisibleWorkspaceLifecycle", {
   workspaceId: __t.uuid(),
   get state() {
@@ -1597,6 +1872,125 @@ export const Workspace = __t.object("Workspace", {
   updatedAt: __t.timestamp(),
 });
 export type Workspace = __Infer<typeof Workspace>;
+
+export const WorkspaceExport = __t.object("WorkspaceExport", {
+  id: __t.uuid(),
+  workspaceId: __t.uuid(),
+  requestedBy: __t.identity(),
+  get state() {
+    return WorkspaceExportState;
+  },
+  lifecycleEpoch: __t.u64(),
+  workspaceRevision: __t.u64(),
+  artifactKey: __t.string(),
+  contentHash: __t.string(),
+  artifactVersion: __t.string(),
+  sizeBytes: __t.u64(),
+  expiresAt: __t.option(__t.timestamp()),
+  failureReason: __t.string(),
+  revision: __t.u64(),
+  createdAt: __t.timestamp(),
+  updatedAt: __t.timestamp(),
+});
+export type WorkspaceExport = __Infer<typeof WorkspaceExport>;
+
+// The tagged union or sum type for the algebraic type `WorkspaceExportCleanupOutcome`.
+export const WorkspaceExportCleanupOutcome = __t.enum("WorkspaceExportCleanupOutcome", {
+  Deleted: __t.unit(),
+  NotFound: __t.unit(),
+  Retry: __t.unit(),
+  OutcomeUnknown: __t.unit(),
+  Failed: __t.unit(),
+});
+export type WorkspaceExportCleanupOutcome = __Infer<typeof WorkspaceExportCleanupOutcome>;
+
+export const WorkspaceExportCleanupPlanView = __t.object("WorkspaceExportCleanupPlanView", {
+  jobId: __t.uuid(),
+  exportId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  exportRevision: __t.u64(),
+  artifactKey: __t.string(),
+  contentHash: __t.string(),
+  artifactVersion: __t.string(),
+  sizeBytes: __t.u64(),
+  get state() {
+    return OutboxState;
+  },
+  leaseOwner: __t.option(__t.identity()),
+  workerSlotId: __t.string(),
+  leaseGeneration: __t.u64(),
+});
+export type WorkspaceExportCleanupPlanView = __Infer<typeof WorkspaceExportCleanupPlanView>;
+
+// The tagged union or sum type for the algebraic type `WorkspaceExportCompletionOutcome`.
+export const WorkspaceExportCompletionOutcome = __t.enum("WorkspaceExportCompletionOutcome", {
+  Ready: __t.unit(),
+  Retry: __t.unit(),
+  OutcomeUnknown: __t.unit(),
+  Failed: __t.unit(),
+});
+export type WorkspaceExportCompletionOutcome = __Infer<typeof WorkspaceExportCompletionOutcome>;
+
+export const WorkspaceExportExpirySchedule = __t.object("WorkspaceExportExpirySchedule", {
+  scheduledId: __t.u64(),
+  scheduledAt: __t.scheduleAt(),
+  exportId: __t.uuid(),
+  expectedRevision: __t.u64(),
+});
+export type WorkspaceExportExpirySchedule = __Infer<typeof WorkspaceExportExpirySchedule>;
+
+export const WorkspaceExportPlanView = __t.object("WorkspaceExportPlanView", {
+  jobId: __t.uuid(),
+  exportId: __t.uuid(),
+  workspaceId: __t.uuid(),
+  lifecycleEpoch: __t.u64(),
+  workspaceRevision: __t.u64(),
+  exportRevision: __t.u64(),
+  reconcileOnly: __t.bool(),
+  get state() {
+    return OutboxState;
+  },
+  leaseOwner: __t.option(__t.identity()),
+  workerSlotId: __t.string(),
+  leaseGeneration: __t.u64(),
+});
+export type WorkspaceExportPlanView = __Infer<typeof WorkspaceExportPlanView>;
+
+// The tagged union or sum type for the algebraic type `WorkspaceExportState`.
+export const WorkspaceExportState = __t.enum("WorkspaceExportState", {
+  Requested: __t.unit(),
+  Ready: __t.unit(),
+  Failed: __t.unit(),
+  Expired: __t.unit(),
+  Cleaned: __t.unit(),
+});
+export type WorkspaceExportState = __Infer<typeof WorkspaceExportState>;
+
+export const WorkspaceLegalHold = __t.object("WorkspaceLegalHold", {
+  id: __t.uuid(),
+  workspaceId: __t.uuid(),
+  get state() {
+    return WorkspaceLegalHoldState;
+  },
+  reason: __t.string(),
+  placedByIdentity: __t.identity(),
+  placedBySubject: __t.string(),
+  placedAt: __t.timestamp(),
+  releasedByIdentity: __t.option(__t.identity()),
+  releasedBySubject: __t.string(),
+  releaseReason: __t.string(),
+  releasedAt: __t.option(__t.timestamp()),
+  revision: __t.u64(),
+  updatedAt: __t.timestamp(),
+});
+export type WorkspaceLegalHold = __Infer<typeof WorkspaceLegalHold>;
+
+// The tagged union or sum type for the algebraic type `WorkspaceLegalHoldState`.
+export const WorkspaceLegalHoldState = __t.enum("WorkspaceLegalHoldState", {
+  Active: __t.unit(),
+  Released: __t.unit(),
+});
+export type WorkspaceLegalHoldState = __Infer<typeof WorkspaceLegalHoldState>;
 
 export const WorkspaceLifecycle = __t.object("WorkspaceLifecycle", {
   workspaceId: __t.uuid(),

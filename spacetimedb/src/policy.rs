@@ -41,13 +41,14 @@ pub(crate) fn workspace_lifecycle_transition_allowed(
     caller_is_owner: bool,
     grace_configured: bool,
     grace_elapsed: bool,
+    legal_hold_active: bool,
 ) -> bool {
     caller_is_owner
         && match (current, next) {
             (
                 PolicyWorkspaceLifecycleState::Active,
                 PolicyWorkspaceLifecycleState::DeletionRequested,
-            ) => grace_configured,
+            ) => grace_configured && !legal_hold_active,
             (
                 PolicyWorkspaceLifecycleState::DeletionRequested,
                 PolicyWorkspaceLifecycleState::Active,
@@ -55,9 +56,120 @@ pub(crate) fn workspace_lifecycle_transition_allowed(
             (
                 PolicyWorkspaceLifecycleState::DeletionRequested,
                 PolicyWorkspaceLifecycleState::DeletionFenced,
-            ) => grace_elapsed,
+            ) => grace_elapsed && !legal_hold_active,
             _ => false,
         }
+}
+
+pub(crate) fn workspace_export_completion_valid(
+    outcome_ready: bool,
+    artifact_key_present: bool,
+    content_hash_valid: bool,
+    size_bytes: u64,
+    error_present: bool,
+) -> bool {
+    if outcome_ready {
+        artifact_key_present
+            && content_hash_valid
+            && workspace_export_size_valid(size_bytes)
+            && !error_present
+    } else {
+        !artifact_key_present && !content_hash_valid && size_bytes == 0 && error_present
+    }
+}
+
+pub(crate) const WORKSPACE_EXPORT_MAX_SIZE_BYTES: u64 = 1_099_511_627_776;
+pub(crate) const WORKSPACE_EXPORT_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+pub(crate) const fn workspace_export_size_valid(size_bytes: u64) -> bool {
+    size_bytes > 0 && size_bytes <= WORKSPACE_EXPORT_MAX_SIZE_BYTES
+}
+
+pub(crate) fn workspace_export_artifact_key_valid(
+    workspace_id: &str,
+    export_id: &str,
+    artifact_key: &str,
+) -> bool {
+    if artifact_key.is_empty() || artifact_key.len() > 1_024 {
+        return false;
+    }
+    let prefix = format!("exports/{workspace_id}/{export_id}/");
+    let Some(suffix) = artifact_key.strip_prefix(&prefix) else {
+        return false;
+    };
+    let mut segment_count = 0usize;
+    for segment in suffix.split('/') {
+        segment_count += 1;
+        if segment_count > 32
+            || segment.is_empty()
+            || segment.len() > 128
+            || segment == "."
+            || segment == ".."
+            || segment.contains("..")
+        {
+            return false;
+        }
+        let bytes = segment.as_bytes();
+        if !bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+            || !bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+            || !bytes
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return false;
+        }
+    }
+    segment_count > 0
+}
+
+pub(crate) fn workspace_export_artifact_version_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkspaceExportMaterializationDisposition {
+    PublishReady,
+    CleanupRequired,
+}
+
+pub(crate) const fn workspace_export_materialization_disposition(
+    lifecycle_current: bool,
+    completion_within_artifact_ttl: bool,
+) -> WorkspaceExportMaterializationDisposition {
+    if lifecycle_current && completion_within_artifact_ttl {
+        WorkspaceExportMaterializationDisposition::PublishReady
+    } else {
+        WorkspaceExportMaterializationDisposition::CleanupRequired
+    }
+}
+
+pub(crate) const fn workspace_export_generation_after_fence_allowed(
+    job_already_leased: bool,
+    exact_owner: bool,
+    exact_generation: bool,
+    grant_current: bool,
+) -> bool {
+    job_already_leased && exact_owner && exact_generation && grant_current
+}
+
+pub(crate) const fn workspace_export_reconciliation_after_fence_allowed(
+    outcome_unknown: bool,
+    expired_leased: bool,
+    provider_was_attempted: bool,
+    grant_current: bool,
+) -> bool {
+    (outcome_unknown || expired_leased) && provider_was_attempted && grant_current
+}
+
+pub(crate) fn workspace_export_generation_lease_within_ttl<T: PartialOrd>(
+    proposed_expiry: T,
+    job_expiry: T,
+) -> bool {
+    proposed_expiry <= job_expiry
 }
 
 pub(crate) fn role_allows(role: PolicyRole, action: PolicyAction) -> bool {
@@ -724,6 +836,62 @@ pub(crate) fn notification_preference_valid(
     mute_valid && digest_local_minute < 1_440 && timezone_valid
 }
 
+pub(crate) fn notification_digest_local_date_valid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let parse = |start: usize, end: usize| -> Option<u32> {
+        bytes[start..end].iter().try_fold(0_u32, |value, byte| {
+            byte.is_ascii_digit()
+                .then_some(value * 10 + u32::from(byte - b'0'))
+        })
+    };
+    let (Some(year), Some(month), Some(day)) = (parse(0, 4), parse(5, 7), parse(8, 10)) else {
+        return false;
+    };
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    year > 0 && (1..=days).contains(&day)
+}
+
+pub(crate) const fn notification_digest_claim_recovery_allowed(
+    claim_preference_revision: u64,
+    claim_digest_revision: u64,
+    requested_preference_revision: u64,
+    requested_digest_revision: u64,
+    current_schedule_digest_revision: u64,
+    retry_due: bool,
+    lease_expired: bool,
+) -> bool {
+    claim_preference_revision == requested_preference_revision
+        && claim_digest_revision == requested_digest_revision
+        && current_schedule_digest_revision >= claim_digest_revision
+        && retry_due
+        && lease_expired
+}
+
+pub(crate) const fn notification_digest_item_eligible(
+    already_read: bool,
+    authority_binding_current: bool,
+) -> bool {
+    !already_read && authority_binding_current
+}
+
+pub(crate) fn notification_provider_reference_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
 pub(crate) fn notification_coalesce_binding_valid(
     same_recipient: bool,
     same_workspace: bool,
@@ -759,6 +927,8 @@ pub(crate) enum CanonicalJobKind {
     FileExtract,
     FileCleanup,
     AgentRun,
+    WorkspaceExportGenerate,
+    WorkspaceExportCleanup,
 }
 
 impl CanonicalJobKind {
@@ -772,6 +942,8 @@ impl CanonicalJobKind {
             Self::FileExtract => "file.extract",
             Self::FileCleanup => "file.cleanup",
             Self::AgentRun => "agent.run",
+            Self::WorkspaceExportGenerate => "workspace.export.generate",
+            Self::WorkspaceExportCleanup => "workspace.export.cleanup",
         }
     }
 
@@ -785,6 +957,8 @@ impl CanonicalJobKind {
             Self::FileExtract,
             Self::FileCleanup,
             Self::AgentRun,
+            Self::WorkspaceExportGenerate,
+            Self::WorkspaceExportCleanup,
         ]
         .into_iter()
         .find(|kind| kind.as_str() == value)
@@ -1115,6 +1289,19 @@ mod tests {
         assert!(notification_delivery_binding_valid(&[true, true, true]));
         assert!(!notification_delivery_binding_valid(&[true, false, true]));
         assert!(!notification_delivery_binding_valid(&[]));
+        assert!(notification_digest_local_date_valid("2024-02-29"));
+        assert!(!notification_digest_local_date_valid("2025-02-29"));
+        assert!(notification_digest_claim_recovery_allowed(
+            4, 7, 4, 7, 9, true, true
+        ));
+        assert!(!notification_digest_claim_recovery_allowed(
+            4, 7, 4, 9, 9, true, true
+        ));
+        assert!(notification_digest_item_eligible(false, true));
+        assert!(!notification_digest_item_eligible(true, true));
+        assert!(!notification_digest_item_eligible(false, false));
+        assert!(notification_provider_reference_valid("provider:message-1"));
+        assert!(!notification_provider_reference_valid("unsafe reference"));
     }
 
     #[test]
@@ -1641,6 +1828,7 @@ mod tests {
             true,
             true,
             false,
+            false,
         ));
         assert!(workspace_lifecycle_transition_allowed(
             PolicyWorkspaceLifecycleState::DeletionRequested,
@@ -1648,12 +1836,22 @@ mod tests {
             true,
             true,
             false,
+            false,
+        ));
+        assert!(workspace_lifecycle_transition_allowed(
+            PolicyWorkspaceLifecycleState::DeletionRequested,
+            PolicyWorkspaceLifecycleState::Active,
+            true,
+            true,
+            false,
+            true,
         ));
         assert!(!workspace_lifecycle_transition_allowed(
             PolicyWorkspaceLifecycleState::DeletionRequested,
             PolicyWorkspaceLifecycleState::DeletionFenced,
             true,
             true,
+            false,
             false,
         ));
         assert!(workspace_lifecycle_transition_allowed(
@@ -1662,6 +1860,7 @@ mod tests {
             true,
             true,
             true,
+            false,
         ));
         assert!(!workspace_lifecycle_transition_allowed(
             PolicyWorkspaceLifecycleState::DeletionFenced,
@@ -1669,6 +1868,108 @@ mod tests {
             true,
             true,
             true,
+            false,
         ));
+        assert!(!workspace_lifecycle_transition_allowed(
+            PolicyWorkspaceLifecycleState::Active,
+            PolicyWorkspaceLifecycleState::DeletionRequested,
+            true,
+            true,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn workspace_export_completion_requires_exact_artifact_or_error_shape() {
+        assert!(workspace_export_completion_valid(
+            true, true, true, 42, false,
+        ));
+        assert!(!workspace_export_completion_valid(
+            true, true, false, 42, false,
+        ));
+        assert!(workspace_export_completion_valid(
+            false, false, false, 0, true,
+        ));
+        assert!(!workspace_export_completion_valid(
+            false, true, false, 0, true,
+        ));
+        assert!(!workspace_export_completion_valid(
+            true,
+            true,
+            true,
+            WORKSPACE_EXPORT_MAX_SIZE_BYTES + 1,
+            false,
+        ));
+    }
+
+    #[test]
+    fn workspace_export_artifact_keys_are_canonical_and_tenant_bound() {
+        let workspace = "019-workspace";
+        let export = "019-export";
+        assert!(workspace_export_artifact_key_valid(
+            workspace,
+            export,
+            "exports/019-workspace/019-export/archive/export.tar.zst",
+        ));
+        for invalid in [
+            "exports/019-workspace/019-export/",
+            "exports/019-workspace/019-export//export.tar.zst",
+            "exports/019-workspace/019-export/./export.tar.zst",
+            "exports/019-workspace/019-export/../export.tar.zst",
+            "exports/019-workspace/019-export/archive/../../secret",
+            "exports/019-workspace/019-export/archive\\secret",
+            "exports/019-workspace/019-export/export.tar.zst?download=1",
+            "exports/019-workspace/019-export/export.tar.zst#fragment",
+            "exports/019-workspace/019-export/%2e%2e/secret",
+            "exports/019-workspace/019-export/.hidden",
+            "exports/019-workspace/019-export/archive..zst",
+            "exports/019-workspace/019-export/archive\0zst",
+            "exports/other-workspace/019-export/export.tar.zst",
+        ] {
+            assert!(!workspace_export_artifact_key_valid(
+                workspace, export, invalid
+            ));
+        }
+    }
+
+    #[test]
+    fn workspace_export_fence_race_requires_cleanup_and_versions_are_bounded() {
+        assert_eq!(WORKSPACE_EXPORT_TTL_SECONDS, 604_800);
+        assert_eq!(
+            workspace_export_materialization_disposition(true, true),
+            WorkspaceExportMaterializationDisposition::PublishReady,
+        );
+        assert_eq!(
+            workspace_export_materialization_disposition(false, true),
+            WorkspaceExportMaterializationDisposition::CleanupRequired,
+        );
+        assert_eq!(
+            workspace_export_materialization_disposition(true, false),
+            WorkspaceExportMaterializationDisposition::CleanupRequired,
+        );
+        assert!(workspace_export_artifact_version_valid("object-version:1"));
+        assert!(!workspace_export_artifact_version_valid(""));
+        assert!(!workspace_export_artifact_version_valid("version/other"));
+        assert!(workspace_export_generation_after_fence_allowed(
+            true, true, true, true,
+        ));
+        assert!(!workspace_export_generation_after_fence_allowed(
+            false, true, true, true,
+        ));
+        assert!(!workspace_export_generation_after_fence_allowed(
+            true, false, true, true,
+        ));
+        assert!(workspace_export_reconciliation_after_fence_allowed(
+            true, false, true, true,
+        ));
+        assert!(!workspace_export_reconciliation_after_fence_allowed(
+            false, false, true, true,
+        ));
+        assert!(workspace_export_reconciliation_after_fence_allowed(
+            false, true, true, true,
+        ));
+        assert!(workspace_export_generation_lease_within_ttl(10, 10));
+        assert!(!workspace_export_generation_lease_within_ttl(11, 10));
     }
 }

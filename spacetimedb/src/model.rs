@@ -1,4 +1,6 @@
-use crate::reducers::{drain_workspace_lifecycle_schedule, expire_presence_schedule};
+use crate::reducers::{
+    drain_workspace_lifecycle_schedule, expire_presence_schedule, expire_workspace_export_schedule,
+};
 use spacetimedb::{Identity, SpacetimeType, Timestamp, Uuid};
 
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +105,30 @@ pub enum NotificationDeliveryState {
 }
 
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationDigestClaimState {
+    Claimed,
+    Retry,
+    OutcomeUnknown,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationDigestCompletionOutcome {
+    Succeeded,
+    Suppressed,
+    TransientFailure,
+    PermanentFailure,
+    OutcomeUnknown,
+    ReconciliationUnknown,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationDigestTerminalOutcome {
+    Succeeded,
+    Suppressed,
+    PermanentFailure,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentCapability {
     ReadSpace,
     ReadHistory,
@@ -204,6 +230,38 @@ pub enum WorkspaceLifecycleState {
     Active,
     DeletionRequested,
     DeletionFenced,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceLegalHoldState {
+    Active,
+    Released,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceExportState {
+    Requested,
+    Ready,
+    Failed,
+    Expired,
+    Cleaned,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceExportCompletionOutcome {
+    Ready,
+    Retry,
+    OutcomeUnknown,
+    Failed,
+}
+
+#[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceExportCleanupOutcome {
+    Deleted,
+    NotFound,
+    Retry,
+    OutcomeUnknown,
+    Failed,
 }
 
 #[derive(SpacetimeType)]
@@ -384,6 +442,42 @@ pub struct SetNotificationPreferenceInput {
 }
 
 #[derive(SpacetimeType)]
+pub struct NotificationDigestOccurrenceInput {
+    pub schedule_id: Uuid,
+    pub local_date: String,
+    pub scheduled_for: Timestamp,
+    pub expected_preference_revision: u64,
+    pub expected_digest_revision: u64,
+}
+
+#[derive(SpacetimeType)]
+pub struct ClaimNotificationDigestsInput {
+    pub occurrences: Vec<NotificationDigestOccurrenceInput>,
+    pub worker_slot_id: String,
+    pub lease_seconds: u32,
+}
+
+#[derive(SpacetimeType)]
+pub struct AuthorizeNotificationDigestInput {
+    pub claim_id: Uuid,
+    pub worker_slot_id: String,
+    pub lease_generation: u64,
+    pub permit_seconds: u32,
+}
+
+#[derive(SpacetimeType)]
+pub struct RecordNotificationDigestOutcomeInput {
+    pub claim_id: Uuid,
+    pub worker_slot_id: String,
+    pub lease_generation: u64,
+    pub outcome: NotificationDigestCompletionOutcome,
+    pub reconciled: bool,
+    pub provider_reference: String,
+    pub code: String,
+    pub retry_after_seconds: u32,
+}
+
+#[derive(SpacetimeType)]
 pub struct ConfigureWorkspaceLifecycleInput {
     pub workspace_id: Uuid,
     pub deleted_content_retention_days: Option<u32>,
@@ -397,6 +491,53 @@ pub struct WorkspaceLifecycleCommandInput {
     pub workspace_id: Uuid,
     pub expected_revision: u64,
     pub client_request_id: Uuid,
+}
+
+#[derive(SpacetimeType)]
+pub struct PlaceWorkspaceLegalHoldInput {
+    pub workspace_id: Uuid,
+    pub reason: String,
+    pub client_request_id: Uuid,
+}
+
+#[derive(SpacetimeType)]
+pub struct ReleaseWorkspaceLegalHoldInput {
+    pub hold_id: Uuid,
+    pub expected_revision: u64,
+    pub release_reason: String,
+    pub client_request_id: Uuid,
+}
+
+#[derive(SpacetimeType)]
+pub struct RequestWorkspaceExportInput {
+    pub workspace_id: Uuid,
+    pub client_request_id: Uuid,
+}
+
+#[derive(SpacetimeType)]
+pub struct CompleteWorkspaceExportInput {
+    pub export_id: Uuid,
+    pub job_id: Uuid,
+    pub lease_generation: u64,
+    pub worker_slot_id: String,
+    pub outcome: WorkspaceExportCompletionOutcome,
+    pub artifact_key: String,
+    pub content_hash: String,
+    pub artifact_version: String,
+    pub size_bytes: u64,
+    pub error: String,
+    pub retry_after_seconds: u32,
+}
+
+#[derive(SpacetimeType)]
+pub struct CompleteWorkspaceExportCleanupInput {
+    pub export_id: Uuid,
+    pub job_id: Uuid,
+    pub lease_generation: u64,
+    pub worker_slot_id: String,
+    pub outcome: WorkspaceExportCleanupOutcome,
+    pub error: String,
+    pub retry_after_seconds: u32,
 }
 
 #[derive(SpacetimeType)]
@@ -582,6 +723,73 @@ pub struct WorkspaceLifecycleDrainSchedule {
     #[unique]
     pub workspace_id: Uuid,
     pub lifecycle_epoch: u64,
+}
+
+#[spacetimedb::table(
+    accessor = workspace_legal_hold,
+    private,
+    index(accessor = workspace_state, btree(columns = [workspace_id, state]))
+)]
+pub struct WorkspaceLegalHold {
+    #[primary_key]
+    pub id: Uuid,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    #[index(btree)]
+    pub state: WorkspaceLegalHoldState,
+    pub reason: String,
+    pub placed_by_identity: Identity,
+    pub placed_by_subject: String,
+    pub placed_at: Timestamp,
+    pub released_by_identity: Option<Identity>,
+    pub released_by_subject: String,
+    pub release_reason: String,
+    pub released_at: Option<Timestamp>,
+    pub revision: u64,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(
+    accessor = workspace_export,
+    private,
+    index(accessor = workspace_state, btree(columns = [workspace_id, state]))
+)]
+#[derive(Clone)]
+pub struct WorkspaceExport {
+    #[primary_key]
+    pub id: Uuid,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    #[index(btree)]
+    pub requested_by: Identity,
+    #[index(btree)]
+    pub state: WorkspaceExportState,
+    pub lifecycle_epoch: u64,
+    pub workspace_revision: u64,
+    pub artifact_key: String,
+    pub content_hash: String,
+    pub artifact_version: String,
+    pub size_bytes: u64,
+    pub expires_at: Option<Timestamp>,
+    pub failure_reason: String,
+    pub revision: u64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(
+    accessor = workspace_export_expiry_schedule,
+    private,
+    scheduled(expire_workspace_export_schedule)
+)]
+pub struct WorkspaceExportExpirySchedule {
+    #[primary_key]
+    #[auto_inc]
+    pub scheduled_id: u64,
+    pub scheduled_at: spacetimedb::ScheduleAt,
+    #[unique]
+    pub export_id: Uuid,
+    pub expected_revision: u64,
 }
 
 #[spacetimedb::table(accessor = workspace_member, private)]
@@ -1077,6 +1285,102 @@ pub struct NotificationPreference {
     pub revision: u64,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = notification_digest_schedule, private)]
+#[derive(Clone)]
+pub struct NotificationDigestSchedule {
+    #[primary_key]
+    pub id: Uuid,
+    #[unique]
+    pub key: String,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    #[index(btree)]
+    pub recipient_identity: Identity,
+    pub preference_key: String,
+    pub channel: String,
+    pub time_zone: String,
+    pub digest_local_minute: u16,
+    pub preference_revision: u64,
+    pub digest_revision: u64,
+    pub overflow_count: u64,
+    pub overflow_revision: u64,
+    pub last_occurrence_local_date: String,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = notification_digest_item, private)]
+pub struct NotificationDigestItem {
+    #[primary_key]
+    pub notification_id: Uuid,
+    #[index(btree)]
+    pub schedule_id: Uuid,
+    pub digest_revision: u64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = notification_digest_claim, private)]
+#[derive(Clone)]
+pub struct NotificationDigestClaim {
+    #[primary_key]
+    pub claim_id: Uuid,
+    #[unique]
+    pub schedule_id: Uuid,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    pub recipient_identity: Identity,
+    pub channel: String,
+    pub local_date: String,
+    pub scheduled_for: Timestamp,
+    pub preference_revision: u64,
+    pub digest_revision: u64,
+    pub authorization_epoch: u64,
+    pub overflow_count: u64,
+    pub state: NotificationDigestClaimState,
+    pub service_identity: Identity,
+    pub worker_slot_id: String,
+    pub lease_generation: u64,
+    pub lease_until: Timestamp,
+    pub attempt_count: u32,
+    pub next_attempt_at: Timestamp,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = notification_digest_permit, private)]
+pub struct NotificationDigestPermit {
+    #[primary_key]
+    pub claim_id: Uuid,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    pub schedule_id: Uuid,
+    pub service_identity: Identity,
+    pub worker_slot_id: String,
+    pub lease_generation: u64,
+    pub preference_revision: u64,
+    pub digest_revision: u64,
+    pub authorization_epoch: u64,
+    pub expires_at: Timestamp,
+    pub created_at: Timestamp,
+}
+
+#[spacetimedb::table(accessor = notification_digest_outcome, private)]
+pub struct NotificationDigestOutcome {
+    #[primary_key]
+    pub occurrence_key: String,
+    #[index(btree)]
+    pub schedule_id: Uuid,
+    #[index(btree)]
+    pub workspace_id: Uuid,
+    pub local_date: String,
+    pub digest_revision: u64,
+    pub outcome: NotificationDigestTerminalOutcome,
+    pub provider_reference: String,
+    pub code: String,
+    pub completed_at: Timestamp,
 }
 
 #[spacetimedb::table(accessor = presence_session, private)]

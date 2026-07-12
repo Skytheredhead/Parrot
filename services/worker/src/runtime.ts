@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import type { WorkerProductionPorts } from "./composition.js";
 import { workerRuntimeAdapters } from "./composition.js";
 import type { WorkerConfig } from "./config.js";
+import { DigestScheduler } from "./digest.js";
 import { SystemClock } from "./domain.js";
 import { OutboxConsumer, RetryPolicy, type RuntimeAdapter } from "./outbox.js";
 
@@ -73,6 +74,7 @@ export class WorkerHost {
   private readonly server: Server;
   private readonly adapters: readonly RuntimeAdapter[];
   private readonly consumer: OutboxConsumer;
+  private readonly digestScheduler: DigestScheduler;
   private loopPromise: Promise<void> | undefined;
   private stopPromise: Promise<void> | undefined;
   private idleController: AbortController | undefined;
@@ -86,6 +88,12 @@ export class WorkerHost {
   ) {
     const clock = new SystemClock();
     this.adapters = workerRuntimeAdapters(ports);
+    this.digestScheduler = new DigestScheduler(
+      ports.digestAuthority,
+      ports.notificationProvider,
+      config.workerId,
+      Math.max(5_000, Math.min(config.leaseMs, 300_000)),
+    );
     this.consumer = new OutboxConsumer(
       {
         workerId: config.workerId,
@@ -172,9 +180,28 @@ export class WorkerHost {
       const active = new AbortController();
       this.activeController = active;
       let processed = false;
+      let digestHealthy = true;
       try {
         processed = await this.consumer.tick(active.signal);
-        this.lastPollHealthy = true;
+        try {
+          const digest = await bounded(
+            (timeoutSignal) =>
+              this.digestScheduler.runOnce(
+                new Date(),
+                AbortSignal.any([active.signal, timeoutSignal]),
+              ),
+            Math.min(this.config.handlerTimeoutMs, 300_000),
+            "worker_digest_timeout",
+          );
+          processed = digest.claimed > 0 || processed;
+        } catch (error) {
+          if (this.state !== "running") break;
+          digestHealthy = false;
+          this.ports.logger.log("error", "worker.digest.failed", {
+            attributes: { code: error instanceof Error ? error.name : "unknown" },
+          });
+        }
+        this.lastPollHealthy = digestHealthy;
       } catch (error) {
         if (this.state !== "running") break;
         this.lastPollHealthy = false;

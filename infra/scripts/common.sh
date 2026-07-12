@@ -623,10 +623,10 @@ validate_restored_state_verification() {
   [[ "$(metadata_value "$record" module_schema_sha256)" == "$expected_schema_sha256" ]] \
     || die "restored-state module/schema identity differs from the reviewed digest"
   [[ "$(metadata_value "$record" required_private_tables)" == Pass \
-    && "$(metadata_value "$record" required_private_table_count)" == 63 ]] \
+    && "$(metadata_value "$record" required_private_table_count)" == 71 ]] \
     || die "restored-state required private-table verification did not pass"
   [[ "$(metadata_value "$record" domain_invariants)" == Pass \
-    && "$(metadata_value "$record" domain_invariant_count)" == 67 ]] \
+    && "$(metadata_value "$record" domain_invariant_count)" == 81 ]] \
     || die "restored-state domain invariants did not pass"
   [[ "$(metadata_value "$record" outbox_lease_recovery_shape)" == NotVerified ]] \
     || die "restored-state evidence must not claim outbox lease recovery verification"
@@ -681,9 +681,9 @@ validate_restore_marker() {
     && "$(metadata_value "$marker" restored_state_verification)" == Pass ]] \
     || die "restore marker initialization/schema identity evidence is invalid"
   [[ "$(metadata_value "$marker" required_private_tables)" == Pass \
-    && "$(metadata_value "$marker" required_private_table_count)" == 63 \
+    && "$(metadata_value "$marker" required_private_table_count)" == 71 \
     && "$(metadata_value "$marker" domain_invariants)" == Pass \
-    && "$(metadata_value "$marker" domain_invariant_count)" == 67 \
+    && "$(metadata_value "$marker" domain_invariant_count)" == 81 \
     && "$(metadata_value "$marker" outbox_lease_recovery_shape)" == NotVerified ]] \
     || die "restore marker bounded invariant evidence is invalid"
   [[ "$(metadata_value "$marker" audit_continuity)" == BoundedReferentialOnly \
