@@ -1,6 +1,7 @@
 services:
   spacetimedb:
     image: ${SPACETIMEDB_IMAGE:-clockworklabs/spacetime:v2.6.1@sha256:53100591a8bfd62c6e088e801b68e96871a8fc6e68eb4fb031bc6ac76f77a72e}
+    user: "10001:10001"
     command:
       - --root-dir=/stdb
       - start
