@@ -15,8 +15,8 @@
     "@project-conversation/db-bindings": "workspace:*",
     "@vitejs/plugin-react": "5.0.4",
     "@workos-inc/authkit-react": "0.16.1",
-    "react": "19.2.0",
-    "react-dom": "19.2.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
     "spacetimedb": "2.6.1",
     "vite": "6.4.3"
   },
