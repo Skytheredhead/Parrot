@@ -17,7 +17,7 @@
     "spacetimedb": "2.6.1"
   },
   "devDependencies": {
-    "esbuild": "0.25.12",
+    "esbuild": "0.28.1",
     "typescript": "7.0.2"
   }
 }
